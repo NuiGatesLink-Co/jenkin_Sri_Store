@@ -27,6 +27,12 @@ export const JOB_RETURN_CREATED = 'return.created';
 export const JOB_INVENTORY_CHECK = 'inventory.check';
 export const JOB_IDEM_CLEANUP = 'idem.cleanup';
 export const JOB_QUOTES_PURGE = 'quotes.purge';
+export const JOB_TENANT_EXPORT = 'tenant.export';
+
+export interface TenantExportJobPayload extends BaseJobPayload {
+  requestedByUserId: string;
+  ip?: string;
+}
 
 export interface SaleCreatedJobPayload extends BaseJobPayload {
   saleId: string;

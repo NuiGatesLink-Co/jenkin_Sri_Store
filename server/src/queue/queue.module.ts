@@ -13,6 +13,8 @@ import { TenantJobRunner } from './tenant-job-runner.js';
 import { SalePostProcessor } from './processors/sale-post.processor.js';
 import { InventoryProcessor } from './processors/inventory.processor.js';
 import { MaintenanceProcessor } from './processors/maintenance.processor.js';
+import { BackupProcessor } from './processors/backup.processor.js';
+import { AuditModule } from '../audit/audit.module.js';
 
 @Global()
 @Module({
@@ -49,16 +51,18 @@ import { MaintenanceProcessor } from './processors/maintenance.processor.js';
 export class QueueModule {}
 
 @Module({
-  imports: [QueueModule],
+  imports: [QueueModule, AuditModule],
   providers: [
     SalePostProcessor,
     InventoryProcessor,
     MaintenanceProcessor,
+    BackupProcessor,
   ],
   exports: [
     SalePostProcessor,
     InventoryProcessor,
     MaintenanceProcessor,
+    BackupProcessor,
   ],
 })
 export class QueueProcessorsModule {}
