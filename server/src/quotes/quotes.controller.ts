@@ -1,4 +1,14 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  HttpCode,
+  HttpStatus,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import type { Request } from 'express';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
@@ -9,6 +19,16 @@ import {
   QUEUE_MAINTENANCE,
   type QuotesPurgeJobPayload,
 } from '../queue/queue.constants.js';
+
+interface AuthenticatedRequest extends Request {
+  user?: {
+    userId?: string;
+    tenantId?: string;
+    role?: string;
+    deviceId?: string;
+    deviceRole?: string;
+  };
+}
 
 export interface PurgeQuotesDto {
   olderThanDays?: number;
@@ -23,7 +43,15 @@ export class QuotesController {
 
   @Post('purge')
   @HttpCode(HttpStatus.ACCEPTED)
-  async purgeQuotes(@Body() dto: PurgeQuotesDto) {
+  async purgeQuotes(@Req() req: AuthenticatedRequest, @Body() dto: PurgeQuotesDto) {
+    const role = req.user?.role;
+    if (role !== 'manager' && role !== 'owner') {
+      throw new ForbiddenException({
+        code: 'FORBIDDEN',
+        message: 'Manager role required',
+      });
+    }
+
     const { tenantId } = currentRequestContext();
     const olderThanDays = Math.max(1, Number(dto?.olderThanDays ?? 90));
     const correlationId = newId('quote_');

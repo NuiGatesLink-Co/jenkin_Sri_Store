@@ -264,6 +264,24 @@ describe('Worker Jobs & Queue Integration (e2e)', () => {
       );
       expect(freshQuote).toHaveLength(1);
     });
+
+    it('refuses quote purge requests from cashiers with 403 Forbidden', async () => {
+      const cashierToken = accessToken({
+        tenantId: tenantInfo.tenantId,
+        userId: tenantInfo.userId,
+        role: 'cashier',
+        deviceId: tenantInfo.posDeviceId,
+        deviceRole: 'pos',
+      });
+
+      const res = await request(fixture.app.getHttpServer())
+        .post('/api/v1/quotes/purge')
+        .set('Authorization', `Bearer ${cashierToken}`)
+        .send({ olderThanDays: 90 });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error.code).toBe('FORBIDDEN');
+    });
   });
 
   describe('AC1: Handler idempotency', () => {

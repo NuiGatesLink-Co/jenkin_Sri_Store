@@ -117,14 +117,18 @@ export function onTransactionCommit(hook: () => Promise<void> | void): void {
   store.postCommitHooks.push(hook);
 }
 
-/** Executes all registered post-commit hooks. Called ONLY by TransactionInterceptor. */
+/** Executes all registered post-commit hooks safely. Called ONLY by TransactionInterceptor. */
 export async function executePostCommitHooks(): Promise<void> {
   const store = storage.getStore();
   if (!store?.postCommitHooks || store.postCommitHooks.length === 0) return;
   const hooks = store.postCommitHooks;
   store.postCommitHooks = [];
   for (const hook of hooks) {
-    await hook();
+    try {
+      await hook();
+    } catch {
+      // Post-commit failures should never throw to disrupt response of committed transactions
+    }
   }
 }
 
