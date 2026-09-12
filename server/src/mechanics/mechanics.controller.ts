@@ -13,6 +13,8 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import type { Request } from 'express';
+import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
+import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Paginated, pageParams } from '../common/paginated.js';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
@@ -22,16 +24,24 @@ import {
   parseMechanicPatch,
 } from '../people/people.dto.js';
 import type { SaleWithItems } from '../sales/sale-reads.service.js';
+import { parseCreateCreditPayment } from './credit-payments.dto.js';
+import {
+  CreditPaymentsService,
+  type CreateCreditPaymentResult,
+} from './credit-payments.service.js';
 import { MechanicsService, type Mechanic } from './mechanics.service.js';
 
 interface AuthenticatedRequest extends Request {
-  user: { role?: string };
+  user: { userId: string; role?: string; deviceId?: string };
 }
 
 @Controller('mechanics')
 @UseGuards(TenantGuard)
 export class MechanicsController {
-  constructor(private readonly mechanics: MechanicsService) {}
+  constructor(
+    private readonly mechanics: MechanicsService,
+    private readonly creditPayments: CreditPaymentsService,
+  ) {}
 
   @Get()
   async list(
@@ -84,6 +94,34 @@ export class MechanicsController {
   ): Promise<Mechanic> {
     requireManager(req);
     return this.mechanics.update(id, parseMechanicPatch(body));
+  }
+
+  /**
+   * The mechanic pays down his tab. `pos` only — this takes cash over the counter and
+   * prints a receipt, so it belongs to the machine with the drawer (ADR-0004) — and
+   * idempotent by force: the receipt is already in the mechanic's hand by the time a
+   * retry happens.
+   *
+   * Not `requireManager`: the cashier at the counter is who takes the money, and the
+   * Dart intake dialog is on the mechanics screen with no PIN in front of it.
+   */
+  @Post(':id/credit-payments')
+  @RequireDeviceRole('pos')
+  @UseInterceptors(IdempotencyInterceptor)
+  creditPayment(
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<CreateCreditPaymentResult> {
+    // A `pos` token always carries `did` — the guard refuses this route otherwise —
+    // but the CP number depends on it, so it is checked rather than asserted.
+    if (!req.user.deviceId) {
+      throw new DeviceRoleForbiddenException();
+    }
+    return this.creditPayments.create(id, parseCreateCreditPayment(body), {
+      userId: req.user.userId,
+      deviceId: req.user.deviceId,
+    });
   }
 
   @Delete(':id')
