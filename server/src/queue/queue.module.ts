@@ -10,6 +10,9 @@ import {
   QUEUE_SALE_POST,
 } from './queue.constants.js';
 import { TenantJobRunner } from './tenant-job-runner.js';
+import { SalePostProcessor } from './processors/sale-post.processor.js';
+import { InventoryProcessor } from './processors/inventory.processor.js';
+import { MaintenanceProcessor } from './processors/maintenance.processor.js';
 
 @Global()
 @Module({
@@ -44,3 +47,18 @@ import { TenantJobRunner } from './tenant-job-runner.js';
   exports: [BullModule, TenantJobRunner],
 })
 export class QueueModule {}
+
+@Module({
+  imports: [QueueModule],
+  providers: [
+    SalePostProcessor,
+    InventoryProcessor,
+    MaintenanceProcessor,
+  ],
+  exports: [
+    SalePostProcessor,
+    InventoryProcessor,
+    MaintenanceProcessor,
+  ],
+})
+export class QueueProcessorsModule {}
