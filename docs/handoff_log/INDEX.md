@@ -2,6 +2,8 @@
 
 1 บรรทัดต่อ handoff · เรียงใหม่ → เก่า · รูปแบบตาม [`handoff-prompt-template.md`](handoff-prompt-template.md)
 
+- 2026-09-14 — [#66 `ops.3` runtime config via etcd v3](ticket-66-ops3-etcd-runtime-config.md) — `RuntimeConfigService` ใน NestJS อ่านและ watch `/pos/config/log_level` ผ่าน etcd v3 gRPC-gateway HTTP API ด้วย native `fetch` (ไม่พึ่งพา `etcd3` npm) · mutate `logger.level` แบบ real-time โดยไม่ต้อง restart app · fail-open ปลอดภัย fallback ไปใช้ `LOG_LEVEL` จาก `.env` ทันทีเมื่อ etcd unreachable — เสร็จสมบูรณ์พร้อม merge
+
 - 2026-09-14 — [#67 `cd.2` auto-deploy & rollback workflow](ticket-67-cd2-auto-deploy.md) — GitHub Actions workflow `.github/workflows/deploy.yml` (workflow_run trigger หลัง Server CI & Flutter CI สำเร็จบน main + workflow_dispatch rollback) · pre-flight check ตรวจ release images บน GHCR ผ่าน `verify-ghcr-tags.sh` (exit 0 กัน race condition) · concurrency group deploy-demo (ไม่ cancel กลางคัน) · Ansible deploy release บน environment demo — เสร็จสมบูรณ์พร้อม merge
 
 - 2026-09-13 — [#65 `cd.1` Ansible provision & deploy base](ticket-65-cd1-ansible-deploy.md) — Playbooks `provision.yml` (Docker Engine, UFW 22/80/443, deploy user, /opt/pos/ setup) + `deploy.yml` (idempotent SHA check, GHCR pull, web-sync volume update, pre-code DB migration, rolling restart api-1..3, health check) · Compose override `deploy/compose/vm.override.yml` (GHCR images, remove build:, web volume mount) · validation script `deploy/scripts/validate.sh` — เสร็จสมบูรณ์พร้อม merge

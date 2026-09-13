@@ -18,6 +18,10 @@ export interface AppConfig {
   jwtKeyId?: string;
   /** Allowed CORS origins (defaults to '*' or localhost in dev). */
   corsOrigins?: string[];
+  /** Optional etcd URL for dynamic runtime config (ADR-0013, 07_CICD_DEPLOY §8). */
+  etcdUrl?: string;
+  /** Optional etcd root password. */
+  etcdPassword?: string;
 }
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
@@ -69,5 +73,7 @@ export function loadConfig(env = process.env): AppConfig {
     corsOrigins: env.CORS_ORIGINS
       ? env.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
       : undefined,
+    etcdUrl: env.ETCD_URL,
+    etcdPassword: env.ETCD_ROOT_PASSWORD ?? env.ETCD_PASSWORD,
   };
 }

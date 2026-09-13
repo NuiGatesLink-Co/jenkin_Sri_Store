@@ -36,7 +36,9 @@ import { BackupController } from './backup/backup.controller.js';
 import { ProductsController } from './products/products.controller.js';
 import { ProductsModule } from './products/products.module.js';
 
-/** Shared infrastructure (config, logger, Postgres, both Redis) — no HTTP. */
+import { RuntimeConfigService } from './config/runtime-config.service.js';
+
+/** Shared infrastructure (config, logger, Postgres, both Redis, runtime config) — no HTTP. */
 @Module({})
 export class CoreModule {
   static forRoot(config: AppConfig, logger: Logger): DynamicModule {
@@ -46,8 +48,9 @@ export class CoreModule {
       providers: [
         { provide: APP_CONFIG, useValue: config },
         { provide: LOGGER, useValue: logger },
+        RuntimeConfigService,
       ],
-      exports: [APP_CONFIG, LOGGER],
+      exports: [APP_CONFIG, LOGGER, RuntimeConfigService],
     };
   }
 }
