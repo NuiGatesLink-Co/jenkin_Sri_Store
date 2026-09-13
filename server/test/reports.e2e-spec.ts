@@ -49,6 +49,48 @@ describe('server-side reports (e2e)', () => {
     await app.close();
   });
 
+  /*
+   * A credit note dated outside its bill's range: j1 (20 Jun, 300 = p2 1@200 cost 100
+   * + p3 1@100 cost 10) and rj1 (2 Jul, p2 1 back, refund 200, cost 100).
+   *
+   *   June  revenue 300, 1 bill, avg 300, refunds 0, net 300, items 2
+   *         gross profit 300 ÷ 1.07 = 280.3738 − 110 = 170.37
+   *   July  no bills; refunds 200, net −200, items −1
+   *         gross profit −200 ÷ 1.07 = −186.9159 + 100 = −86.92
+   *
+   * June keeps its bill; July nets the note by its own date, without its parent.
+   * Kept out of September so the top-products and by-category figures there stand.
+   */
+  it('nets a credit note in its own range, apart from a parent bill in another', async () => {
+    const june = await get('/summary?from=2026-06&to=2026-06');
+    expect(june.status).toBe(200);
+    expect(june.body.data).toEqual({
+      totalRevenue: '300.00',
+      totalTransactions: 1,
+      avgTicket: '300.00',
+      totalRefunds: '0.00',
+      netRevenue: '300.00',
+      totalItems: 2,
+      grossProfit: '170.37',
+      estimatedCostRows: 0,
+      unknownCostRows: 0,
+    });
+
+    const july = await get('/summary?from=2026-07&to=2026-07');
+    expect(july.status).toBe(200);
+    expect(july.body.data).toEqual({
+      totalRevenue: '0.00',
+      totalTransactions: 0,
+      avgTicket: '0.00',
+      totalRefunds: '200.00',
+      netRevenue: '-200.00',
+      totalItems: -1,
+      grossProfit: '-86.92',
+      estimatedCostRows: 0,
+      unknownCostRows: 0,
+    });
+  });
+
   it('matches the client KPI arithmetic and nets credit notes from revenue and quantity', async () => {
     const month = await get('/summary?from=2026-09&to=2026-09');
     expect(month.status).toBe(200);
@@ -59,6 +101,10 @@ describe('server-side reports (e2e)', () => {
       totalRefunds: '100.00',
       netRevenue: '400.00',
       totalItems: 3,
+      // (500 − 100) ÷ 1.07 = 373.8318 − (s1 2×50 + s2 50 + 100 − r1 50 = 200)
+      grossProfit: '173.83',
+      estimatedCostRows: 0,
+      unknownCostRows: 0,
     });
 
     const day = await get('/summary?from=2026-09-01&to=2026-09-01');
@@ -68,6 +114,42 @@ describe('server-side reports (e2e)', () => {
       totalRefunds: '0.00',
       netRevenue: '200.00',
       totalItems: 2,
+      // 200 ÷ 1.07 = 186.9159 − 2×50 (r1 is dated 20 Sep, outside this day)
+      grossProfit: '86.92',
+    });
+  });
+
+  /*
+   * #95 — August holds the three kinds of bill the summary must tell apart:
+   *
+   *   a1  counted   350: p2 1@200 (cost_at_sale 100), p3 1@100 (null → today's 10),
+   *                      'gone' 1@50 (null, no product row → 0)
+   *   a2  manual void 400: p1 4@100 — voided with no credit note, excluded
+   *   a3  auto-void   200: p1 2@100 (cost 50) — voided by ra3, its full return, counted
+   *   ra3 credit note 200: p1 2 (cost 50)
+   *
+   *   revenue 350 + 200 = 550 over 2 bills, avg 275; refunds 200; net 350
+   *   items (3 + 2) − 2 = 3
+   *   gross profit (550 − 200) ÷ 1.07 = 327.1028 − (100 + 10 + 0 + 100 − 100 = 110) = 217.10
+   *
+   * #29's query counted a2 too: revenue 950, 3 bills, avg 317, net 750, items 7 — a
+   * response whose revenue and gross profit came from two different sets of bills.
+   * Falsified by dropping `AND ${COUNTED_SALE}` from gp_sales: those #29 figures return,
+   * with grossProfit 390.93.
+   */
+  it('builds every summary figure, gross profit included, from one set of bills', async () => {
+    const res = await get('/summary?from=2026-08&to=2026-08');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual({
+      totalRevenue: '550.00',
+      totalTransactions: 2,
+      avgTicket: '275.00',
+      totalRefunds: '200.00',
+      netRevenue: '350.00',
+      totalItems: 3,
+      grossProfit: '217.10',
+      estimatedCostRows: 1,
+      unknownCostRows: 1,
     });
   });
 
@@ -245,6 +327,74 @@ describe('server-side reports (e2e)', () => {
       `INSERT INTO return_items
               (tenant_id, return_id, line_no, product_id, name, qty, price, original_qty, cost_at_sale)
        VALUES ($1::uuid, 'r1', 1, 'p1', 'Brake Pad', 1, 100, 2, 50)`,
+      [TENANT_A],
+    );
+
+    // June bill, July partial credit note (#95): a note outside its bill's range.
+    await admin.query(
+      `INSERT INTO sales
+              (tenant_id, id, receipt_no, subtotal, discount, total, payment_method, date)
+       VALUES ($1::uuid, 'j1', 'RC-A-J1', 300, 0, 300, 'เงินสด', '2026-06-20T10:00:00+07')`,
+      [TENANT_A],
+    );
+    await admin.query(
+      `INSERT INTO sale_items
+              (tenant_id, sale_id, line_no, product_id, part_no, name, qty, price, cost_at_sale)
+       VALUES ($1::uuid, 'j1', 1, 'p2', 'OIL-1', 'Oil', 1, 200, 100),
+              ($1::uuid, 'j1', 2, 'p3', 'FILTER-1', 'Filter', 1, 100, 10)`,
+      [TENANT_A],
+    );
+    await admin.query(
+      `INSERT INTO returns
+              (tenant_id, id, cn_no, sale_id, receipt_no, refund_subtotal,
+               refund_discount, refund_total, refund_method, date)
+       VALUES ($1::uuid, 'rj1', 'CN-A-J1', 'j1', 'RC-A-J1', 200, 0, 200, 'เงินสด',
+               '2026-07-02T10:00:00+07')`,
+      [TENANT_A],
+    );
+    await admin.query(
+      `INSERT INTO return_items
+              (tenant_id, return_id, line_no, product_id, name, qty, price, original_qty, cost_at_sale)
+       VALUES ($1::uuid, 'rj1', 1, 'p2', 'Oil', 1, 200, 1, 100)`,
+      [TENANT_A],
+    );
+
+    // August (#95): a counted bill with estimated and unknown cost lines, a manual
+    // void, and a bill auto-voided by its full return.
+    await admin.query(
+      `INSERT INTO sales
+              (tenant_id, id, receipt_no, subtotal, discount, total, payment_method, date,
+               voided, voided_at)
+       VALUES ($1::uuid, 'a1', 'RC-A-A1', 350, 0, 350, 'เงินสด', '2026-08-03T10:00:00+07',
+               FALSE, NULL),
+              ($1::uuid, 'a2', 'RC-A-A2', 400, 0, 400, 'เงินสด', '2026-08-10T10:00:00+07',
+               TRUE, '2026-08-10T10:05:00+07'),
+              ($1::uuid, 'a3', 'RC-A-A3', 200, 0, 200, 'เงินสด', '2026-08-12T10:00:00+07',
+               TRUE, '2026-08-12T11:00:00+07')`,
+      [TENANT_A],
+    );
+    await admin.query(
+      `INSERT INTO sale_items
+              (tenant_id, sale_id, line_no, product_id, part_no, name, qty, price, cost_at_sale)
+       VALUES ($1::uuid, 'a1', 1, 'p2', 'OIL-1', 'Oil', 1, 200, 100),
+              ($1::uuid, 'a1', 2, 'p3', 'FILTER-1', 'Filter', 1, 100, NULL),
+              ($1::uuid, 'a1', 3, 'gone', 'GONE', 'Deleted part', 1, 50, NULL),
+              ($1::uuid, 'a2', 1, 'p1', 'BRAKE-1', 'Brake Pad', 4, 100, 50),
+              ($1::uuid, 'a3', 1, 'p1', 'BRAKE-1', 'Brake Pad', 2, 100, 50)`,
+      [TENANT_A],
+    );
+    await admin.query(
+      `INSERT INTO returns
+              (tenant_id, id, cn_no, sale_id, receipt_no, refund_subtotal,
+               refund_discount, refund_total, refund_method, date)
+       VALUES ($1::uuid, 'ra3', 'CN-A-A3', 'a3', 'RC-A-A3', 200, 0, 200, 'เงินสด',
+               '2026-08-12T11:00:00+07')`,
+      [TENANT_A],
+    );
+    await admin.query(
+      `INSERT INTO return_items
+              (tenant_id, return_id, line_no, product_id, name, qty, price, original_qty, cost_at_sale)
+       VALUES ($1::uuid, 'ra3', 1, 'p1', 'Brake Pad', 2, 100, 2, 50)`,
       [TENANT_A],
     );
   }

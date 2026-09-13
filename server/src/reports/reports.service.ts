@@ -9,6 +9,10 @@ export interface ReportSummary {
   totalRefunds: string;
   netRevenue: string;
   totalItems: number;
+  /** Same formula and flags as `ClosingReport`, over the same bills as `totalRevenue`. */
+  grossProfit: string;
+  estimatedCostRows: number;
+  unknownCostRows: number;
 }
 
 /** `GET /reports/closing?shiftId=` — one drawer, keyed by `shift_id` only. */
@@ -77,6 +81,9 @@ interface SummaryRow {
   total_refunds: string;
   net_revenue: string;
   total_items: number;
+  gross_profit: string;
+  estimated_cost_rows: number;
+  unknown_cost_rows: number;
 }
 
 interface ClosingRow {
@@ -117,7 +124,11 @@ const COUNTED_SALE = `NOT (s.voided AND NOT EXISTS (
    WHERE rv.tenant_id = $1::uuid AND rv.tenant_id = s.tenant_id AND rv.sale_id = s.id))`;
 
 /**
- * Gross profit over one shift's bills and credit notes (`$2` is the shift id):
+ * Gross profit over the counted bills and the credit notes chosen by two constant SQL
+ * predicates (on `sales s` and `returns r`; never request input) — one shift for the
+ * closing report, a date range for the summary, which also takes its revenue, refunds
+ * and item totals from `gp_sales`, `gp_returns` and `gp_lines` so every figure in one
+ * response comes from one set of bills:
  *
  *   (Σ sales.total − Σ returns.refund_total) ÷ (1 + tax_rate/100)
  *   − Σ sale-line qty × cost + Σ return-line qty × cost
@@ -130,24 +141,26 @@ const COUNTED_SALE = `NOT (s.voided AND NOT EXISTS (
  * `products.cost` only for null rows. `settings.tax_rate` defaults to 7 like the
  * column and the client.
  */
-const GROSS_PROFIT = `
+const grossProfitCtes = (saleScope: string, returnScope: string): string => `
 gp_sales AS (
-  SELECT s.id, s.total FROM sales s
-   WHERE s.tenant_id = $1::uuid AND s.shift_id = $2 AND ${COUNTED_SALE}
+  SELECT s.tenant_id, s.id, s.total FROM sales s
+   WHERE s.tenant_id = $1::uuid AND ${saleScope} AND ${COUNTED_SALE}
 ),
 gp_returns AS (
-  SELECT r.id, r.refund_total FROM returns r
-   WHERE r.tenant_id = $1::uuid AND r.shift_id = $2
+  SELECT r.tenant_id, r.id, r.refund_total FROM returns r
+   WHERE r.tenant_id = $1::uuid AND ${returnScope}
 ),
 gp_lines AS (
   SELECT si.qty, si.cost_at_sale, p.cost AS current_cost
     FROM gp_sales s
-    JOIN sale_items si ON si.tenant_id = $1::uuid AND si.sale_id = s.id
+    JOIN sale_items si
+      ON si.tenant_id = $1::uuid AND si.tenant_id = s.tenant_id AND si.sale_id = s.id
     LEFT JOIN products p ON p.tenant_id = $1::uuid AND p.id = si.product_id
   UNION ALL
   SELECT -ri.qty, ri.cost_at_sale, p.cost
     FROM gp_returns r
-    JOIN return_items ri ON ri.tenant_id = $1::uuid AND ri.return_id = r.id
+    JOIN return_items ri
+      ON ri.tenant_id = $1::uuid AND ri.tenant_id = r.tenant_id AND ri.return_id = r.id
     LEFT JOIN products p ON p.tenant_id = $1::uuid AND p.id = ri.product_id
 ),
 gross_profit AS (
@@ -299,40 +312,18 @@ export class ReportsService {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `WITH ${BOUNDS},
+       ${grossProfitCtes(
+         's.date >= (SELECT from_at FROM bounds) AND s.date < (SELECT to_at FROM bounds)',
+         'r.date >= (SELECT from_at FROM bounds) AND r.date < (SELECT to_at FROM bounds)',
+       )},
        sale_totals AS (
-         SELECT COALESCE(sum(s.total), 0)::numeric(20,2) AS revenue,
-                count(s.id)::int AS transactions
-           FROM bounds b
-           LEFT JOIN sales s
-             ON s.tenant_id = $1::uuid
-            AND s.date >= b.from_at AND s.date < b.to_at
-       ),
-       sale_quantity AS (
-         SELECT COALESCE(sum(si.qty), 0)::int AS quantity
-           FROM bounds b
-           JOIN sales s
-             ON s.tenant_id = $1::uuid
-            AND s.date >= b.from_at AND s.date < b.to_at
-           JOIN sale_items si
-             ON si.tenant_id = $1::uuid
-            AND si.tenant_id = s.tenant_id AND si.sale_id = s.id
+         SELECT COALESCE(sum(total), 0)::numeric(20,2) AS revenue,
+                count(*)::int AS transactions
+           FROM gp_sales
        ),
        return_totals AS (
-         SELECT COALESCE(sum(r.refund_total), 0)::numeric(20,2) AS refunds
-           FROM bounds b
-           LEFT JOIN returns r
-             ON r.tenant_id = $1::uuid
-            AND r.date >= b.from_at AND r.date < b.to_at
-       ),
-       return_quantity AS (
-         SELECT COALESCE(sum(ri.qty), 0)::int AS quantity
-           FROM bounds b
-           JOIN returns r
-             ON r.tenant_id = $1::uuid
-            AND r.date >= b.from_at AND r.date < b.to_at
-           JOIN return_items ri
-             ON ri.tenant_id = $1::uuid
-            AND ri.tenant_id = r.tenant_id AND ri.return_id = r.id
+         SELECT COALESCE(sum(refund_total), 0)::numeric(20,2) AS refunds
+           FROM gp_returns
        )
        SELECT s.revenue AS total_revenue,
               s.transactions AS total_transactions,
@@ -341,9 +332,11 @@ export class ReportsService {
                END::numeric(20,2) AS average_ticket,
               r.refunds AS total_refunds,
               (s.revenue - r.refunds)::numeric(20,2) AS net_revenue,
-              (sq.quantity - rq.quantity)::int AS total_items
-         FROM sale_totals s CROSS JOIN sale_quantity sq
-         CROSS JOIN return_totals r CROSS JOIN return_quantity rq`,
+              -- Sale lines are positive and credit-note lines negative in gp_lines.
+              (SELECT COALESCE(sum(qty), 0) FROM gp_lines)::int AS total_items,
+              gp.gross_profit, gp.estimated_cost_rows, gp.unknown_cost_rows
+         FROM sale_totals s CROSS JOIN return_totals r
+         CROSS JOIN gross_profit gp`,
       rangeParams(tenantId, range),
     )) as SummaryRow[];
     const row = rows[0];
@@ -354,6 +347,9 @@ export class ReportsService {
       totalRefunds: row.total_refunds,
       netRevenue: row.net_revenue,
       totalItems: row.total_items,
+      grossProfit: row.gross_profit,
+      estimatedCostRows: row.estimated_cost_rows,
+      unknownCostRows: row.unknown_cost_rows,
     };
   }
 
@@ -394,7 +390,7 @@ export class ReportsService {
            (SELECT COALESCE(sum(amount) FILTER (WHERE type = 'out'), 0) FROM drawer_entries
              WHERE tenant_id = $1::uuid AND shift_id = $2) AS drawer_out
        ),
-       ${GROSS_PROFIT},
+       ${grossProfitCtes('s.shift_id = $2', 'r.shift_id = $2')},
        expected AS (
          SELECT (sh.starting_cash + c.cash_sales + c.cash_credit_payments
                  - c.cash_refunds + c.drawer_in - c.drawer_out) AS expected_cash
