@@ -463,7 +463,14 @@ idempotent. Restores stock, writes a `movements` row per product (`type='void'`,
 writes a Thai note on this path), reverses the customer and mechanic ledger in full,
 marks the bill void and writes an `audit_log` row. Refused when the bill is already void
 (`409 SALE_VOIDED`) or already has a credit note against it (`409 SALE_HAS_RETURNS` —
-voiding then would restore that stock twice).
+voiding then would restore that stock twice). **#94:** also refused unless the bill's
+`shift_id` is the calling device's open drawer — `409 NO_OPEN_SHIFT` with no drawer,
+`409 SALE_NOT_IN_OPEN_SHIFT` for a bill from a closed shift, another device's shift, or
+with a null `shift_id` — so a closed shift's report never changes afterwards; an older
+bill is undone by a credit note. The check runs after `SALE_VOIDED`/`SALE_HAS_RETURNS`
+(a key replay is answered by the interceptor first) and reads the drawer `FOR SHARE`
+between the sale lock and the mechanic lock, so a close waits for a void in flight.
+Not audited: the PIN is already proven, like the other business-rule refusals.
 
 Refusals are audited too (`sale.void.denied`, with the reason). This is a four-digit PIN
 with no per-user rate limit until #44; brute-forcing it must not be invisible. That row is
