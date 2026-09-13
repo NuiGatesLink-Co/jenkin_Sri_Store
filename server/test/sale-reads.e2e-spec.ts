@@ -629,6 +629,50 @@ describe('sale reads and void (e2e)', () => {
     expect(await stockOf('p1')).toBe(39);
   });
 
+  it("#100: after today's close the counter's credit note is refused for cash, not lost", async () => {
+    const sale = await ringUp(2);
+    expect((await drawer('close', { physicalCash: '170.00' })).status).toBe(
+      200,
+    );
+    const report = async () => {
+      const res = await get(`/reports/closing?shiftId=${openShiftId}`);
+      expect(res.status).toBe(200);
+      return res.body.data as Record<string, unknown>;
+    };
+    const counted = await report();
+
+    const voided = await voidSale(sale.id, { pin: PIN });
+    expect(voided.status).toBe(409);
+    expect(voided.body.error.code).toBe('NO_OPEN_SHIFT');
+
+    const refund = (refundMethod: string) =>
+      request(app.getHttpServer())
+        .post('/api/v1/returns')
+        .set('Authorization', `Bearer ${posToken}`)
+        .set('Idempotency-Key', `k-return-${++keySeq}-${Date.now()}`)
+        .send({
+          saleId: sale.id,
+          refundMethod,
+          items: [
+            { productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' },
+          ],
+        });
+
+    // Before #100 this was a 201 stamped `shift_id` null: cash out of the drawer that
+    // no closing report showed.
+    const cash = await refund('เงินสด');
+    expect(cash.status).toBe(409);
+    expect(cash.body.error.code).toBe('NO_OPEN_SHIFT');
+    expect(await stockOf('p1')).toBe(38);
+
+    // A transfer does not touch the drawer, so it is still taken — with no shift.
+    const transfer = await refund('โอน');
+    expect(transfer.status).toBe(201);
+    expect(transfer.body.data.shiftId).toBeNull();
+    expect(await stockOf('p1')).toBe(39);
+    expect(await report()).toEqual(counted);
+  });
+
   it("#94: refuses a bill with no shift, or from another device's open shift", async () => {
     const imported = await ringUp(1);
     await admin.query(

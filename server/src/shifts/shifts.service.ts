@@ -290,11 +290,18 @@ export class ShiftsService {
 
   /**
    * The shift id to stamp on a document this device is writing right now, or null if
-   * the drawer was never opened. Only `POST /returns` still uses it; money coming *in*
-   * goes through `requireOpenShiftIdFor`, which refuses instead.
+   * the drawer was never opened. Only a non-cash `POST /returns` still uses it; money
+   * crossing the drawer goes through `requireOpenShiftIdFor`, which refuses instead.
    *
    * The closing report is computed **by `shift_id`**, never by a timestamp window: a
    * window breaks across midnight and cannot separate two machines.
+   *
+   * 🔴 **`FOR SHARE`, for the same reason as `requireOpenShiftIdFor`** (#100 review). A
+   * transfer refund moves no expected cash, but the closing report's `grossProfit` nets
+   * refunds of every method; unlocked, a `close()` could commit between this read and the
+   * insert and the credit note would land on — and change — a shift already counted.
+   * Locked, the close waits, or the refund reads the row after it and stamps null. Over
+   * zero rows the lock takes nothing and the answer is null, as before.
    */
   async currentShiftIdFor(
     manager: EntityManager,
@@ -305,7 +312,8 @@ export class ShiftsService {
       `SELECT id FROM shifts
         WHERE tenant_id = $1::uuid AND device_id = $2 AND is_active AND closed_at IS NULL
         ORDER BY opened_at DESC
-        LIMIT 1`,
+        LIMIT 1
+          FOR SHARE`,
       [tenantId, deviceId],
     )) as { id: string }[];
     return rows.length === 0 ? null : rows[0].id;
@@ -315,10 +323,10 @@ export class ShiftsService {
    * The shift id to stamp on money this device is taking right now — or
    * `409 NO_OPEN_SHIFT`. `POST /sales` and `POST /mechanics/:id/credit-payments` use
    * this, for every payment method (and `POST /sales/:id/void`, #94, to compare against
-   * the bill's own shift): the owner's rule (2026-09-13) is that money is only
-   * taken while this device's drawer is open, because money stamped with no shift lands
-   * in no closing report. "Open" is `closed_at IS NULL`, so a drawer that was closed and
-   * not yet archived by the next open refuses too.
+   * the bill's own shift; and a `'เงินสด'` `POST /returns`, #100): the owner's rule
+   * (2026-09-13) is that money is only taken while this device's drawer is open, because
+   * money stamped with no shift lands in no closing report. "Open" is `closed_at IS NULL`,
+   * so a drawer that was closed and not yet archived by the next open refuses too.
    *
    * 🔴 **`FOR SHARE`, not a plain read.** Unlocked, a bill can read the drawer open,
    * `close()` can commit the counted cash, and the bill then commits stamped onto a shift
@@ -327,8 +335,8 @@ export class ShiftsService {
    * close re-checks the row once the close commits, finds `closed_at` set, and is
    * refused. `SHARE` rather than `UPDATE` so bills on one till do not serialise on each
    * other. Shared locks never wait on each other, which is why this lock's place relative
-   * to the mechanic's row (after it on a credit payment, before it on a sale or a void,
-   * where it follows the bill's own row lock) cannot
+   * to the mechanic's row (after it on a credit payment, before it on a sale, a void or
+   * any refund, where it follows the bill's own row lock) cannot
    * deadlock: the only exclusive holders — open, close, drawer entries, retirement —
    * take no other money-path lock. Keep it that way.
    */

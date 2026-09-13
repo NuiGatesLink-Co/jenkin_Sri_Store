@@ -7,6 +7,7 @@ import {
   resetTenant,
   seedCustomer,
   seedMechanic,
+  seedOpenShift,
   seedProduct,
   type TenantFixture,
 } from './support/fixture.js';
@@ -39,6 +40,7 @@ describe('POST /returns (e2e)', () => {
   let fixture: TenantFixture;
   let posToken: string;
   let backofficeToken: string;
+  let drawerId: string;
 
   const post = (body: unknown, opts: { key?: string; token?: string } = {}) =>
     request(app.getHttpServer())
@@ -184,6 +186,11 @@ describe('POST /returns (e2e)', () => {
       role: 'manager',
       deviceId: fixture.backofficeDeviceId,
       deviceRole: 'backoffice',
+    });
+    // A cash refund needs this device's open drawer (#100), and most cases here refund
+    // cash. The cases about refunding without one close or remove it themselves.
+    drawerId = await seedOpenShift(admin, TENANT, fixture.posDeviceId, {
+      userId: fixture.userId,
     });
     await seedProduct(admin, TENANT, {
       id: 'p1',
@@ -782,13 +789,8 @@ describe('POST /returns (e2e)', () => {
   });
 
   it("stamps the device's open drawer on the credit note", async () => {
-    const shift = await request(app.getHttpServer())
-      .post('/api/v1/shifts/open')
-      .set('Authorization', `Bearer ${posToken}`)
-      .set('Idempotency-Key', `k-${Math.random()}`)
-      .send({ startingCash: '2000.00' });
-    expect(shift.status).toBe(200);
-
+    // Another till's open drawer must not be the one stamped.
+    await seedOpenShift(admin, TENANT, 'another-till');
     await insertSale({
       id: 's_shift',
       receiptNo: 'R14',
@@ -803,35 +805,256 @@ describe('POST /returns (e2e)', () => {
     );
 
     expect(res.status).toBe(201);
-    expect(res.body.data.shiftId).toBe(shift.body.data.id);
+    expect(res.body.data.shiftId).toBe(drawerId);
     const rows = await admin.query(
       `SELECT shift_id FROM returns WHERE tenant_id = $1::uuid AND id = $2`,
       [TENANT, res.body.data.id],
     );
-    expect(rows[0].shift_id).toBe(shift.body.data.id);
+    expect(rows[0].shift_id).toBe(drawerId);
   });
 
-  it('a credit note with no drawer open carries no shift_id', async () => {
-    await insertSale({
-      id: 's_noshift',
-      receiptNo: 'R24',
-      subtotal: 85,
-      total: 85,
-      items: [{ productId: 'p1', name: 'Oil Filter', qty: 1, price: 85 }],
-    });
-    const res = await post(
-      credit('s_noshift', [
-        { productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' },
-      ]),
-    );
+  // ── #100 (owner's decision, 2026-09-13): no open drawer, no cash refund ──
+  describe('with no open drawer (#100)', () => {
+    const removeDrawer = () =>
+      admin.query(`DELETE FROM shifts WHERE tenant_id = $1::uuid`, [TENANT]);
 
-    expect(res.status).toBe(201);
-    expect(res.body.data.shiftId).toBeNull();
-    const rows = await admin.query(
-      `SELECT shift_id FROM returns WHERE tenant_id = $1::uuid AND id = $2`,
-      [TENANT, res.body.data.id],
-    );
-    expect(rows[0].shift_id).toBeNull();
+    const movementCount = async (): Promise<number> => {
+      const rows = await admin.query(
+        `SELECT count(*)::int AS n FROM movements WHERE tenant_id = $1::uuid`,
+        [TENANT],
+      );
+      return rows[0].n as number;
+    };
+
+    it('refuses a cash refund with 409 NO_OPEN_SHIFT and writes nothing', async () => {
+      await removeDrawer();
+      await insertSale({
+        id: 's_noshift',
+        receiptNo: 'R24',
+        subtotal: 85,
+        total: 85,
+        items: [{ productId: 'p1', name: 'Oil Filter', qty: 1, price: 85 }],
+      });
+      const body = credit('s_noshift', [
+        { productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' },
+      ]);
+      const key = `k-noshift-${Date.now()}`;
+
+      const res = await post(body, { key });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
+      expect(await returnCount()).toBe(0);
+      expect(await movementCount()).toBe(0);
+      expect(await stockOf('p1')).toBe(48);
+      // A full return would have auto-voided the bill; refused, it is untouched.
+      expect((await saleRow('s_noshift')).voided).toBe(false);
+
+      // A bad body is still told what is wrong with it, drawer or not.
+      const over = await post(
+        credit('s_noshift', [
+          { productId: 'p1', name: 'Oil Filter', qty: 2, price: '85.00' },
+        ]),
+      );
+      expect(over.status).toBe(409);
+      expect(over.body.error.code).toBe('OVER_REFUND');
+
+      // A drawer appears and the same key is pressed again: the refused claim rolled
+      // back with the transaction, and no CN number was consumed by the refusal. The
+      // shift is SEEDED on purpose — the drawer was never opened here. After today's
+      // close a same-day `POST /shifts/open` hands back the closed row, so there a cash
+      // refund waits for tomorrow's open; that path is not what this case pins.
+      await seedOpenShift(admin, TENANT, fixture.posDeviceId, {
+        id: 'sh_late',
+      });
+      const retry = await post(body, { key });
+      expect(retry.status).toBe(201);
+      expect(retry.body.data.shiftId).toBe('sh_late');
+      expect(retry.body.data.cnNo).toMatch(/-0001$/);
+      expect(await stockOf('p1')).toBe(49);
+    });
+
+    it('refuses a cash refund once the drawer is closed', async () => {
+      await insertSale({
+        id: 's_closed',
+        receiptNo: 'R25',
+        subtotal: 170,
+        total: 170,
+        items: [{ productId: 'p1', name: 'Oil Filter', qty: 2, price: 85 }],
+      });
+      const close = await request(app.getHttpServer())
+        .post('/api/v1/shifts/close')
+        .set('Authorization', `Bearer ${posToken}`)
+        .set('Idempotency-Key', `k-${Math.random()}`)
+        .send({ physicalCash: '0.00' });
+      expect(close.status).toBe(200);
+
+      const res = await post(
+        credit('s_closed', [
+          { productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' },
+        ]),
+      );
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
+      expect(await returnCount()).toBe(0);
+      expect(await stockOf('p1')).toBe(48);
+    });
+
+    it('takes a transfer refund with no drawer, stamped with no shift_id', async () => {
+      await removeDrawer();
+      await insertSale({
+        id: 's_transfer',
+        receiptNo: 'R26',
+        subtotal: 85,
+        total: 85,
+        items: [{ productId: 'p1', name: 'Oil Filter', qty: 1, price: 85 }],
+      });
+      const res = await post(
+        credit(
+          's_transfer',
+          [{ productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' }],
+          'โอน',
+        ),
+      );
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.shiftId).toBeNull();
+      const rows = await admin.query(
+        `SELECT shift_id FROM returns WHERE tenant_id = $1::uuid AND id = $2`,
+        [TENANT, res.body.data.id],
+      );
+      expect(rows[0].shift_id).toBeNull();
+      expect(await stockOf('p1')).toBe(49);
+    });
+
+    it('takes หักจากเครดิต with no drawer, stamped with no shift_id', async () => {
+      await removeDrawer();
+      await seedMechanic(admin, TENANT, {
+        id: 'm_nodrawer',
+        code: 'M010',
+        name: 'No Drawer Mechanic',
+        creditLimit: 20000,
+        creditBalance: 500,
+        totalSales: 1000,
+      });
+      await insertSale({
+        id: 's_deduct',
+        receiptNo: 'R27',
+        subtotal: 200,
+        total: 200,
+        paymentMethod: 'เครดิตช่าง',
+        mechanicId: 'm_nodrawer',
+        mechanicName: 'No Drawer Mechanic',
+        mechanicDelta: 0,
+        items: [{ productId: 'p1', name: 'Oil Filter', qty: 1, price: 200 }],
+      });
+      const res = await post(
+        credit(
+          's_deduct',
+          [{ productId: 'p1', name: 'Oil Filter', qty: 1, price: '200.00' }],
+          'หักจากเครดิต',
+        ),
+      );
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.shiftId).toBeNull();
+      expect(res.body.data.mechanicCreditBalanceAfter).toBe('300.00');
+    });
+
+    it('a transfer refund racing a close waits for it, and is not stamped onto the counted shift', async () => {
+      // The closing report's `grossProfit` nets refunds of every method, so a transfer
+      // stamped onto a shift whose close committed under it changes a counted report.
+      await insertSale({
+        id: 's_race',
+        receiptNo: 'R29',
+        subtotal: 85,
+        total: 85,
+        items: [{ productId: 'p1', name: 'Oil Filter', qty: 1, price: 85 }],
+      });
+      // Stand in for `close()`: take the drawer `FOR UPDATE` and hold it.
+      const closer = admin.createQueryRunner();
+      await closer.connect();
+      try {
+        await closer.startTransaction();
+        await closer.query(
+          `SELECT id FROM shifts WHERE tenant_id = $1::uuid AND id = $2 FOR UPDATE`,
+          [TENANT, drawerId],
+        );
+
+        let settled = false;
+        const pending = post(
+          credit(
+            's_race',
+            [{ productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' }],
+            'โอน',
+          ),
+        ).then((r) => {
+          settled = true;
+          return r;
+        });
+
+        // Wait until the refund is blocked on a lock — or has already finished, which
+        // is what an unlocked read does.
+        for (let i = 0; i < 100 && !settled; i++) {
+          const [w] = await admin.query(
+            `SELECT count(*)::int AS n FROM pg_stat_activity
+              WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+          );
+          if (w.n > 0) break;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+
+        await closer.query(
+          `UPDATE shifts SET closed_at = now(), physical_cash = 0
+            WHERE tenant_id = $1::uuid AND id = $2`,
+          [TENANT, drawerId],
+        );
+        await closer.commitTransaction();
+
+        const res = await pending;
+        expect(res.status).toBe(201);
+        // Falsified: with `FOR SHARE` removed from `currentShiftIdFor` the refund does
+        // not wait, and this is the closed drawer's id.
+        expect(res.body.data.shiftId).toBeNull();
+      } finally {
+        if (closer.isTransactionActive) await closer.rollbackTransaction();
+        await closer.release();
+      }
+    });
+
+    it('a cash refund committed while the drawer was open still replays after close', async () => {
+      await insertSale({
+        id: 's_replay_close',
+        receiptNo: 'R28',
+        subtotal: 170,
+        total: 170,
+        items: [{ productId: 'p1', name: 'Oil Filter', qty: 2, price: 85 }],
+      });
+      const body = credit('s_replay_close', [
+        { productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' },
+      ]);
+      const key = `k-replay-close-${Date.now()}`;
+
+      const first = await post(body, { key });
+      expect(first.status).toBe(201);
+      expect(first.body.data.shiftId).toBe(drawerId);
+
+      const close = await request(app.getHttpServer())
+        .post('/api/v1/shifts/close')
+        .set('Authorization', `Bearer ${posToken}`)
+        .set('Idempotency-Key', `k-${Math.random()}`)
+        .send({ physicalCash: '0.00' });
+      expect(close.status).toBe(200);
+
+      const replay = await post(body, { key });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      // The same refund under a fresh key is a new credit note, and the drawer is shut.
+      const fresh = await post(body);
+      expect(fresh.status).toBe(409);
+      expect(fresh.body.error.code).toBe('NO_OPEN_SHIFT');
+      expect(await returnCount()).toBe(1);
+      expect(await stockOf('p1')).toBe(49);
+    });
   });
 
   // ── The fix round: the server, not the client, decides what a refund is worth ──
