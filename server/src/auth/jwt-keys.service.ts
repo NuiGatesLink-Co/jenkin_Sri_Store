@@ -1,5 +1,7 @@
 import { Injectable, Inject, Logger, UnauthorizedException } from '@nestjs/common';
-import * as jwt from 'jsonwebtoken';
+import jwtPkg, { type SignOptions, type Jwt } from 'jsonwebtoken';
+
+const jwt: any = (jwtPkg as any)?.default || jwtPkg;
 import { APP_CONFIG, type AppConfig } from '../config/config.js';
 
 export interface JwtPayload {
@@ -35,7 +37,7 @@ export class JwtSigner {
     payload: Omit<JwtPayload, 'iss' | 'iat' | 'exp'>,
     expiresInOrExp: number | string,
   ): string {
-    const options: jwt.SignOptions = {
+    const options: SignOptions = {
       algorithm: 'RS256',
       keyid: this.keyId,
     };
@@ -77,7 +79,7 @@ export class JwtVerifier {
   }
 
   verify(token: string, expectedTyp: 'access' | 'refresh'): JwtPayload {
-    let decoded: jwt.Jwt | null = null;
+    let decoded: Jwt | null = null;
     try {
       decoded = jwt.decode(token, { complete: true });
     } catch {

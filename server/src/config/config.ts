@@ -26,6 +26,19 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return v;
 }
 
+function parsePublicKeys(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, string>;
+      return Object.values(parsed);
+    } catch {
+      // fallback to split
+    }
+  }
+  return trimmed.split(',').map((k) => k.trim());
+}
+
 export function loadConfig(env = process.env): AppConfig {
   const instanceId = env.INSTANCE_ID ?? 'local';
   const isApi = instanceId.startsWith('api') || instanceId === 'local';
@@ -49,7 +62,7 @@ export function loadConfig(env = process.env): AppConfig {
     jwtPlatformSecret: env.JWT_PLATFORM_SECRET ?? 'dev-only-platform-secret',
     jwtTenantSecret: env.JWT_TENANT_SECRET ?? 'dev-only-tenant-secret',
     jwtPrivateKey: isApi ? required(env, 'JWT_PRIVATE_KEY') : undefined,
-    jwtPublicKeys: isApi ? required(env, 'JWT_PUBLIC_KEYS').split(',').map(k => k.trim()) : undefined,
+    jwtPublicKeys: isApi ? parsePublicKeys(required(env, 'JWT_PUBLIC_KEYS')) : undefined,
     jwtKeyId: env.JWT_KEY_ID ?? 'key-1',
   };
 }
