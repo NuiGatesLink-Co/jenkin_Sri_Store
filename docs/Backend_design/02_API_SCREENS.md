@@ -194,7 +194,7 @@ sequenceDiagram
 { "status": "success",
   "data": { "id": "s1a2b3c4", "receiptNo": "RC01-2569-08-0042", "total": "1400.00",
             "pointsGranted": 140, "date": "2026-08-25T03:12:00Z",
-            "shiftId": "sh_20260825_01",          // ⭐ #82 — กะที่ server ประทับให้ (null ถ้าไม่ได้เปิดลิ้นชัก) client คำนวณเองไม่ได้
+            "shiftId": "sh_20260825_01",          // ⭐ #82 — กะที่ server ประทับให้ client คำนวณเองไม่ได้ · บิลใหม่มีค่าเสมอ (ไม่มีกะเปิด = 409 NO_OPEN_SHIFT) null ได้เฉพาะบิลเก่า/นำเข้าที่ replay
             "mechanicCreditBalanceAfter": "5400.00",
             "mechanicAfter": { "id": "m2", "totalSales": "182000.00", "totalDiscount": "3100.00",   // ⭐ #82 — ครบทั้งสี่ยอดสะสม
                                "totalMarkup": "0.00", "creditBalance": "5400.00" },                 // 🔴 ไม่มี total_credit (ข้อตัดสิน #11)
@@ -210,6 +210,10 @@ sequenceDiagram
   "error": { "code": "INSUFFICIENT_STOCK",
              "message": "สต็อกไม่พอ:\nผ้าเบรกหน้า: สต็อก 1 แต่ต้องการ 2",
              "details": [ { "productId": "p12", "stock": 1, "requested": 2 } ] } }
+
+// 409 — เครื่องนี้ไม่มีกะเปิดอยู่ (ทุกวิธีจ่าย: เงินสด / โอน/QR / เครดิตช่าง) — ข้อตัดสินเจ้าของร้าน 2026-09-13
+{ "status": "error",
+  "error": { "code": "NO_OPEN_SHIFT", "message": "No open shift" } }
 ```
 
 > **หมายเหตุสำคัญ 4 ข้อ:**
@@ -224,6 +228,10 @@ sequenceDiagram
 > 3. **`shiftId` ไม่อยู่ใน request body** — server ประทับให้เองจากลิ้นชักที่เปิดอยู่ของเครื่องนั้น (#28)
 >    ส่งมาก็ไม่อ่าน · รายงานปิดร้านคิดจาก `shift_id` ถ้ารับจาก body เครื่องหนึ่งเขียนเข้ากะของอีกเครื่องได้
 >    **แต่อยู่ใน response** (#82) เพราะ client ไม่มีทางรู้ค่าที่ server ประทับ
+>    🔴 **ไม่มีกะเปิด = ไม่ขาย** (ข้อตัดสินเจ้าของร้าน 2026-09-13 "ต้องเปิดกะก่อนรับเงินทุกกรณี"):
+>    เครื่องที่ไม่มีกะเปิดอยู่ (ไม่เคยเปิด หรือปิดกะไปแล้ว) ได้ `409 NO_OPEN_SHIFT` ทุกวิธีจ่าย ไม่มีอะไรถูกเขียน
+>    (ไม่ตัดสต็อก ไม่กินเลข RC) · **replay ไม่โดนปฏิเสธ** — บิลที่ commit ตอนกะยังเปิด ยิงซ้ำหลังปิดกะก็ยังได้ body เดิม
+>    (เดิมพอร์ตจากแอปเก่าที่ขายได้โดยไม่เปิดลิ้นชักแล้วเก็บ `shift_id` เป็น null — เงินก้อนนั้นไม่เข้ารายงานปิดกะใดเลย)
 > 4. **ต้องคืน `products[]` ที่สต็อกเปลี่ยนกลับมาใน response** เพื่อให้หน้า Checkout อัปเดตค่าในเครื่องได้ทันที
 >    ไม่ต้องยิง `GET /products` ซ้ำ — แก้ปัญหา read-your-writes ที่ cache 5 นาที + replica lag ทำให้เห็นสต็อกเก่า
 > 5. 🔴 **replay ต้องตอบ body เดิมทุก field** (#82) — ทั้งทาง `Idempotency-Key` และทาง `existingSale`
@@ -293,7 +301,7 @@ sequenceDiagram
 |---|---|
 | `GET /mechanics?search=` | ส่ง `creditBalance` / `creditLimit` มาด้วยเสมอ |
 | `POST /mechanics` (`code` = `M###`) · `PATCH` · `DELETE` | |
-| **`POST /mechanics/:id/credit-payments`** | ช่างมาจ่ายหนี้ — ลด `credit_balance` (clamp ที่ 0), ออกเลขใบเสร็จรับเงิน (series **CP**), ต้อง idempotent · **pos เท่านั้น** · body `{ id?, amount, paymentMethod, note?, allowOverpayment? }` — `paymentMethod` เป็น `'เงินสด'` \| `'โอน/QR'` **บังคับ** (รายงานปิดร้านต้องแยกเงินสดออกจากเงินโอน) · จ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` = `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` (§8.1) · ตอบ payment + `mechanicCreditBalanceAfter` · server แสตมป์ `shift_id` จากลิ้นชักที่เปิดอยู่ของเครื่องนั้นเอง (#24) |
+| **`POST /mechanics/:id/credit-payments`** | ช่างมาจ่ายหนี้ — ลด `credit_balance` (clamp ที่ 0), ออกเลขใบเสร็จรับเงิน (series **CP**), ต้อง idempotent · **pos เท่านั้น** · body `{ id?, amount, paymentMethod, note?, allowOverpayment? }` — `paymentMethod` เป็น `'เงินสด'` \| `'โอน/QR'` **บังคับ** (รายงานปิดร้านต้องแยกเงินสดออกจากเงินโอน) · จ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` = `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` (§8.1) · ตอบ payment + `mechanicCreditBalanceAfter` · server แสตมป์ `shift_id` จากลิ้นชักที่เปิดอยู่ของเครื่องนั้นเอง (#24) · 🔴 เครื่องไม่มีกะเปิด = `409 NO_OPEN_SHIFT` ทั้งเงินสดและโอน ไม่มีอะไรถูกเขียน ไม่กินเลข CP (ข้อตัดสินเจ้าของร้าน 2026-09-13) — ตรวจ**หลัง** replay ด้วย `id` เดิม จึงยิงซ้ำหลังปิดกะยังได้รายการเดิม |
 | `GET /credit-payments?mechanicId=&from=&to=` | |
 | **`GET /mechanics/:id/sales?page=`** | ⚠️ เหมือนข้อ 3.5 — เดิม filter ใน client |
 | `GET /mechanics/:id/statement?from=&to=` | ใบแจ้งหนี้: ยอดยกมา + ซื้อ + จ่าย + คงเหลือ |
@@ -651,7 +659,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `SALE_VOIDED` | `Bill already voided` |
 | 409 | `DRAWER_CLOSED` | `ลิ้นชักปิดแล้ว ไม่สามารถบันทึกรายการเงินเพิ่มได้` |
 | 400 | `INVALID_BACKUP` | `ไฟล์สำรองไม่ถูกต้อง — ไม่พบข้อมูล __meta` |
-| 409 | `NO_OPEN_SHIFT` | `No open shift` |
+| 409 | `NO_OPEN_SHIFT` | `No open shift` (ลิ้นชัก/ปิดกะ และตั้งแต่ 2026-09-13 `POST /sales` + `POST /mechanics/:id/credit-payments` ด้วย — ไม่มีกะเปิด = ไม่รับเงิน) |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | – (ไม่แสดงให้ผู้ใช้เห็น) |
 | 400 | `IDEMPOTENCY_KEY_INVALID` | – (ไม่แสดงให้ผู้ใช้เห็น · header หาย หรือยาวเกิน 200 ตัวอักษร — เพิ่มตอน #18) |
 | 503 | `IDEMPOTENCY_KEY_IN_FLIGHT` | – (ไม่แสดงให้ผู้ใช้เห็น · คำขอเดิมยังทำงานอยู่ ให้ client retry — เพิ่มตอน #18) |

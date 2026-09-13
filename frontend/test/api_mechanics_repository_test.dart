@@ -83,17 +83,33 @@ void main() {
   });
 
   group('addCreditPayment (#24)', () {
-    Future<void> seedTarget() => db
-        .into(db.mechanics)
-        .insert(
-          MechanicsCompanion.insert(
-            id: 'm_target',
-            code: 'MEC010',
-            name: 'Target Mechanic',
-            createdAt: '2026-09-12T10:00:00.000Z',
-            creditBalance: const Value(2000.0),
-          ),
-        );
+    /// The mechanic owing 2,000 — and, unless [shift] is false, an open drawer,
+    /// without which the API build takes no payment at all (owner, 2026-09-13).
+    Future<void> seedTarget({bool shift = true}) async {
+      await db
+          .into(db.mechanics)
+          .insert(
+            MechanicsCompanion.insert(
+              id: 'm_target',
+              code: 'MEC010',
+              name: 'Target Mechanic',
+              createdAt: '2026-09-12T10:00:00.000Z',
+              creditBalance: const Value(2000.0),
+            ),
+          );
+      if (!shift) return;
+      await db
+          .into(db.shifts)
+          .insert(
+            ShiftsCompanion.insert(
+              id: 'sh-open',
+              dateStr: '2026-09-12',
+              startingCash: 500,
+              openedAt: DateTime(2026, 9, 12, 8),
+              isActive: const Value(true),
+            ),
+          );
+    }
 
     /// Exactly what `credit-payments.service.ts` answers: money as strings.
     http.Response created(Map<String, dynamic> sent) => http.Response(
@@ -460,6 +476,143 @@ void main() {
         expect(await repo.getPendingCreditPayments(), hasLength(1));
       },
     );
+
+    group('no open shift, no payment taken (owner, 2026-09-13)', () {
+      Future<void> openShift({DateTime? closedAt}) => db
+          .into(db.shifts)
+          .insert(
+            ShiftsCompanion.insert(
+              id: 'sh-local',
+              dateStr: '2026-09-12',
+              startingCash: 500,
+              openedAt: DateTime(2026, 9, 12, 8),
+              isActive: const Value(true),
+              closedAt: Value(closedAt),
+            ),
+          );
+
+      Future<Object?> pay(ApiMechanicsRepository repo) => repo
+          .addCreditPayment(
+            mechanicId: 'm_target',
+            amount: 500.0,
+            paymentMethod: 'เงินสด',
+          )
+          .then<Object?>((_) => null, onError: (Object e) => e);
+
+      test(
+        'offline with no open drawer: refused on the spot, never queued',
+        () async {
+          await seedTarget(shift: false);
+          var calls = 0;
+          final repo = ApiMechanicsRepository(
+            db,
+            ApiClient(
+              httpClient: MockClient((_) async {
+                calls++;
+                throw http.ClientException('Offline');
+              }),
+            ),
+          );
+
+          final error = await pay(repo);
+
+          // Not CreditPaymentQueued: a queued row would be refused only during a
+          // later flush, with the cash already in the drawer.
+          expect(error, isA<PosException>());
+          expect((error as PosException).code, 'NO_OPEN_SHIFT');
+          expect(error.toString(), 'กรุณาเปิดกะก่อนรับชำระ');
+          expect(await repo.getPendingCreditPayments(), isEmpty);
+          expect(calls, 0);
+        },
+      );
+
+      test('a closed (not yet archived) drawer refuses too', () async {
+        await seedTarget(shift: false);
+        await openShift(closedAt: DateTime(2026, 9, 12, 20));
+        final repo = ApiMechanicsRepository(
+          db,
+          ApiClient(
+            httpClient: MockClient((_) async => fail('nothing may be sent')),
+          ),
+        );
+
+        expect((await pay(repo)).toString(), 'กรุณาเปิดกะก่อนรับชำระ');
+        expect(await repo.getPendingCreditPayments(), isEmpty);
+      });
+
+      test('with an open drawer an offline payment is still queued', () async {
+        await seedTarget(shift: false);
+        await openShift();
+        final repo = ApiMechanicsRepository(
+          db,
+          ApiClient(
+            httpClient: MockClient(
+              (_) async => throw http.ClientException('Offline'),
+            ),
+          ),
+        );
+
+        expect(await pay(repo), isA<CreditPaymentQueued>());
+        expect(await repo.getPendingCreditPayments(), hasLength(1));
+      });
+
+      test(
+        'the Drift build (writesToServer off) takes the payment locally: no outbox, no shift check, nothing sent',
+        () async {
+          await seedTarget(shift: false);
+          var calls = 0;
+          final repo = ApiMechanicsRepository(
+            db,
+            ApiClient(
+              httpClient: MockClient((_) async {
+                calls++;
+                throw http.ClientException('Offline');
+              }),
+            ),
+            writesToServer: false,
+          );
+
+          // No drawer is open, and there is no server: the shop's build must
+          // still record the payment exactly as the Drift repository does.
+          expect(await pay(repo), isNull, reason: 'taken, not refused or queued');
+          expect(await localPayments(), 1);
+          expect(await balance(), 1500.0);
+          expect(await repo.getPendingCreditPayments(), isEmpty);
+
+          await repo.flushPendingCreditPayments();
+          expect(calls, 0);
+        },
+      );
+
+      test(
+        'a server 409 NO_OPEN_SHIFT (stale cache) is shown in Thai and dropped',
+        () async {
+          await seedTarget(shift: false);
+          await openShift();
+          final repo = ApiMechanicsRepository(
+            db,
+            ApiClient(
+              httpClient: MockClient(
+                (_) async => http.Response(
+                  jsonEncode({
+                    'status': 'error',
+                    'error': {'code': 'NO_OPEN_SHIFT', 'message': 'No open shift'},
+                  }),
+                  409,
+                  headers: {'content-type': 'application/json; charset=utf-8'},
+                ),
+              ),
+            ),
+          );
+
+          final error = await pay(repo);
+
+          expect(error, isNot(isA<ApiException>()));
+          expect(error.toString(), 'กรุณาเปิดกะก่อนรับชำระ');
+          expect(await repo.getPendingCreditPayments(), isEmpty);
+        },
+      );
+    });
   });
 
   test('getMechanics falls back transparently to Drift when network fails', () async {

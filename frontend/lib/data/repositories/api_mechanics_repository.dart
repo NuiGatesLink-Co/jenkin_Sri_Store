@@ -16,7 +16,25 @@ import 'mechanics_repository.dart';
 class ApiMechanicsRepository extends MechanicsRepository {
   final ApiClient apiClient;
 
-  ApiMechanicsRepository(super.db, this.apiClient);
+  ApiMechanicsRepository(
+    super.db,
+    this.apiClient, {
+    this.writesToServer = true,
+  });
+
+  /// Whether a credit payment is a server write — the `USE_API_WRITES` switch
+  /// (`useApi`), the same one that moves sales, returns and shifts.
+  ///
+  /// 🔴 This class is ALSO the Drift build's mechanics repository: #55's read
+  /// switch (`useApiRepositories`) defaults to true. With this false the payment
+  /// is the Drift write it always was — local CP number, local balance cut, no
+  /// outbox, no shift check. Without the switch, #24's outbox queued every payment
+  /// on the shop's serverless build forever: the dialog said "saved", the debt
+  /// never moved.
+  ///
+  /// When true: the outbox, and no payment without an open drawer (owner,
+  /// 2026-09-13).
+  final bool writesToServer;
 
   MechanicsCompanion _mechanicToCompanion(Map<String, dynamic> json) {
     final id = json['id'] as String;
@@ -193,6 +211,21 @@ class ApiMechanicsRepository extends MechanicsRepository {
     required String paymentMethod,
     bool allowOverpayment = false,
   }) async {
+    if (!writesToServer) {
+      return super.addCreditPayment(
+        mechanicId: mechanicId,
+        amount: amount,
+        note: note,
+        paymentMethod: paymentMethod,
+        allowOverpayment: allowOverpayment,
+      );
+    }
+    // 🔴 BEFORE the outbox row. Offline, the server's `409 NO_OPEN_SHIFT` would
+    // only come back during a later flush — with the cash already in the drawer
+    // and nobody at the dialog. So the cached drawer is asked here instead.
+    if (!await hasOpenShift(db)) {
+      throw const PosException('NO_OPEN_SHIFT', noOpenShiftForCreditPayment);
+    }
     final id = newId('cp');
     _sending.add(id);
     try {
@@ -225,6 +258,9 @@ class ApiMechanicsRepository extends MechanicsRepository {
         await (db.delete(
           db.pendingCreditPayments,
         )..where((t) => t.id.equals(id))).go();
+        if (e.code == 'NO_OPEN_SHIFT') {
+          throw PosException(e.code, noOpenShiftForCreditPayment, e.details);
+        }
         rethrowServerRefusal(e);
       } catch (_) {
         // A dropped socket, a timeout, a reply that would not parse: the payment
@@ -237,8 +273,10 @@ class ApiMechanicsRepository extends MechanicsRepository {
   }
 
   @override
-  Future<void> flushPendingCreditPayments() =>
-      _flushing ??= _drain().whenComplete(() => _flushing = null);
+  Future<void> flushPendingCreditPayments() async {
+    if (!writesToServer) return;
+    await (_flushing ??= _drain().whenComplete(() => _flushing = null));
+  }
 
   Future<void> _drain() async {
     final queued =

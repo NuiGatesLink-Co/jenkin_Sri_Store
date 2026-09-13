@@ -267,7 +267,12 @@ stock **and** issues a number must take them in that same order. `POST /returns`
 does, with the parent bill's own `FOR UPDATE` ahead of all three: **sale → mechanic →
 products → `doc_counters`**. `POST /purchase-orders/:id/receive` (#26) still has to;
 `POST /sales/:id/void` (#23) does, taking the mechanic's row before the first product
-because it now reverses the tab. Issuing the number first inverts the order and
+because it now reverses the tab. The drawer row that `POST /sales` and
+`POST /mechanics/:id/credit-payments` read first (before the mechanic on a sale, after it
+on a credit payment) is outside this order on purpose: the money path only ever takes it
+`FOR SHARE`, shared locks never wait on each other, and the drawer's own exclusive
+writers (open, close, entries, retirement) take no other money-path lock. A path that
+ever takes the shift row `FOR UPDATE` *and* a mechanic or product must fix an order first. Issuing the number first inverts the order and
 the two deadlock under concurrent load, which is the kind of failure that only shows up on
 a busy Saturday.
 
@@ -276,7 +281,11 @@ a busy Saturday.
 `POST /api/v1/sales` — `pos` device only, `Idempotency-Key` mandatory. Everything runs
 inside the request transaction, in this order, and the order is the design:
 
-1. the idempotency claim (interceptor, before the handler)
+1. the idempotency claim (interceptor, before the handler), then the client-`id` replay
+   (`existingSale`), then **the device's open drawer, read `FOR SHARE`** — none open is
+   `409 NO_OPEN_SHIFT` on every payment method (see *The cash drawer* below). After both
+   replay paths, so a bill committed while the drawer was open still answers once it has
+   closed; before every other lock, so a refused bill holds no mechanic or product row
 2. lock the mechanic's row if the bill names one; for `'เครดิตช่าง'`, refuse
    `credit_balance + total > credit_limit` with `409 CREDIT_LIMIT_EXCEEDED` unless the
    body carries `overrideCreditLimit: true` (#21). Before the products on purpose: a
@@ -499,9 +508,21 @@ device's current drawer* until the next open archives it, exactly as
   (`one_pos_per_tenant`), but a read filtered by the caller's device would show a
   `backoffice` machine nothing, which is not what "readable from both" means.
 - **`shift_id` is stamped on a sale at write time**, from the device's own *open*
-  drawer — never from the request body, and null when no drawer is open (the old app
-  lets staff sell without one). The closing report is computed by `shift_id`, never by
-  a timestamp window: a window breaks across midnight and cannot separate two machines.
+  drawer — never from the request body. The closing report is computed by `shift_id`,
+  never by a timestamp window: a window breaks across midnight and cannot separate two
+  machines.
+- 🔴 **No open drawer, no money** (owner's decision, 2026-09-13: "ต้องเปิดกะก่อนรับเงิน
+  ทุกกรณี"). `POST /sales` and `POST /mechanics/:id/credit-payments` answer
+  `409 NO_OPEN_SHIFT` when the calling device has no shift with `closed_at IS NULL` —
+  never opened, or already closed — for every payment method, and write nothing (no
+  stock, no ledger, no RC/CP number, no idempotency claim). Until then both stamped null
+  and took the money, ported from the old app; that cash appeared in no closing report.
+  Replays are not refused: the check runs after both replay paths. The helper is
+  `ShiftsService.requireOpenShiftIdFor`, and it reads the row **`FOR SHARE`** so a close
+  waits for bills in flight and a bill behind a committed close is refused, rather than
+  landing on a shift whose cash was already counted. `POST /returns` is **not** covered —
+  a credit note still stamps null with no drawer open (`currentShiftIdFor`). `shift_id`
+  stays nullable in the schema: imported rows are legitimately null.
 - `closeForRetirement()` is the operation `POST /devices/:id/retire` (#6) calls to
   close a machine's drawer in the same transaction that stamps `retired_at`. The
   endpoint does not exist yet, so `test/shifts.e2e-spec.ts` mounts the call on a probe
@@ -509,14 +530,11 @@ device's current drawer* until the next open archives it, exactly as
   device's *next* open archives its drawer, but a retired device never opens again, so an
   active row would be stranded — `history()` (`NOT is_active`) would hide that day's
   takings forever while `current()` showed a drawer nothing could close.
-- 🔴 **A bill rung up while no drawer is open carries no `shift_id`,** and neither does
-  one rung up after the drawer is closed. The shipped app's closing report counts by date
-  key (`closing_report.dart`), not by shift, so it *does* include those bills — a report
-  built purely on `shift_id` will be short by exactly the after-close takings. Whoever
-  builds `GET /reports/closing` (#30) has to decide that explicitly: either fold
-  `shift_id IS NULL AND date = <the shift's day>` into the query, or stamp the day's
-  drawer regardless of close. It is a `db.js` behaviour change either way, so it is not a
-  decision to make inside a test.
+- 🔴 **Rows written before 2026-09-13 (and imported ones) can still carry no
+  `shift_id`.** The shipped app's closing report counts by date key
+  (`closing_report.dart`), not by shift. New sales and credit payments can no longer be
+  taken without a drawer, so #30 only has to decide what to do with those older rows and
+  with credit notes (`POST /returns` still stamps null with no drawer open).
 - 🔴 **Expected cash also has a credit-payment term** (#24, #30's first AC): a mechanic
   settling his tab in cash is money in the drawer that no sale accounts for. Sum
   `credit_payments WHERE shift_id = … AND payment_method = 'เงินสด'`; the transfers must
@@ -526,7 +544,8 @@ device's current drawer* until the next open archives it, exactly as
 
 `POST /mechanics/:id/credit-payments` — the mechanic comes in and pays down his tab.
 `pos` only (it takes cash over the counter and prints a receipt), idempotent, and one
-transaction: `mechanics FOR UPDATE` → the CP number → the row → the reduced balance.
+transaction: `mechanics FOR UPDATE` → the open drawer (`409 NO_OPEN_SHIFT` without one) →
+the CP number → the row → the reduced balance.
 
 - **Lock order is mechanic → `doc_counters`,** the money path's relative order. It
   cannot deadlock against a sale or a credit note today — `doc_counters` is keyed by
@@ -546,8 +565,14 @@ transaction: `mechanics FOR UPDATE` → the CP number → the row → the reduce
   shortfall the size of the transfer every single day, which is how staff stop believing
   the report at all. The column is new (`payment_method`, migration `…005`) because the
   Drift port dropped the JS app's `p.method`; `cash_drawer_screen.dart:121` says so.
-- **`shift_id` is stamped like a sale's** — the device's own open drawer, never the body,
-  null when none is open. That column is what #30 sums cash settlements by.
+- **`shift_id` is stamped like a sale's** — the device's own open drawer, never the body.
+  That column is what #30 sums cash settlements by.
+- 🔴 **No open drawer is `409 NO_OPEN_SHIFT`, cash and transfer alike** (owner's
+  decision, 2026-09-13 — this replaces the old "null when none is open; refusing it here
+  would be a new rule" behaviour). Order: mechanic `FOR UPDATE` → client-`id` replay →
+  drawer `FOR SHARE` → overpayment check → CP number. After the replay, so a payment
+  committed while the drawer was open still answers once it has closed; before the
+  overpayment check and the counter, so a refusal leaves no hole in the CP series.
 - **Two defences against a duplicate, as on `POST /sales`:** the `Idempotency-Key`, and
   an optional client `id`. The same id with a different mechanic, amount or method is
   `409 CREDIT_PAYMENT_ID_REUSED`. The id matters because the client's outbox
@@ -557,8 +582,9 @@ transaction: `mechanics FOR UPDATE` → the CP number → the row → the reduce
   The replay is checked **before** the overpayment check, or a replayed full settlement
   would meet the zero tab it created and be refused.
 - ⚠️ **`shift_id` is the shift open when the server receives the payment,** not when the
-  cash was taken. A payment queued offline and sent after the drawer closed lands in the
-  next shift — #30 has to know that.
+  cash was taken. A payment queued offline and sent after the drawer closed is now
+  refused with `409 NO_OPEN_SHIFT` (the outbox keeps it for a person) unless a drawer is
+  open by then, in which case it lands in that shift — #30 has to know that.
 - The mechanic's `deleted_at` is **not** filtered, exactly as `POST /sales` does not
   filter it: he owes the money either way, and refusing it loses the shop both the cash
   and the record of it. An id that never existed is `404 MECHANIC_NOT_FOUND`, thrown off

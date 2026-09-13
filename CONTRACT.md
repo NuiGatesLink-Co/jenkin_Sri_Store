@@ -208,6 +208,16 @@ write-through API implementations from `lib/data/repositories/api/` —
 in the table do not change**, which is the whole point of ADR-0010: each API
 class `implements` the concrete Drift class's implicit interface and keeps a
 Drift instance to delegate its reads to, so no screen can tell the difference.
+`useApi` also arms the owner's 2026-09-13 shift guards, all on the API side of
+the interface: `ApiSalesRepository.saveSale` and
+`ApiMechanicsRepository(db, client, writesToServer: useApi).addCreditPayment`
+(with `writesToServer` false — the Drift build — it is the plain Drift write:
+no outbox, no shift check)
+refuse with `PosException('NO_OPEN_SHIFT', …)` while the cached drawer is not
+open (`isActive && closedAt == null`, `api_wire.dart hasOpenShift`), and
+`ApiShiftsRepository(…, mechanics:)` flushes the credit-payment outbox before
+`closeShift` and refuses (`CASH_CREDIT_PAYMENTS_UNSENT`) while a queued `เงินสด`
+row remains. With `useApi` false none of this runs.
 
 | Repository | Type |
 |---|---|

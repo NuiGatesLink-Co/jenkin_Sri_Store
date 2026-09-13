@@ -7,6 +7,7 @@ import {
   resetTenant,
   seedCustomer,
   seedMechanic,
+  seedOpenShift,
   seedProduct,
   type TenantFixture,
 } from './support/fixture.js';
@@ -162,6 +163,9 @@ describe('POST /sales — ledger effects (e2e)', () => {
       creditLimit: 1000,
       creditBalance: 800,
     });
+    // `POST /sales` refuses with 409 NO_OPEN_SHIFT when the device has no open drawer
+    // (owner's decision, 2026-09-13).
+    await seedOpenShift(admin, TENANT, fixture.posDeviceId, { userId: fixture.userId });
   });
 
   afterAll(async () => {

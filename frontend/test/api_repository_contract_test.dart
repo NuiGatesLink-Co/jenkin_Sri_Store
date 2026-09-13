@@ -141,6 +141,10 @@ List<String> _unguardedFallbacks(String source) {
     final name = _superWriteName(lines[i]);
     if (name == null || _fallbackReads.contains(name)) continue;
     for (var j = i; j >= 0; j--) {
+      // A catch in an EARLIER method is not this call's fallback: stop at the
+      // method boundary, or a deliberate `super.<write>()` (the Drift build's
+      // credit payment, #24) reads as falling out of its neighbour's catch.
+      if (lines[j].trim() == '@override') break;
       if (!_isSwallowingCatch(lines[j])) continue;
       final guarded =
           j >= 2 &&
@@ -332,6 +336,40 @@ class ApiShiftsRepository implements ShiftsRepository {
   }
 ''';
     expect(_unguardedFallbacks(cachedRead), isEmpty);
+
+    // A write that is Drift BY DESIGN (no request at all) below another
+    // method's swallowing catch is not a fallback.
+    const driftByDesign = '''
+  @override
+  Future<void> deleteMechanic(String id) async {
+    try {
+      await apiClient.delete('/mechanics/\$id');
+    } catch (_) {}
+  }
+
+  @override
+  Future<CreditPaymentRow> addCreditPayment() async {
+    if (!writesToServer) {
+      return super.addCreditPayment();
+    }
+  }
+''';
+    expect(_unguardedFallbacks(driftByDesign), isEmpty);
+
+    // …and the boundary does not hide a real one inside the same method.
+    const unguardedAfterOverride = '''
+  @override
+  Future<List<String>> receivePO(String id) async {
+    try {
+      return _unmatched(await apiClient.post('/receive'));
+    } catch (_) {
+      // Offline fallback
+    }
+
+    return super.receivePO(id);
+  }
+''';
+    expect(_unguardedFallbacks(unguardedAfterOverride), isNotEmpty);
   });
 
   test(

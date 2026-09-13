@@ -27,7 +27,8 @@ export interface CreateSaleResult {
   date: string;
   /**
    * The drawer this bill was rung up on, stamped server-side from the device's own
-   * open shift (#28); null when none was open. The client cannot compute it — its
+   * open shift (#28). Always set on a new bill — no open shift is `409 NO_OPEN_SHIFT`
+   * — but nullable because a replayed or imported bill may predate that rule. The client cannot compute it — its
    * own idea of the open drawer is a cache — so it comes back here (#82).
    */
   shiftId: string | null;
@@ -173,6 +174,8 @@ export const MECHANIC_CREDIT = 'เครดิตช่าง';
  * opened it, `TransactionInterceptor` commits it), in the order #20 fixes:
  *
  *   1. the idempotency claim (the interceptor, before this method is called)
+ *      — then the client-`id` replay, then the device's open drawer `FOR SHARE`,
+ *      `409 NO_OPEN_SHIFT` when there is none (owner's decision, 2026-09-13)
  *   2. lock the mechanic's row, if the bill names one, and for a credit sale check
  *      the limit — refused here, the bill holds no product lock
  *   3. `SELECT ... ORDER BY id FOR UPDATE` — the ordering is the deadlock guard
@@ -213,6 +216,19 @@ export class SalesService {
     const existing = await this.existingSale(manager, tenantId, dto);
     if (existing) return existing;
 
+    // No open drawer, no sale — any payment method (owner's decision, 2026-09-13): a
+    // bill stamped with no shift is money no closing report counts. After the replay,
+    // so a bill committed while the drawer was open is still answered once it has
+    // closed; before every other lock, so a refusal holds no mechanic or product row.
+    // Stamped from the device's own drawer, never from the body (#28), and taken
+    // `FOR SHARE` so a close cannot count the drawer while this bill is still going
+    // into it — see `requireOpenShiftIdFor` for why that cannot deadlock.
+    const shiftId = await this.shifts.requireOpenShiftIdFor(
+      manager,
+      tenantId,
+      actor.deviceId,
+    );
+
     // Mechanic before products, always: a bill refused for the credit limit must not
     // be holding product locks while it rolls back, and the check and the balance
     // update below have to sit under one lock or two credit bills can both pass.
@@ -234,16 +250,6 @@ export class SalesService {
     });
 
     const pointsGranted = pointsFor(dto.totalSatang);
-    // Stamped at write time from the device's own open drawer, never from the body
-    // (#28): the closing report is computed by `shift_id`, and a timestamp window
-    // breaks across midnight and cannot separate two machines. Null when the drawer
-    // was never opened — the old app lets staff sell without it, and refusing the
-    // sale would be a new rule rather than a ported one.
-    const shiftId = await this.shifts.currentShiftIdFor(
-      manager,
-      tenantId,
-      actor.deviceId,
-    );
     const date = await this.insertSale(
       manager,
       tenantId,
