@@ -1,0 +1,197 @@
+---
+# Release Deployment Playbook for Srisurart POS (ADR-0013, 07_CICD_DEPLOY.md §6).
+# Deploys a tagged container release to the demo VM:
+# 1. Checks if release is already running (early exit if identical SHA)
+# 2. Synchronizes Compose definitions and Nginx configurations
+# 3. Pulls GHCR release images
+# 4. Executes one-shot 'web-sync' container to update the shared 'web' volume
+# 5. Executes database migrations ('migrate' container: schema before code)
+# 6. Performs rolling restart of api-1 -> api-2 -> api-3 with health checks
+# 7. Restarts worker, bull-board, and Nginx
+# 8. Verifies overall deployment health via GET /health/ready through Nginx
+# 9. Records deployed SHA in /opt/pos/.current_sha
+
+- name: Deploy Srisurart POS Release
+  hosts: all
+  become: false
+  gather_facts: false
+
+  vars:
+    image_tag: "{{ lookup('env', 'IMAGE_TAG') | default(ansible_image_tag | default(''), true) }}"
+    app_dir: "/opt/pos"
+    repo_root: "{{ playbook_dir }}/../.."
+    compose_files: "-f docker-compose.yml -f vm.override.yml"
+
+  tasks:
+    - name: Validate image_tag parameter
+      ansible.builtin.assert:
+        that:
+          - image_tag is defined
+          - image_tag | length > 0
+        fail_msg: "Deployment requires image_tag (pass via -e image_tag=<sha> or export IMAGE_TAG=<sha>)"
+
+    - name: Check currently deployed SHA on VM
+      ansible.builtin.slurp:
+        src: "{{ app_dir }}/.current_sha"
+      register: current_sha_file
+      ignore_errors: true
+
+    - name: Extract currently deployed SHA
+      ansible.builtin.set_fact:
+        current_sha: "{{ (current_sha_file.content | b64decode | trim) if (current_sha_file is succeeded and current_sha_file.content is defined) else '' }}"
+
+    - name: Notify if release is already deployed
+      ansible.builtin.debug:
+        msg: "Release '{{ image_tag }}' is already active on {{ inventory_hostname }}. Skipping duplicate deployment."
+      when: current_sha == image_tag
+
+    - name: Early exit on duplicate release deployment
+      ansible.builtin.meta: end_play
+      when: current_sha == image_tag
+
+    - name: Copy docker-compose base configuration
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/server/docker-compose.yml"
+        dest: "{{ app_dir }}/docker-compose.yml"
+        mode: "0644"
+
+    - name: Copy VM Compose override configuration
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/deploy/compose/vm.override.yml"
+        dest: "{{ app_dir }}/vm.override.yml"
+        mode: "0644"
+
+    - name: Copy Nginx configuration
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/server/docker/nginx/nginx.conf"
+        dest: "{{ app_dir }}/docker/nginx/nginx.conf"
+        mode: "0644"
+
+    - name: Copy Postgres initialization scripts
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/server/docker/postgres/init/"
+        dest: "{{ app_dir }}/docker/postgres/init/"
+        mode: "0755"
+
+    - name: Pull release images from GHCR
+      ansible.builtin.command: "docker compose {{ compose_files }} pull"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Populate shared web volume from web image (web-sync)
+      ansible.builtin.command: "docker compose {{ compose_files }} run --rm web-sync"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Apply database schema migrations (schema before code)
+      ansible.builtin.command: "docker compose {{ compose_files }} run --rm migrate"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Ensure backing datastores and certgen are running
+      ansible.builtin.command: "docker compose {{ compose_files }} up -d postgres redis-cache redis-queue certgen"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+
+    # Rolling restart: api-1
+    - name: Restart instance api-1
+      ansible.builtin.command: "docker compose {{ compose_files }} up -d --no-deps api-1"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Wait for api-1 health check to pass
+      ansible.builtin.shell: >
+        docker inspect --format="{{ '{{' }} .State.Health.Status {{ '}}' }}"
+        $(docker compose {{ compose_files }} ps -q api-1)
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+      register: api1_status
+      retries: 25
+      delay: 3
+      until: api1_status.stdout | trim == "healthy"
+      changed_when: false
+
+    # Rolling restart: api-2
+    - name: Restart instance api-2
+      ansible.builtin.command: "docker compose {{ compose_files }} up -d --no-deps api-2"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Wait for api-2 health check to pass
+      ansible.builtin.shell: >
+        docker inspect --format="{{ '{{' }} .State.Health.Status {{ '}}' }}"
+        $(docker compose {{ compose_files }} ps -q api-2)
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+      register: api2_status
+      retries: 25
+      delay: 3
+      until: api2_status.stdout | trim == "healthy"
+      changed_when: false
+
+    # Rolling restart: api-3
+    - name: Restart instance api-3
+      ansible.builtin.command: "docker compose {{ compose_files }} up -d --no-deps api-3"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+
+    - name: Wait for api-3 health check to pass
+      ansible.builtin.shell: >
+        docker inspect --format="{{ '{{' }} .State.Health.Status {{ '}}' }}"
+        $(docker compose {{ compose_files }} ps -q api-3)
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+      register: api3_status
+      retries: 25
+      delay: 3
+      until: api3_status.stdout | trim == "healthy"
+      changed_when: false
+
+    # Background workers & edge proxy
+    - name: Restart worker, bull-board, and Nginx
+      ansible.builtin.command: "docker compose {{ compose_files }} up -d --no-deps worker bull-board nginx"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+
+    # Cluster health probe via Nginx
+    - name: Verify cluster readiness via Nginx (GET /health/ready)
+      ansible.builtin.uri:
+        url: "https://127.0.0.1/health/ready"
+        validate_certs: false
+        status_code: 200
+      register: cluster_ready
+      retries: 15
+      delay: 3
+      until: cluster_ready.status == 200
+
+    - name: Record deployed SHA in .current_sha
+      ansible.builtin.copy:
+        content: "{{ image_tag }}\n"
+        dest: "{{ app_dir }}/.current_sha"
+        mode: "0644"
+
+    - name: Log successful deployment completion
+      ansible.builtin.debug:
+        msg: "Successfully deployed release '{{ image_tag }}' to {{ inventory_hostname }}."

@@ -1,0 +1,43 @@
+# Production/Demo VM override for srisurart-pos compose stack (ADR-0013, 07_CICD_DEPLOY.md §6).
+# - Replaces local images with GHCR release images tagged with ${IMAGE_TAG}
+# - Removes `build:` from api-1 so Compose doesn't expect source code on the VM
+# - Adds one-shot `web-sync` container to populate the shared `web` volume
+# - Mounts `web` volume into Nginx container at /usr/share/nginx/html
+
+name: srisurart-pos
+
+services:
+  migrate:
+    image: ghcr.io/nuimanlp/srisurart-pos-server:${IMAGE_TAG:?IMAGE_TAG is required}
+
+  api-1:
+    image: ghcr.io/nuimanlp/srisurart-pos-server:${IMAGE_TAG:?IMAGE_TAG is required}
+    build: !reset []
+
+  api-2:
+    image: ghcr.io/nuimanlp/srisurart-pos-server:${IMAGE_TAG:?IMAGE_TAG is required}
+
+  api-3:
+    image: ghcr.io/nuimanlp/srisurart-pos-server:${IMAGE_TAG:?IMAGE_TAG is required}
+
+  worker:
+    image: ghcr.io/nuimanlp/srisurart-pos-server:${IMAGE_TAG:?IMAGE_TAG is required}
+
+  bull-board:
+    image: ghcr.io/nuimanlp/srisurart-pos-server:${IMAGE_TAG:?IMAGE_TAG is required}
+
+  nginx:
+    volumes:
+      - web:/usr/share/nginx/html:ro
+
+  # One-shot container to copy Flutter web assets into the shared volume.
+  # Overwrites stock Nginx default index.html on volume initialization.
+  web-sync:
+    image: ghcr.io/nuimanlp/srisurart-pos-web:${IMAGE_TAG:?IMAGE_TAG is required}
+    restart: "no"
+    command: ["sh", "-c", "rm -rf /target/* && cp -a /web/. /target/"]
+    volumes:
+      - web:/target
+
+volumes:
+  web:
