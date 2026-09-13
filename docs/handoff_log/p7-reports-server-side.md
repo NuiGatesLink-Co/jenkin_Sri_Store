@@ -33,6 +33,8 @@ Refer to `docs/Backend_design/02_API_SCREENS.md` §3.2, §3.9 and §9, plus `doc
 - Historical lines are grouped by stable `product_id`, as required by `02_API_SCREENS.md`. Return labels are recovered from the parent sale line with a bounded lateral lookup.
 - Low stock is paginated and ordered out-of-stock first. Top products is capped at the shared maximum limit of 200.
 - A manually voided sale with no credit note is not separately subtracted. This matches the existing client calculation, while full returns are represented by credit notes. Revisit only if the owner decides direct voids must change report semantics.
+  - **Superseded by #95 (2026-09-13) for `GET /reports/summary` only:** a manual void (`POST /sales/:id/void`, added by #23 after this note) has no credit note, so counting it overstated revenue; summary now uses #30's `COUNTED_SALE` bill set for every figure, gross profit included — manual voids excluded, bills auto-voided by a full return still counted with their credit notes netted. `top-products`, `by-category` and `product-sales` still count manual voids — **#97** owns aligning them.
+  - Because a manual void is dated by its bill, voiding an old bill changes that past range's summary retroactively — the same class as **#94** for closing reports.
 - No report caching was added; that belongs to the later cache-invalidation slice rather than #29.
 
 ## Verification status
