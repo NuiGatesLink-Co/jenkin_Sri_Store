@@ -517,6 +517,58 @@ device's current drawer* until the next open archives it, exactly as
   `shift_id IS NULL AND date = <the shift's day>` into the query, or stamp the day's
   drawer regardless of close. It is a `db.js` behaviour change either way, so it is not a
   decision to make inside a test.
+- 🔴 **Expected cash also has a credit-payment term** (#24, #30's first AC): a mechanic
+  settling his tab in cash is money in the drawer that no sale accounts for. Sum
+  `credit_payments WHERE shift_id = … AND payment_method = 'เงินสด'`; the transfers must
+  not be counted, which is what that column exists for.
+
+## Mechanic credit payments (#24)
+
+`POST /mechanics/:id/credit-payments` — the mechanic comes in and pays down his tab.
+`pos` only (it takes cash over the counter and prints a receipt), idempotent, and one
+transaction: `mechanics FOR UPDATE` → the CP number → the row → the reduced balance.
+
+- **Lock order is mechanic → `doc_counters`,** the money path's relative order. It
+  cannot deadlock against a sale or a credit note today — `doc_counters` is keyed by
+  `doc_type`, so the CP row is never the RC or CN row and the mechanic is the only
+  resource they share — but the order costs nothing and stays right if that changes.
+- 🔴 **An overpayment is refused, not clamped.** `credit_balance` is written with
+  `GREATEST(0, …)` as the ticket asks, but a clamp on an amount nobody checked turns
+  100,000 keyed for 1,000 into a wiped debt and a receipt for cash never handed over —
+  the same shape as the #22 money bug. More than the tab without
+  `allowOverpayment: true` is `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` (English message; the
+  client owns the Thai dialog, which the shipped app already shows —
+  `mechanics_screen.dart:1331`). With the flag it goes through and writes one
+  `audit_log` row, exactly as #21's credit-limit override does.
+- **`paymentMethod` is required and whitelisted** to the two the intake dialog offers,
+  `'เงินสด'` and `'โอน/QR'`. A method the server guessed is a closing report that is
+  wrong in one direction or the other: count a transfer as cash and the drawer shows a
+  shortfall the size of the transfer every single day, which is how staff stop believing
+  the report at all. The column is new (`payment_method`, migration `…005`) because the
+  Drift port dropped the JS app's `p.method`; `cash_drawer_screen.dart:121` says so.
+- **`shift_id` is stamped like a sale's** — the device's own open drawer, never the body,
+  null when none is open. That column is what #30 sums cash settlements by.
+- **Two defences against a duplicate, as on `POST /sales`:** the `Idempotency-Key`, and
+  an optional client `id`. The same id with a different mechanic, amount or method is
+  `409 CREDIT_PAYMENT_ID_REUSED`. The id matters because the client's outbox
+  (`pending_credit_payments`, Drift schema v5) can resend a payment long after the key's
+  24 h have run out — a device offline over a weekend — or under a fresh key after a
+  person confirms a refused overpayment; both replay the stored payment by id alone.
+  The replay is checked **before** the overpayment check, or a replayed full settlement
+  would meet the zero tab it created and be refused.
+- ⚠️ **`shift_id` is the shift open when the server receives the payment,** not when the
+  cash was taken. A payment queued offline and sent after the drawer closed lands in the
+  next shift — #30 has to know that.
+- The mechanic's `deleted_at` is **not** filtered, exactly as `POST /sales` does not
+  filter it: he owes the money either way, and refusing it loses the shop both the cash
+  and the record of it. An id that never existed is `404 MECHANIC_NOT_FOUND`, thrown off
+  the locked read rather than left to the insert's foreign key (a `23503` surfaces as a
+  500).
+- The response carries the payment plus `mechanicCreditBalanceAfter` — every *value*
+  the transaction moved (#82) and nothing it did not. There is no `mechanicAfter` here:
+  the three running totals are untouched, and handing them back invites the client to
+  patch them from a stale read. `mechanics.updated_at` also moves and is not returned;
+  the client stamps its own, as it does after every write.
 
 ## Conventions these slices set
 

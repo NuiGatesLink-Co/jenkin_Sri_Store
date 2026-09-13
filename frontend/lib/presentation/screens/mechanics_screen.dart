@@ -17,6 +17,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../core/network/api_exception.dart';
 import '../../core/utils/money.dart';
 import '../../data/db/database.dart';
 import '../../data/repositories/mechanics_repository.dart';
@@ -51,6 +52,7 @@ class _MechanicsScreenState extends State<MechanicsScreen> {
   late Future<List<MechanicRow>> _mechanicsFuture;
   late Future<List<CreditPaymentRow>> _creditPaymentsFuture;
   late Future<List<SaleWithItems>> _salesFuture;
+  late Future<List<PendingCreditPaymentRow>> _pendingFuture;
 
   @override
   void initState() {
@@ -60,6 +62,19 @@ class _MechanicsScreenState extends State<MechanicsScreen> {
         .read<MechanicsRepository>()
         .getCreditPayments();
     _salesFuture = context.read<SalesRepository>().getSales();
+    _pendingFuture = _pendingAfter(_mechanicsFuture);
+  }
+
+  /// Read after [mechanics] settles: `getMechanics` sends the queue first, so an
+  /// earlier read would show payments that have just gone through.
+  Future<List<PendingCreditPaymentRow>> _pendingAfter(
+    Future<List<MechanicRow>> mechanics,
+  ) {
+    final repo = context.read<MechanicsRepository>();
+    return mechanics.then(
+      (_) => repo.getPendingCreditPayments(),
+      onError: (Object _) => repo.getPendingCreditPayments(),
+    );
   }
 
   void _refresh() {
@@ -68,6 +83,7 @@ class _MechanicsScreenState extends State<MechanicsScreen> {
       _creditPaymentsFuture = context
           .read<MechanicsRepository>()
           .getCreditPayments();
+      _pendingFuture = _pendingAfter(_mechanicsFuture);
     });
   }
 
@@ -204,6 +220,17 @@ class _MechanicsScreenState extends State<MechanicsScreen> {
             ],
           ),
         ),
+        FutureBuilder<List<PendingCreditPaymentRow>>(
+          future: _pendingFuture,
+          builder: (context, snap) {
+            final rows = snap.data ?? const [];
+            if (rows.isEmpty) return const SizedBox.shrink();
+            return _PendingPaymentsBanner(
+              rows: rows,
+              onOpen: () => _openPending(rows, mechanics),
+            );
+          },
+        ),
         // Tabs.
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24),
@@ -322,8 +349,205 @@ class _MechanicsScreenState extends State<MechanicsScreen> {
             .read<MechanicsRepository>()
             .getCreditPayments();
         _salesFuture = context.read<SalesRepository>().getSales();
+        _pendingFuture = _pendingAfter(_mechanicsFuture);
       });
     }
+  }
+
+  Future<void> _openPending(
+    List<PendingCreditPaymentRow> rows,
+    List<MechanicRow> mechanics,
+  ) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _PendingPaymentsDialog(
+        rows: rows,
+        mechanics: mechanics,
+        repo: context.read<MechanicsRepository>(),
+      ),
+    );
+    if (mounted) _refresh();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PENDING CREDIT PAYMENTS (#24 outbox)
+// ─────────────────────────────────────────────────────────────────────────────
+class _PendingPaymentsBanner extends StatelessWidget {
+  final List<PendingCreditPaymentRow> rows;
+  final VoidCallback onOpen;
+  const _PendingPaymentsBanner({required this.rows, required this.onOpen});
+
+  @override
+  Widget build(BuildContext context) {
+    final rejected = rows.where((r) => r.rejectedCode != null).length;
+    final queued = rows.length - rejected;
+    final queuedTotal = rows
+        .where((r) => r.rejectedCode == null)
+        .fold<double>(0, (s, r) => s + double.parse(r.amount));
+    final color = rejected > 0 ? _red : _credit;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+      child: Material(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: onOpen,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    [
+                      if (queued > 0)
+                        '⏳ รับชำระรอส่งเข้าระบบ $queued รายการ (${baht(queuedTotal)})',
+                      if (rejected > 0)
+                        '❌ ระบบปฏิเสธ $rejected รายการ — ต้องตรวจสอบ',
+                    ].join(' · '),
+                    style: TextStyle(color: color, fontWeight: FontWeight.w700),
+                  ),
+                ),
+                Text('ดูรายการ ›', style: TextStyle(color: color)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PendingPaymentsDialog extends StatefulWidget {
+  final List<PendingCreditPaymentRow> rows;
+  final List<MechanicRow> mechanics;
+  final MechanicsRepository repo;
+  const _PendingPaymentsDialog({
+    required this.rows,
+    required this.mechanics,
+    required this.repo,
+  });
+
+  @override
+  State<_PendingPaymentsDialog> createState() => _PendingPaymentsDialogState();
+}
+
+class _PendingPaymentsDialogState extends State<_PendingPaymentsDialog> {
+  late List<PendingCreditPaymentRow> _rows = widget.rows;
+  bool _busy = false;
+
+  Future<void> _run(Future<void> Function() action) async {
+    setState(() => _busy = true);
+    try {
+      await action();
+    } finally {
+      final rows = await widget.repo.getPendingCreditPayments();
+      if (mounted) {
+        setState(() {
+          _rows = rows;
+          _busy = false;
+        });
+      }
+    }
+  }
+
+  String _mechanicName(String id) {
+    final m = widget.mechanics.where((m) => m.id == id).firstOrNull;
+    return m == null ? id : (m.nameTH ?? m.name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('รับชำระที่ยังไม่เข้าระบบ'),
+      content: SizedBox(
+        width: 460,
+        child: _rows.isEmpty
+            ? const Text('ส่งเข้าระบบครบแล้ว')
+            : ListView.separated(
+                shrinkWrap: true,
+                itemCount: _rows.length,
+                separatorBuilder: (_, _) => const Divider(height: 1),
+                itemBuilder: (_, i) {
+                  final r = _rows[i];
+                  final rejected = r.rejectedCode != null;
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${_mechanicName(r.mechanicId)} · '
+                          '${baht(double.parse(r.amount))} · ${r.paymentMethod}',
+                          style: const TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                        Text(
+                          rejected
+                              ? '❌ ${r.rejectedMessage ?? r.rejectedCode}'
+                              : '⏳ รอส่ง · รับเมื่อ ${_historyDateTime(r.createdAt)}',
+                          style: TextStyle(color: rejected ? _red : _credit),
+                        ),
+                        if (rejected)
+                          Wrap(
+                            spacing: 8,
+                            children: [
+                              if (r.rejectedCode ==
+                                  'CREDIT_PAYMENT_EXCEEDS_BALANCE')
+                                TextButton(
+                                  onPressed: _busy
+                                      ? null
+                                      : () => _run(
+                                          () => widget.repo
+                                              .resendRejectedAllowingOverpayment(
+                                                r.id,
+                                              ),
+                                        ),
+                                  child: const Text('ส่งอีกครั้ง (ยืนยันจ่ายเกิน)'),
+                                ),
+                              TextButton(
+                                onPressed: _busy
+                                    ? null
+                                    : () async {
+                                        final ok = await showConfirm(
+                                          context,
+                                          'ลบรายการ',
+                                          'ระบบไม่ได้บันทึกรายการนี้ ลบออกจากเครื่อง? '
+                                              '(ถ้ารับเงินไปแล้ว ต้องจัดการคืนเงินหรือบันทึกใหม่เอง)',
+                                          danger: true,
+                                        );
+                                        if (ok) {
+                                          await _run(
+                                            () => widget.repo
+                                                .discardRejectedCreditPayment(
+                                                  r.id,
+                                                ),
+                                          );
+                                        }
+                                      },
+                                child: const Text('ลบรายการ'),
+                              ),
+                            ],
+                          ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy
+              ? null
+              : () => _run(widget.repo.flushPendingCreditPayments),
+          child: const Text('ส่งตอนนี้'),
+        ),
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          child: const Text('ปิด'),
+        ),
+      ],
+    );
   }
 }
 
@@ -1328,30 +1552,85 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
       );
       return;
     }
+    var allowOverpayment = false;
     if (amt > _balance) {
-      final ok = await showConfirm(
-        context,
-        'ยืนยันรับเงิน',
-        'จำนวนเงิน ${baht(amt)} เกินยอดค้าง ${baht(_balance)}\n\nยืนยันรับเงิน?',
-      );
-      if (!ok) return;
+      if (!await _confirmOverpayment(amt, _balance)) return;
+      allowOverpayment = true;
     }
     setState(() => _busy = true);
-    // Repo addCreditPayment accepts only mechanicId/amount/note. We fold the
-    // chosen method into the note so it appears in the account history line
-    // ("รับชำระเครดิต · <method> · <note>"), matching the JSX display.
+    // The Drift table has no method column, so the method is still folded into
+    // the note for the account history line ("รับชำระเครดิต · <method> · <note>"),
+    // matching the JSX display — and is ALSO passed on its own, because the
+    // server's closing report needs it as data (#24).
     final typed = _note.text.trim();
     final combinedNote = typed.isEmpty ? _method : '$_method · $typed';
-    await widget.repo.addCreditPayment(
+    Future<void> send(bool allow) => widget.repo.addCreditPayment(
       mechanicId: widget.mechanic.id,
       amount: amt,
       note: combinedNote,
+      paymentMethod: _method,
+      allowOverpayment: allow,
     );
+    try {
+      try {
+        await send(allowOverpayment);
+      } on PosException catch (e) {
+        // The check above tests the balance THIS dialog was opened with; the
+        // server tests the tab as it is now, and another counter may have moved
+        // it. Without this branch the refusal is a dead end that repeats on every
+        // press. Ask the same question again with the SERVER's numbers and resend
+        // only on a yes — the same shape as checkout's credit-limit 409 (#56).
+        if (e.code != 'CREDIT_PAYMENT_EXCEEDS_BALANCE' || allowOverpayment) {
+          rethrow;
+        }
+        final d = e.details;
+        final serverBalance = _detailMoney(
+          d is Map ? d['creditBalance'] : null,
+        );
+        if (serverBalance == null) rethrow;
+        if (!mounted) return;
+        if (!await _confirmOverpayment(amt, serverBalance)) {
+          if (mounted) setState(() => _busy = false);
+          return;
+        }
+        await send(true);
+      }
+    } on CreditPaymentQueued catch (e) {
+      // Saved on this device, not yet on the server. It is done from the
+      // counter's side: close and say so, or the next press is a second payment.
+      if (!mounted) return;
+      Navigator.of(context).pop(true);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.toString())));
+      return;
+    } catch (e) {
+      // Before #24 this call could not fail, so it had no catch — an escaping
+      // error left the button spinning with nothing on screen.
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+      return;
+    }
     if (!mounted) return;
     Navigator.of(context).pop(true);
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('รับชำระ ${baht(amt)} เรียบร้อย')));
+  }
+
+  Future<bool> _confirmOverpayment(double amt, double balance) => showConfirm(
+    context,
+    'ยืนยันรับเงิน',
+    'จำนวนเงิน ${baht(amt)} เกินยอดค้าง ${baht(balance)}\n\nยืนยันรับเงิน?',
+  );
+
+  double? _detailMoney(Object? wire) {
+    if (wire is num) return wire.toDouble();
+    if (wire is String) return double.tryParse(wire);
+    return null;
   }
 
   @override

@@ -8752,6 +8752,654 @@ class CreditPaymentsCompanion extends UpdateCompanion<CreditPaymentRow> {
   }
 }
 
+class $PendingCreditPaymentsTable extends PendingCreditPayments
+    with TableInfo<$PendingCreditPaymentsTable, PendingCreditPaymentRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $PendingCreditPaymentsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _idempotencyKeyMeta = const VerificationMeta(
+    'idempotencyKey',
+  );
+  @override
+  late final GeneratedColumn<String> idempotencyKey = GeneratedColumn<String>(
+    'idempotency_key',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _mechanicIdMeta = const VerificationMeta(
+    'mechanicId',
+  );
+  @override
+  late final GeneratedColumn<String> mechanicId = GeneratedColumn<String>(
+    'mechanic_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _amountMeta = const VerificationMeta('amount');
+  @override
+  late final GeneratedColumn<String> amount = GeneratedColumn<String>(
+    'amount',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _paymentMethodMeta = const VerificationMeta(
+    'paymentMethod',
+  );
+  @override
+  late final GeneratedColumn<String> paymentMethod = GeneratedColumn<String>(
+    'payment_method',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _noteMeta = const VerificationMeta('note');
+  @override
+  late final GeneratedColumn<String> note = GeneratedColumn<String>(
+    'note',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _allowOverpaymentMeta = const VerificationMeta(
+    'allowOverpayment',
+  );
+  @override
+  late final GeneratedColumn<bool> allowOverpayment = GeneratedColumn<bool>(
+    'allow_overpayment',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("allow_overpayment" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _rejectedCodeMeta = const VerificationMeta(
+    'rejectedCode',
+  );
+  @override
+  late final GeneratedColumn<String> rejectedCode = GeneratedColumn<String>(
+    'rejected_code',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _rejectedMessageMeta = const VerificationMeta(
+    'rejectedMessage',
+  );
+  @override
+  late final GeneratedColumn<String> rejectedMessage = GeneratedColumn<String>(
+    'rejected_message',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    idempotencyKey,
+    mechanicId,
+    amount,
+    paymentMethod,
+    note,
+    allowOverpayment,
+    createdAt,
+    rejectedCode,
+    rejectedMessage,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'pending_credit_payments';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<PendingCreditPaymentRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('idempotency_key')) {
+      context.handle(
+        _idempotencyKeyMeta,
+        idempotencyKey.isAcceptableOrUnknown(
+          data['idempotency_key']!,
+          _idempotencyKeyMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_idempotencyKeyMeta);
+    }
+    if (data.containsKey('mechanic_id')) {
+      context.handle(
+        _mechanicIdMeta,
+        mechanicId.isAcceptableOrUnknown(data['mechanic_id']!, _mechanicIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_mechanicIdMeta);
+    }
+    if (data.containsKey('amount')) {
+      context.handle(
+        _amountMeta,
+        amount.isAcceptableOrUnknown(data['amount']!, _amountMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_amountMeta);
+    }
+    if (data.containsKey('payment_method')) {
+      context.handle(
+        _paymentMethodMeta,
+        paymentMethod.isAcceptableOrUnknown(
+          data['payment_method']!,
+          _paymentMethodMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_paymentMethodMeta);
+    }
+    if (data.containsKey('note')) {
+      context.handle(
+        _noteMeta,
+        note.isAcceptableOrUnknown(data['note']!, _noteMeta),
+      );
+    }
+    if (data.containsKey('allow_overpayment')) {
+      context.handle(
+        _allowOverpaymentMeta,
+        allowOverpayment.isAcceptableOrUnknown(
+          data['allow_overpayment']!,
+          _allowOverpaymentMeta,
+        ),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('rejected_code')) {
+      context.handle(
+        _rejectedCodeMeta,
+        rejectedCode.isAcceptableOrUnknown(
+          data['rejected_code']!,
+          _rejectedCodeMeta,
+        ),
+      );
+    }
+    if (data.containsKey('rejected_message')) {
+      context.handle(
+        _rejectedMessageMeta,
+        rejectedMessage.isAcceptableOrUnknown(
+          data['rejected_message']!,
+          _rejectedMessageMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  PendingCreditPaymentRow map(
+    Map<String, dynamic> data, {
+    String? tablePrefix,
+  }) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return PendingCreditPaymentRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      idempotencyKey: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}idempotency_key'],
+      )!,
+      mechanicId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}mechanic_id'],
+      )!,
+      amount: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}amount'],
+      )!,
+      paymentMethod: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}payment_method'],
+      )!,
+      note: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}note'],
+      ),
+      allowOverpayment: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}allow_overpayment'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+      rejectedCode: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}rejected_code'],
+      ),
+      rejectedMessage: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}rejected_message'],
+      ),
+    );
+  }
+
+  @override
+  $PendingCreditPaymentsTable createAlias(String alias) {
+    return $PendingCreditPaymentsTable(attachedDatabase, alias);
+  }
+}
+
+class PendingCreditPaymentRow extends DataClass
+    implements Insertable<PendingCreditPaymentRow> {
+  /// The client id sent as the body's `id` — the server's durable replay check.
+  final String id;
+  final String idempotencyKey;
+  final String mechanicId;
+
+  /// The wire's two-decimal string, exactly as it will be sent.
+  final String amount;
+  final String paymentMethod;
+  final String? note;
+  final bool allowOverpayment;
+  final DateTime createdAt;
+
+  /// Null while the payment may still be sent. Set to the server's refusal code
+  /// once it gave a verdict — the row then waits for a person, never a retry.
+  final String? rejectedCode;
+  final String? rejectedMessage;
+  const PendingCreditPaymentRow({
+    required this.id,
+    required this.idempotencyKey,
+    required this.mechanicId,
+    required this.amount,
+    required this.paymentMethod,
+    this.note,
+    required this.allowOverpayment,
+    required this.createdAt,
+    this.rejectedCode,
+    this.rejectedMessage,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['idempotency_key'] = Variable<String>(idempotencyKey);
+    map['mechanic_id'] = Variable<String>(mechanicId);
+    map['amount'] = Variable<String>(amount);
+    map['payment_method'] = Variable<String>(paymentMethod);
+    if (!nullToAbsent || note != null) {
+      map['note'] = Variable<String>(note);
+    }
+    map['allow_overpayment'] = Variable<bool>(allowOverpayment);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || rejectedCode != null) {
+      map['rejected_code'] = Variable<String>(rejectedCode);
+    }
+    if (!nullToAbsent || rejectedMessage != null) {
+      map['rejected_message'] = Variable<String>(rejectedMessage);
+    }
+    return map;
+  }
+
+  PendingCreditPaymentsCompanion toCompanion(bool nullToAbsent) {
+    return PendingCreditPaymentsCompanion(
+      id: Value(id),
+      idempotencyKey: Value(idempotencyKey),
+      mechanicId: Value(mechanicId),
+      amount: Value(amount),
+      paymentMethod: Value(paymentMethod),
+      note: note == null && nullToAbsent ? const Value.absent() : Value(note),
+      allowOverpayment: Value(allowOverpayment),
+      createdAt: Value(createdAt),
+      rejectedCode: rejectedCode == null && nullToAbsent
+          ? const Value.absent()
+          : Value(rejectedCode),
+      rejectedMessage: rejectedMessage == null && nullToAbsent
+          ? const Value.absent()
+          : Value(rejectedMessage),
+    );
+  }
+
+  factory PendingCreditPaymentRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return PendingCreditPaymentRow(
+      id: serializer.fromJson<String>(json['id']),
+      idempotencyKey: serializer.fromJson<String>(json['idempotencyKey']),
+      mechanicId: serializer.fromJson<String>(json['mechanicId']),
+      amount: serializer.fromJson<String>(json['amount']),
+      paymentMethod: serializer.fromJson<String>(json['paymentMethod']),
+      note: serializer.fromJson<String?>(json['note']),
+      allowOverpayment: serializer.fromJson<bool>(json['allowOverpayment']),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      rejectedCode: serializer.fromJson<String?>(json['rejectedCode']),
+      rejectedMessage: serializer.fromJson<String?>(json['rejectedMessage']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'idempotencyKey': serializer.toJson<String>(idempotencyKey),
+      'mechanicId': serializer.toJson<String>(mechanicId),
+      'amount': serializer.toJson<String>(amount),
+      'paymentMethod': serializer.toJson<String>(paymentMethod),
+      'note': serializer.toJson<String?>(note),
+      'allowOverpayment': serializer.toJson<bool>(allowOverpayment),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'rejectedCode': serializer.toJson<String?>(rejectedCode),
+      'rejectedMessage': serializer.toJson<String?>(rejectedMessage),
+    };
+  }
+
+  PendingCreditPaymentRow copyWith({
+    String? id,
+    String? idempotencyKey,
+    String? mechanicId,
+    String? amount,
+    String? paymentMethod,
+    Value<String?> note = const Value.absent(),
+    bool? allowOverpayment,
+    DateTime? createdAt,
+    Value<String?> rejectedCode = const Value.absent(),
+    Value<String?> rejectedMessage = const Value.absent(),
+  }) => PendingCreditPaymentRow(
+    id: id ?? this.id,
+    idempotencyKey: idempotencyKey ?? this.idempotencyKey,
+    mechanicId: mechanicId ?? this.mechanicId,
+    amount: amount ?? this.amount,
+    paymentMethod: paymentMethod ?? this.paymentMethod,
+    note: note.present ? note.value : this.note,
+    allowOverpayment: allowOverpayment ?? this.allowOverpayment,
+    createdAt: createdAt ?? this.createdAt,
+    rejectedCode: rejectedCode.present ? rejectedCode.value : this.rejectedCode,
+    rejectedMessage: rejectedMessage.present
+        ? rejectedMessage.value
+        : this.rejectedMessage,
+  );
+  PendingCreditPaymentRow copyWithCompanion(
+    PendingCreditPaymentsCompanion data,
+  ) {
+    return PendingCreditPaymentRow(
+      id: data.id.present ? data.id.value : this.id,
+      idempotencyKey: data.idempotencyKey.present
+          ? data.idempotencyKey.value
+          : this.idempotencyKey,
+      mechanicId: data.mechanicId.present
+          ? data.mechanicId.value
+          : this.mechanicId,
+      amount: data.amount.present ? data.amount.value : this.amount,
+      paymentMethod: data.paymentMethod.present
+          ? data.paymentMethod.value
+          : this.paymentMethod,
+      note: data.note.present ? data.note.value : this.note,
+      allowOverpayment: data.allowOverpayment.present
+          ? data.allowOverpayment.value
+          : this.allowOverpayment,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      rejectedCode: data.rejectedCode.present
+          ? data.rejectedCode.value
+          : this.rejectedCode,
+      rejectedMessage: data.rejectedMessage.present
+          ? data.rejectedMessage.value
+          : this.rejectedMessage,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PendingCreditPaymentRow(')
+          ..write('id: $id, ')
+          ..write('idempotencyKey: $idempotencyKey, ')
+          ..write('mechanicId: $mechanicId, ')
+          ..write('amount: $amount, ')
+          ..write('paymentMethod: $paymentMethod, ')
+          ..write('note: $note, ')
+          ..write('allowOverpayment: $allowOverpayment, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('rejectedCode: $rejectedCode, ')
+          ..write('rejectedMessage: $rejectedMessage')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    idempotencyKey,
+    mechanicId,
+    amount,
+    paymentMethod,
+    note,
+    allowOverpayment,
+    createdAt,
+    rejectedCode,
+    rejectedMessage,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is PendingCreditPaymentRow &&
+          other.id == this.id &&
+          other.idempotencyKey == this.idempotencyKey &&
+          other.mechanicId == this.mechanicId &&
+          other.amount == this.amount &&
+          other.paymentMethod == this.paymentMethod &&
+          other.note == this.note &&
+          other.allowOverpayment == this.allowOverpayment &&
+          other.createdAt == this.createdAt &&
+          other.rejectedCode == this.rejectedCode &&
+          other.rejectedMessage == this.rejectedMessage);
+}
+
+class PendingCreditPaymentsCompanion
+    extends UpdateCompanion<PendingCreditPaymentRow> {
+  final Value<String> id;
+  final Value<String> idempotencyKey;
+  final Value<String> mechanicId;
+  final Value<String> amount;
+  final Value<String> paymentMethod;
+  final Value<String?> note;
+  final Value<bool> allowOverpayment;
+  final Value<DateTime> createdAt;
+  final Value<String?> rejectedCode;
+  final Value<String?> rejectedMessage;
+  final Value<int> rowid;
+  const PendingCreditPaymentsCompanion({
+    this.id = const Value.absent(),
+    this.idempotencyKey = const Value.absent(),
+    this.mechanicId = const Value.absent(),
+    this.amount = const Value.absent(),
+    this.paymentMethod = const Value.absent(),
+    this.note = const Value.absent(),
+    this.allowOverpayment = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.rejectedCode = const Value.absent(),
+    this.rejectedMessage = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  PendingCreditPaymentsCompanion.insert({
+    required String id,
+    required String idempotencyKey,
+    required String mechanicId,
+    required String amount,
+    required String paymentMethod,
+    this.note = const Value.absent(),
+    this.allowOverpayment = const Value.absent(),
+    required DateTime createdAt,
+    this.rejectedCode = const Value.absent(),
+    this.rejectedMessage = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       idempotencyKey = Value(idempotencyKey),
+       mechanicId = Value(mechanicId),
+       amount = Value(amount),
+       paymentMethod = Value(paymentMethod),
+       createdAt = Value(createdAt);
+  static Insertable<PendingCreditPaymentRow> custom({
+    Expression<String>? id,
+    Expression<String>? idempotencyKey,
+    Expression<String>? mechanicId,
+    Expression<String>? amount,
+    Expression<String>? paymentMethod,
+    Expression<String>? note,
+    Expression<bool>? allowOverpayment,
+    Expression<DateTime>? createdAt,
+    Expression<String>? rejectedCode,
+    Expression<String>? rejectedMessage,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (idempotencyKey != null) 'idempotency_key': idempotencyKey,
+      if (mechanicId != null) 'mechanic_id': mechanicId,
+      if (amount != null) 'amount': amount,
+      if (paymentMethod != null) 'payment_method': paymentMethod,
+      if (note != null) 'note': note,
+      if (allowOverpayment != null) 'allow_overpayment': allowOverpayment,
+      if (createdAt != null) 'created_at': createdAt,
+      if (rejectedCode != null) 'rejected_code': rejectedCode,
+      if (rejectedMessage != null) 'rejected_message': rejectedMessage,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  PendingCreditPaymentsCompanion copyWith({
+    Value<String>? id,
+    Value<String>? idempotencyKey,
+    Value<String>? mechanicId,
+    Value<String>? amount,
+    Value<String>? paymentMethod,
+    Value<String?>? note,
+    Value<bool>? allowOverpayment,
+    Value<DateTime>? createdAt,
+    Value<String?>? rejectedCode,
+    Value<String?>? rejectedMessage,
+    Value<int>? rowid,
+  }) {
+    return PendingCreditPaymentsCompanion(
+      id: id ?? this.id,
+      idempotencyKey: idempotencyKey ?? this.idempotencyKey,
+      mechanicId: mechanicId ?? this.mechanicId,
+      amount: amount ?? this.amount,
+      paymentMethod: paymentMethod ?? this.paymentMethod,
+      note: note ?? this.note,
+      allowOverpayment: allowOverpayment ?? this.allowOverpayment,
+      createdAt: createdAt ?? this.createdAt,
+      rejectedCode: rejectedCode ?? this.rejectedCode,
+      rejectedMessage: rejectedMessage ?? this.rejectedMessage,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (idempotencyKey.present) {
+      map['idempotency_key'] = Variable<String>(idempotencyKey.value);
+    }
+    if (mechanicId.present) {
+      map['mechanic_id'] = Variable<String>(mechanicId.value);
+    }
+    if (amount.present) {
+      map['amount'] = Variable<String>(amount.value);
+    }
+    if (paymentMethod.present) {
+      map['payment_method'] = Variable<String>(paymentMethod.value);
+    }
+    if (note.present) {
+      map['note'] = Variable<String>(note.value);
+    }
+    if (allowOverpayment.present) {
+      map['allow_overpayment'] = Variable<bool>(allowOverpayment.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (rejectedCode.present) {
+      map['rejected_code'] = Variable<String>(rejectedCode.value);
+    }
+    if (rejectedMessage.present) {
+      map['rejected_message'] = Variable<String>(rejectedMessage.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('PendingCreditPaymentsCompanion(')
+          ..write('id: $id, ')
+          ..write('idempotencyKey: $idempotencyKey, ')
+          ..write('mechanicId: $mechanicId, ')
+          ..write('amount: $amount, ')
+          ..write('paymentMethod: $paymentMethod, ')
+          ..write('note: $note, ')
+          ..write('allowOverpayment: $allowOverpayment, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('rejectedCode: $rejectedCode, ')
+          ..write('rejectedMessage: $rejectedMessage, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $ShiftsTable extends Shifts with TableInfo<$ShiftsTable, ShiftRow> {
   @override
   final GeneratedDatabase attachedDatabase;
@@ -10931,6 +11579,8 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $MovementsTable movements = $MovementsTable(this);
   late final $SuppliersTable suppliers = $SuppliersTable(this);
   late final $CreditPaymentsTable creditPayments = $CreditPaymentsTable(this);
+  late final $PendingCreditPaymentsTable pendingCreditPayments =
+      $PendingCreditPaymentsTable(this);
   late final $ShiftsTable shifts = $ShiftsTable(this);
   late final $DrawerEntriesTable drawerEntries = $DrawerEntriesTable(this);
   late final $ParkedSalesTable parkedSales = $ParkedSalesTable(this);
@@ -10956,6 +11606,7 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     movements,
     suppliers,
     creditPayments,
+    pendingCreditPayments,
     shifts,
     drawerEntries,
     parkedSales,
@@ -16165,6 +16816,332 @@ typedef $$CreditPaymentsTableProcessedTableManager =
       CreditPaymentRow,
       PrefetchHooks Function()
     >;
+typedef $$PendingCreditPaymentsTableCreateCompanionBuilder =
+    PendingCreditPaymentsCompanion Function({
+      required String id,
+      required String idempotencyKey,
+      required String mechanicId,
+      required String amount,
+      required String paymentMethod,
+      Value<String?> note,
+      Value<bool> allowOverpayment,
+      required DateTime createdAt,
+      Value<String?> rejectedCode,
+      Value<String?> rejectedMessage,
+      Value<int> rowid,
+    });
+typedef $$PendingCreditPaymentsTableUpdateCompanionBuilder =
+    PendingCreditPaymentsCompanion Function({
+      Value<String> id,
+      Value<String> idempotencyKey,
+      Value<String> mechanicId,
+      Value<String> amount,
+      Value<String> paymentMethod,
+      Value<String?> note,
+      Value<bool> allowOverpayment,
+      Value<DateTime> createdAt,
+      Value<String?> rejectedCode,
+      Value<String?> rejectedMessage,
+      Value<int> rowid,
+    });
+
+class $$PendingCreditPaymentsTableFilterComposer
+    extends Composer<_$AppDatabase, $PendingCreditPaymentsTable> {
+  $$PendingCreditPaymentsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get idempotencyKey => $composableBuilder(
+    column: $table.idempotencyKey,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get mechanicId => $composableBuilder(
+    column: $table.mechanicId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get amount => $composableBuilder(
+    column: $table.amount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get paymentMethod => $composableBuilder(
+    column: $table.paymentMethod,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get note => $composableBuilder(
+    column: $table.note,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get allowOverpayment => $composableBuilder(
+    column: $table.allowOverpayment,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get rejectedCode => $composableBuilder(
+    column: $table.rejectedCode,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get rejectedMessage => $composableBuilder(
+    column: $table.rejectedMessage,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$PendingCreditPaymentsTableOrderingComposer
+    extends Composer<_$AppDatabase, $PendingCreditPaymentsTable> {
+  $$PendingCreditPaymentsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get idempotencyKey => $composableBuilder(
+    column: $table.idempotencyKey,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get mechanicId => $composableBuilder(
+    column: $table.mechanicId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get amount => $composableBuilder(
+    column: $table.amount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get paymentMethod => $composableBuilder(
+    column: $table.paymentMethod,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get note => $composableBuilder(
+    column: $table.note,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get allowOverpayment => $composableBuilder(
+    column: $table.allowOverpayment,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get rejectedCode => $composableBuilder(
+    column: $table.rejectedCode,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get rejectedMessage => $composableBuilder(
+    column: $table.rejectedMessage,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$PendingCreditPaymentsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $PendingCreditPaymentsTable> {
+  $$PendingCreditPaymentsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get idempotencyKey => $composableBuilder(
+    column: $table.idempotencyKey,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get mechanicId => $composableBuilder(
+    column: $table.mechanicId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get amount =>
+      $composableBuilder(column: $table.amount, builder: (column) => column);
+
+  GeneratedColumn<String> get paymentMethod => $composableBuilder(
+    column: $table.paymentMethod,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get note =>
+      $composableBuilder(column: $table.note, builder: (column) => column);
+
+  GeneratedColumn<bool> get allowOverpayment => $composableBuilder(
+    column: $table.allowOverpayment,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<String> get rejectedCode => $composableBuilder(
+    column: $table.rejectedCode,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get rejectedMessage => $composableBuilder(
+    column: $table.rejectedMessage,
+    builder: (column) => column,
+  );
+}
+
+class $$PendingCreditPaymentsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $PendingCreditPaymentsTable,
+          PendingCreditPaymentRow,
+          $$PendingCreditPaymentsTableFilterComposer,
+          $$PendingCreditPaymentsTableOrderingComposer,
+          $$PendingCreditPaymentsTableAnnotationComposer,
+          $$PendingCreditPaymentsTableCreateCompanionBuilder,
+          $$PendingCreditPaymentsTableUpdateCompanionBuilder,
+          (
+            PendingCreditPaymentRow,
+            BaseReferences<
+              _$AppDatabase,
+              $PendingCreditPaymentsTable,
+              PendingCreditPaymentRow
+            >,
+          ),
+          PendingCreditPaymentRow,
+          PrefetchHooks Function()
+        > {
+  $$PendingCreditPaymentsTableTableManager(
+    _$AppDatabase db,
+    $PendingCreditPaymentsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$PendingCreditPaymentsTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$PendingCreditPaymentsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$PendingCreditPaymentsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> idempotencyKey = const Value.absent(),
+                Value<String> mechanicId = const Value.absent(),
+                Value<String> amount = const Value.absent(),
+                Value<String> paymentMethod = const Value.absent(),
+                Value<String?> note = const Value.absent(),
+                Value<bool> allowOverpayment = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<String?> rejectedCode = const Value.absent(),
+                Value<String?> rejectedMessage = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => PendingCreditPaymentsCompanion(
+                id: id,
+                idempotencyKey: idempotencyKey,
+                mechanicId: mechanicId,
+                amount: amount,
+                paymentMethod: paymentMethod,
+                note: note,
+                allowOverpayment: allowOverpayment,
+                createdAt: createdAt,
+                rejectedCode: rejectedCode,
+                rejectedMessage: rejectedMessage,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String idempotencyKey,
+                required String mechanicId,
+                required String amount,
+                required String paymentMethod,
+                Value<String?> note = const Value.absent(),
+                Value<bool> allowOverpayment = const Value.absent(),
+                required DateTime createdAt,
+                Value<String?> rejectedCode = const Value.absent(),
+                Value<String?> rejectedMessage = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => PendingCreditPaymentsCompanion.insert(
+                id: id,
+                idempotencyKey: idempotencyKey,
+                mechanicId: mechanicId,
+                amount: amount,
+                paymentMethod: paymentMethod,
+                note: note,
+                allowOverpayment: allowOverpayment,
+                createdAt: createdAt,
+                rejectedCode: rejectedCode,
+                rejectedMessage: rejectedMessage,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$PendingCreditPaymentsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $PendingCreditPaymentsTable,
+      PendingCreditPaymentRow,
+      $$PendingCreditPaymentsTableFilterComposer,
+      $$PendingCreditPaymentsTableOrderingComposer,
+      $$PendingCreditPaymentsTableAnnotationComposer,
+      $$PendingCreditPaymentsTableCreateCompanionBuilder,
+      $$PendingCreditPaymentsTableUpdateCompanionBuilder,
+      (
+        PendingCreditPaymentRow,
+        BaseReferences<
+          _$AppDatabase,
+          $PendingCreditPaymentsTable,
+          PendingCreditPaymentRow
+        >,
+      ),
+      PendingCreditPaymentRow,
+      PrefetchHooks Function()
+    >;
 typedef $$ShiftsTableCreateCompanionBuilder =
     ShiftsCompanion Function({
       required String id,
@@ -17551,6 +18528,8 @@ class $AppDatabaseManager {
       $$SuppliersTableTableManager(_db, _db.suppliers);
   $$CreditPaymentsTableTableManager get creditPayments =>
       $$CreditPaymentsTableTableManager(_db, _db.creditPayments);
+  $$PendingCreditPaymentsTableTableManager get pendingCreditPayments =>
+      $$PendingCreditPaymentsTableTableManager(_db, _db.pendingCreditPayments);
   $$ShiftsTableTableManager get shifts =>
       $$ShiftsTableTableManager(_db, _db.shifts);
   $$DrawerEntriesTableTableManager get drawerEntries =>

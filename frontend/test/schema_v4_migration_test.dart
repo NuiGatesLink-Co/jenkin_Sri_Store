@@ -91,7 +91,7 @@ void main() {
         .customSelect('PRAGMA user_version')
         .map((r) => r.data.values.first)
         .getSingle();
-    expect(version, 4);
+    expect(version, 5);
 
     final product = await (db.select(
       db.products,
@@ -115,5 +115,29 @@ void main() {
       db.products,
     )..where((t) => t.id.equals('p1'))).getSingle();
     expect(updated.deletedAt, isNotNull);
+  });
+
+  // v4 → v5 (#24): an existing file gains the credit-payment outbox. Without the
+  // `createTable` step the first offline payment on an upgraded till would throw
+  // "no such table" instead of being queued.
+  test('an upgraded file gains the v5 credit-payment outbox, empty', () async {
+    expect(await db.select(db.pendingCreditPayments).get(), isEmpty);
+
+    await db
+        .into(db.pendingCreditPayments)
+        .insert(
+          PendingCreditPaymentsCompanion.insert(
+            id: 'cp_1',
+            idempotencyKey: 'idem_1',
+            mechanicId: 'm1',
+            amount: '500.00',
+            paymentMethod: 'เงินสด',
+            createdAt: DateTime(2026, 9, 13, 10),
+          ),
+        );
+
+    final row = await db.select(db.pendingCreditPayments).getSingle();
+    expect(row.allowOverpayment, isFalse);
+    expect(row.rejectedCode, isNull);
   });
 }
