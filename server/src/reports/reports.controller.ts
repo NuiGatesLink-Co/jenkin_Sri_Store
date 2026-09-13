@@ -15,6 +15,7 @@ import {
 import { reportDateRange } from './reports.dto.js';
 import {
   type CategorySales,
+  type ClosingReport,
   type LowStockProduct,
   type ProductSales,
   type ReportSummary,
@@ -33,6 +34,14 @@ export class ReportsController {
     @Query('to') to?: string,
   ): Promise<ReportSummary> {
     return this.reports.summary(reportDateRange(from, to));
+  }
+
+  @Get('closing')
+  closing(@Query('shiftId') shiftId?: string): Promise<ClosingReport> {
+    if (!shiftId) {
+      throw new BadRequestException('shiftId is required');
+    }
+    return this.reports.closing(shiftId);
   }
 
   @Get('top-products')

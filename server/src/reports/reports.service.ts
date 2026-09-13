@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
 import type { ReportDateRange } from './reports.dto.js';
 
@@ -9,6 +9,34 @@ export interface ReportSummary {
   totalRefunds: string;
   netRevenue: string;
   totalItems: number;
+}
+
+/** `GET /reports/closing?shiftId=` — one drawer, keyed by `shift_id` only. */
+export interface ClosingReport {
+  shiftId: string;
+  dateStr: string;
+  deviceId: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  startingCash: string;
+  cashSales: string;
+  cashCreditPayments: string;
+  cashRefunds: string;
+  drawerIn: string;
+  drawerOut: string;
+  expectedCash: string;
+  /** Null until the shift is closed: there is no count to compare against. */
+  physicalCash: string | null;
+  variance: string | null;
+  grossProfit: string;
+  /**
+   * How much of `grossProfit` is a guess (ADR-0008). A line whose `cost_at_sale` is
+   * null — an imported bill, never backfilled — is costed at today's `products.cost`
+   * and counted here; a null line whose product row is gone too is costed at 0 and
+   * counted in `unknownCostRows`, so a 100% margin never reads as fact.
+   */
+  estimatedCostRows: number;
+  unknownCostRows: number;
 }
 
 export interface ProductSales {
@@ -50,6 +78,90 @@ interface SummaryRow {
   net_revenue: string;
   total_items: number;
 }
+
+interface ClosingRow {
+  id: string;
+  date_str: string;
+  device_id: string | null;
+  opened_at: Date;
+  closed_at: Date | null;
+  starting_cash: string;
+  cash_sales: string;
+  cash_credit_payments: string;
+  cash_refunds: string;
+  drawer_in: string;
+  drawer_out: string;
+  expected_cash: string;
+  physical_cash: string | null;
+  variance: string | null;
+  gross_profit: string;
+  estimated_cost_rows: number;
+  unknown_cost_rows: number;
+}
+
+/** The one cash method string: `sales.dto.ts`, `returns.dto.ts` and `credit-payments.dto.ts` all accept it. */
+const CASH = 'เงินสด';
+
+/**
+ * A bill that still counts as money taken and goods sold.
+ *
+ * A **manual** void (`POST /sales/:id/void`) undoes the bill outright — stock back,
+ * ledger reversed, no credit note — so it is excluded. An **auto**-void is what a
+ * return of the last unit does (`returns.service.ts`); that bill stays counted and
+ * its credit notes subtract, or the refund would be taken off twice. The two are
+ * exactly separable because a manual void is refused once any return exists
+ * (`SALE_HAS_RETURNS`).
+ */
+const COUNTED_SALE = `NOT (s.voided AND NOT EXISTS (
+  SELECT 1 FROM returns rv
+   WHERE rv.tenant_id = $1::uuid AND rv.tenant_id = s.tenant_id AND rv.sale_id = s.id))`;
+
+/**
+ * Gross profit over one shift's bills and credit notes (`$2` is the shift id):
+ *
+ *   (Σ sales.total − Σ returns.refund_total) ÷ (1 + tax_rate/100)
+ *   − Σ sale-line qty × cost + Σ return-line qty × cost
+ *
+ * Revenue is ex-VAT and after the bill discount, as `products_screen.dart`'s
+ * "กำไรเดือนนี้" and `closing_report.dart`'s `_grossProfit` both compute it (summing
+ * lines × (1 − discount ratio) is `sales.total`). Unlike either Dart screen, credit
+ * notes net out — with `return_items.cost_at_sale`, which #22 carries from the bill
+ * for exactly this (ADR-0008, "การรับคืน"). Cost is `cost_at_sale`, and today's
+ * `products.cost` only for null rows. `settings.tax_rate` defaults to 7 like the
+ * column and the client.
+ */
+const GROSS_PROFIT = `
+gp_sales AS (
+  SELECT s.id, s.total FROM sales s
+   WHERE s.tenant_id = $1::uuid AND s.shift_id = $2 AND ${COUNTED_SALE}
+),
+gp_returns AS (
+  SELECT r.id, r.refund_total FROM returns r
+   WHERE r.tenant_id = $1::uuid AND r.shift_id = $2
+),
+gp_lines AS (
+  SELECT si.qty, si.cost_at_sale, p.cost AS current_cost
+    FROM gp_sales s
+    JOIN sale_items si ON si.tenant_id = $1::uuid AND si.sale_id = s.id
+    LEFT JOIN products p ON p.tenant_id = $1::uuid AND p.id = si.product_id
+  UNION ALL
+  SELECT -ri.qty, ri.cost_at_sale, p.cost
+    FROM gp_returns r
+    JOIN return_items ri ON ri.tenant_id = $1::uuid AND ri.return_id = r.id
+    LEFT JOIN products p ON p.tenant_id = $1::uuid AND p.id = ri.product_id
+),
+gross_profit AS (
+  SELECT round(
+           (COALESCE((SELECT sum(total) FROM gp_sales), 0)
+            - COALESCE((SELECT sum(refund_total) FROM gp_returns), 0))
+           / (1 + COALESCE((SELECT tax_rate FROM settings WHERE tenant_id = $1::uuid), 7) / 100)
+           - COALESCE((SELECT sum(qty * COALESCE(cost_at_sale, current_cost, 0)) FROM gp_lines), 0),
+         2)::numeric(20,2) AS gross_profit,
+         (SELECT count(*) FROM gp_lines
+           WHERE cost_at_sale IS NULL AND current_cost IS NOT NULL)::int AS estimated_cost_rows,
+         (SELECT count(*) FROM gp_lines
+           WHERE cost_at_sale IS NULL AND current_cost IS NULL)::int AS unknown_cost_rows
+)`;
 
 interface ProductSalesRow {
   product_id: string;
@@ -242,6 +354,94 @@ export class ReportsService {
       totalRefunds: row.total_refunds,
       netRevenue: row.net_revenue,
       totalItems: row.total_items,
+    };
+  }
+
+  /**
+   * The closing report for one shift, computed **by `shift_id`** — never by a time
+   * window, which breaks across midnight and cannot tell two machines apart
+   * (`02_API_SCREENS.md §3.11`):
+   *
+   *   expected = starting_cash + cash sales + mechanics' cash credit payments
+   *            − cash refunds + drawer in − drawer out
+   *   variance = physical_cash − expected   (null while the shift is not closed)
+   *
+   * Cash means the method string `'เงินสด'` on each document; transfers and
+   * `เครดิตช่าง` / `หักจากเครดิต` never touch the drawer. Readable from both device
+   * roles, like `GET /shifts/*`.
+   */
+  async closing(shiftId: string): Promise<ClosingReport> {
+    const { tenantId, manager } = currentRequestContext();
+    const rows = (await manager.query(
+      `WITH shift AS (
+         SELECT id, date_str, device_id, opened_at, closed_at, starting_cash, physical_cash
+           FROM shifts
+          WHERE tenant_id = $1::uuid AND id = $2
+       ),
+       cash AS (
+         SELECT
+           (SELECT COALESCE(sum(s.total), 0) FROM sales s
+             WHERE s.tenant_id = $1::uuid AND s.shift_id = $2
+               AND s.payment_method = $3 AND ${COUNTED_SALE}) AS cash_sales,
+           (SELECT COALESCE(sum(cp.amount), 0) FROM credit_payments cp
+             WHERE cp.tenant_id = $1::uuid AND cp.shift_id = $2
+               AND cp.payment_method = $3) AS cash_credit_payments,
+           (SELECT COALESCE(sum(r.refund_total), 0) FROM returns r
+             WHERE r.tenant_id = $1::uuid AND r.shift_id = $2
+               AND r.refund_method = $3) AS cash_refunds,
+           (SELECT COALESCE(sum(amount) FILTER (WHERE type = 'in'), 0) FROM drawer_entries
+             WHERE tenant_id = $1::uuid AND shift_id = $2) AS drawer_in,
+           (SELECT COALESCE(sum(amount) FILTER (WHERE type = 'out'), 0) FROM drawer_entries
+             WHERE tenant_id = $1::uuid AND shift_id = $2) AS drawer_out
+       ),
+       ${GROSS_PROFIT},
+       expected AS (
+         SELECT (sh.starting_cash + c.cash_sales + c.cash_credit_payments
+                 - c.cash_refunds + c.drawer_in - c.drawer_out) AS expected_cash
+           FROM shift sh CROSS JOIN cash c
+       )
+       SELECT sh.id, sh.date_str, sh.device_id, sh.opened_at, sh.closed_at,
+              sh.starting_cash,
+              c.cash_sales::numeric(20,2) AS cash_sales,
+              c.cash_credit_payments::numeric(20,2) AS cash_credit_payments,
+              c.cash_refunds::numeric(20,2) AS cash_refunds,
+              c.drawer_in::numeric(20,2) AS drawer_in,
+              c.drawer_out::numeric(20,2) AS drawer_out,
+              e.expected_cash::numeric(20,2) AS expected_cash,
+              CASE WHEN sh.closed_at IS NULL THEN NULL ELSE sh.physical_cash END AS physical_cash,
+              CASE WHEN sh.closed_at IS NULL THEN NULL
+                   ELSE (sh.physical_cash - e.expected_cash)::numeric(20,2) END AS variance,
+              gp.gross_profit, gp.estimated_cost_rows, gp.unknown_cost_rows
+         FROM shift sh CROSS JOIN cash c CROSS JOIN expected e CROSS JOIN gross_profit gp`,
+      [tenantId, shiftId, CASH],
+    )) as ClosingRow[];
+    // RLS already hides another tenant's shift, and the explicit predicate hides it
+    // again: an unknown id and a foreign one are the same 404.
+    if (rows.length === 0) {
+      throw new HttpException(
+        { code: 'SHIFT_NOT_FOUND', message: 'Shift not found' },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    const row = rows[0];
+    return {
+      shiftId: row.id,
+      dateStr: row.date_str,
+      deviceId: row.device_id,
+      openedAt: row.opened_at.toISOString(),
+      closedAt: row.closed_at ? row.closed_at.toISOString() : null,
+      startingCash: row.starting_cash,
+      cashSales: row.cash_sales,
+      cashCreditPayments: row.cash_credit_payments,
+      cashRefunds: row.cash_refunds,
+      drawerIn: row.drawer_in,
+      drawerOut: row.drawer_out,
+      expectedCash: row.expected_cash,
+      physicalCash: row.physical_cash,
+      variance: row.variance,
+      grossProfit: row.gross_profit,
+      estimatedCostRows: row.estimated_cost_rows,
+      unknownCostRows: row.unknown_cost_rows,
     };
   }
 

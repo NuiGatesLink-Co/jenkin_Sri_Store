@@ -649,6 +649,7 @@ CREATE TABLE returns (
 );
 CREATE INDEX idx_returns_sale ON returns (tenant_id, sale_id);
 CREATE INDEX idx_returns_date ON returns (tenant_id, date DESC);
+CREATE INDEX idx_returns_shift ON returns (tenant_id, shift_id); -- #30: รายงานปิดร้านรวมยอดคืนเงินสดของกะเดียว
 
 CREATE TABLE return_items (
   tenant_id    UUID NOT NULL,
