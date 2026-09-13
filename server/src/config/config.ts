@@ -16,6 +16,8 @@ export interface AppConfig {
   jwtPublicKeys?: string[];
   /** Optional active signing key ID (defaults to 'key-1'). */
   jwtKeyId?: string;
+  /** Allowed CORS origins (defaults to '*' or localhost in dev). */
+  corsOrigins?: string[];
 }
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
@@ -64,5 +66,8 @@ export function loadConfig(env = process.env): AppConfig {
     jwtPrivateKey: isApi ? required(env, 'JWT_PRIVATE_KEY') : undefined,
     jwtPublicKeys: isApi ? parsePublicKeys(required(env, 'JWT_PUBLIC_KEYS')) : undefined,
     jwtKeyId: env.JWT_KEY_ID ?? 'key-1',
+    corsOrigins: env.CORS_ORIGINS
+      ? env.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
+      : undefined,
   };
 }

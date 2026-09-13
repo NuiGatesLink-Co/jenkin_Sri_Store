@@ -13,11 +13,12 @@ export class AuthController {
 
   @Post('token')
   @HttpCode(200)
-  async login(@Body() dto: LoginDto) {
+  async login(@Body() dto: LoginDto, @Req() req: Request) {
     if (!dto.username || !dto.password) {
       throw new UnauthorizedException('Username and password are required');
     }
-    return this.authService.login(dto);
+    const ip = req.ip || req.socket.remoteAddress;
+    return this.authService.login(dto, ip);
   }
 
   @Post('refresh')

@@ -1,9 +1,17 @@
-import { Injectable, UnauthorizedException, Logger, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  UnauthorizedException,
+  Logger,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+} from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import * as crypto from 'node:crypto';
 import * as argon2 from 'argon2';
 import { JwtSigner, type JwtPayload } from './jwt-keys.service.js';
 import { AuditService } from '../audit/audit.service.js';
+import { RateLimitService } from '../rate-limit/rate-limit.service.js';
 
 export interface LoginDto {
   username: string;
@@ -19,11 +27,44 @@ export class AuthService {
     private readonly ds: DataSource,
     private readonly jwtSigner: JwtSigner,
     private readonly audit: AuditService,
+    private readonly rateLimit: RateLimitService,
   ) {}
 
-  async login(dto: LoginDto) {
+  async login(dto: LoginDto, clientIp?: string) {
     if (!dto.password) {
       throw new UnauthorizedException('Password is required');
+    }
+
+    // Brute-force checks (OWASP A07)
+    const userKey = dto.username ? `auth:user:${dto.username}` : null;
+    const ipKey = clientIp ? `auth:ip:${clientIp}` : null;
+
+    if (userKey) {
+      const userStatus = await this.rateLimit.getFailureStatus(userKey, 5, 60);
+      if (!userStatus.allowed) {
+        throw new HttpException(
+          {
+            code: 'RATE_LIMITED',
+            message: 'Too many failed login attempts. Please try again later.',
+            retryAfter: userStatus.retryAfter ?? 60,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
+    }
+
+    if (ipKey) {
+      const ipStatus = await this.rateLimit.getFailureStatus(ipKey, 10, 60);
+      if (!ipStatus.allowed) {
+        throw new HttpException(
+          {
+            code: 'RATE_LIMITED',
+            message: 'Too many requests from this IP. Please try again later.',
+            retryAfter: ipStatus.retryAfter ?? 60,
+          },
+          HttpStatus.TOO_MANY_REQUESTS,
+        );
+      }
     }
 
     const qr = this.ds.createQueryRunner();
@@ -66,6 +107,8 @@ export class AuthService {
 
       if (userRows.length === 0) {
         this.logger.warn(`Login failed: user not found for username=${dto.username}`);
+        if (userKey) await this.rateLimit.recordFailure(userKey, 60);
+        if (ipKey) await this.rateLimit.recordFailure(ipKey, 60);
         throw new UnauthorizedException('Invalid credentials');
       }
 
@@ -108,6 +151,8 @@ export class AuthService {
         valid = false;
       }
       if (!valid) {
+        if (userKey) await this.rateLimit.recordFailure(userKey, 60);
+        if (ipKey) await this.rateLimit.recordFailure(ipKey, 60);
         await this.logAuthEventWithRls(qr, tenantId, {
           tenantId,
           userId: user.id,
@@ -117,6 +162,10 @@ export class AuthService {
         });
         throw new UnauthorizedException('Invalid credentials');
       }
+
+      // Clear brute-force failure tracking on successful authentication
+      if (userKey) await this.rateLimit.clearKey(userKey, 60);
+      if (ipKey) await this.rateLimit.clearKey(ipKey, 60);
 
       // 3. Issue Tokens
       const payload: Omit<JwtPayload, 'iss' | 'iat' | 'exp'> = {
