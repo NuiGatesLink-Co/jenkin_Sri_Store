@@ -33,6 +33,14 @@ class ServerErrorResolver {
     'SHIFT_ALREADY_CLOSED': 'กะนี้ปิดแล้ว',
     'RETURN_PRICE_MISMATCH': 'ราคาใบลดหนี้ไม่ตรงกับบิลขาย',
     'REFUND_METHOD_NOT_ALLOWED': 'วิธีคืนเงินไม่ถูกต้องสำหรับบิลนี้',
+    'IDEMPOTENCY_KEY_REUSED': 'คีย์การทำรายการซ้ำกับคำขออื่น',
+    'IDEMPOTENCY_KEY_IN_FLIGHT': 'คำขอก่อนหน้ากำลังดำเนินการ กรุณารอสักครู่',
+    'IDEMPOTENCY_KEY_INVALID': 'คีย์การทำรายการไม่ถูกต้อง',
+    'RECEIPT_NO_CONFLICT': 'เลขที่ใบเสร็จซ้ำ กรุณาทำรายการใหม่',
+    'CREDIT_PAYMENT_EXCEEDS_BALANCE': 'จำนวนเงินเกินยอดค้างชำระของช่าง',
+    'CREDIT_PAYMENT_ID_REUSED': 'รหัสการรับชำระเงินซ้ำ',
+    'SALE_NOT_IN_OPEN_SHIFT': 'บิลนี้ไม่ได้อยู่ในกะที่เปิดอยู่ ไม่สามารถยกเลิกได้ กรุณาออกใบลดหนี้แทน',
+    'SHIFT_NOT_FOUND': 'ไม่พบข้อมูลกะ',
     'UNAUTHENTICATED': 'กรุณาเข้าสู่ระบบ',
     'FORBIDDEN': 'ไม่มีสิทธิ์เข้าถึงข้อมูลหรือดำเนินการนี้',
   };
@@ -41,8 +49,8 @@ class ServerErrorResolver {
   ///
   /// Priority:
   /// 1. If server provides a detailed Thai message (e.g. detailed stock breakdown or suspension),
-  ///    prefer that message if it starts with Thai or contains informative details.
-  /// 2. Canonical mapping from 02_API_SCREENS.md §8.
+  ///    prefer that message if it starts with Thai.
+  /// 2. Canonical mapping from 02_API_SCREENS.md §8 & §8.1.
   /// 3. Server message if present.
   /// 4. Fallback generic Thai message.
   static String resolve(
@@ -58,11 +66,13 @@ class ServerErrorResolver {
 
     final upperCode = code.toUpperCase().trim();
 
-    // If server sent a formatted message containing Thai text, it is usually the most specific
+    // If server sent a formatted message starting with Thai text, it is usually the most specific
     // (e.g. "สต็อกไม่พอ:\nผ้าเบรกหน้า: สต็อก 0 แต่ต้องการ 1").
+    // We check _startsWithThai so English messages quoting Thai words (e.g. "Refund method 'หักจากเครดิต'...")
+    // do not hijack the canonical Thai mapping.
     if (serverMessage != null &&
         serverMessage.trim().isNotEmpty &&
-        _containsThai(serverMessage)) {
+        _startsWithThai(serverMessage)) {
       return serverMessage.trim();
     }
 
@@ -79,11 +89,20 @@ class ServerErrorResolver {
     return 'เกิดข้อผิดพลาด ($upperCode)';
   }
 
-  static bool _containsThai(String text) {
-    for (final rune in text.runes) {
-      if (rune >= 0x0E00 && rune <= 0x0E7F) {
-        return true;
+  static bool _startsWithThai(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return false;
+    for (final rune in trimmed.runes) {
+      // Skip leading whitespace, quotes, dashes, brackets
+      if (rune == 0x20 ||
+          rune == 0x22 ||
+          rune == 0x27 ||
+          rune == 0x2D ||
+          rune == 0x28 ||
+          rune == 0x5B) {
+        continue;
       }
+      return rune >= 0x0E00 && rune <= 0x0E7F;
     }
     return false;
   }
