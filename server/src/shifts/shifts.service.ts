@@ -314,7 +314,8 @@ export class ShiftsService {
   /**
    * The shift id to stamp on money this device is taking right now — or
    * `409 NO_OPEN_SHIFT`. `POST /sales` and `POST /mechanics/:id/credit-payments` use
-   * this, for every payment method: the owner's rule (2026-09-13) is that money is only
+   * this, for every payment method (and `POST /sales/:id/void`, #94, to compare against
+   * the bill's own shift): the owner's rule (2026-09-13) is that money is only
    * taken while this device's drawer is open, because money stamped with no shift lands
    * in no closing report. "Open" is `closed_at IS NULL`, so a drawer that was closed and
    * not yet archived by the next open refuses too.
@@ -326,7 +327,8 @@ export class ShiftsService {
    * close re-checks the row once the close commits, finds `closed_at` set, and is
    * refused. `SHARE` rather than `UPDATE` so bills on one till do not serialise on each
    * other. Shared locks never wait on each other, which is why this lock's place relative
-   * to the mechanic's row (after it on a credit payment, before it on a sale) cannot
+   * to the mechanic's row (after it on a credit payment, before it on a sale or a void,
+   * where it follows the bill's own row lock) cannot
    * deadlock: the only exclusive holders — open, close, drawer entries, retirement —
    * take no other money-path lock. Keep it that way.
    */

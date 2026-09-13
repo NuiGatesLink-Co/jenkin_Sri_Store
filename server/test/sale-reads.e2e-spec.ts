@@ -24,6 +24,7 @@ describe('sale reads and void (e2e)', () => {
   let posToken: string;
   let backofficeToken: string;
   let cashierToken: string;
+  let openShiftId: string;
   let keySeq = 0;
 
   const sell = (body: Record<string, unknown>, token?: string) =>
@@ -117,7 +118,9 @@ describe('sale reads and void (e2e)', () => {
     });
     // `POST /sales` refuses with 409 NO_OPEN_SHIFT when the device has no open drawer
     // (owner's decision, 2026-09-13).
-    await seedOpenShift(admin, TENANT, fixture.posDeviceId, { userId: fixture.userId });
+    openShiftId = await seedOpenShift(admin, TENANT, fixture.posDeviceId, {
+      userId: fixture.userId,
+    });
   });
 
   afterAll(async () => {
@@ -524,6 +527,154 @@ describe('sale reads and void (e2e)', () => {
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('SALE_HAS_RETURNS');
     expect(await stockOf('p1')).toBe(38);
+  });
+
+  /** Posts to the drawer as the counter does, each call with its own key. */
+  const drawer = (path: 'open' | 'close', body: Record<string, unknown>) =>
+    request(app.getHttpServer())
+      .post(`/api/v1/shifts/${path}`)
+      .set('Authorization', `Bearer ${posToken}`)
+      .set('Idempotency-Key', `k-shift-${++keySeq}-${Date.now()}`)
+      .send(body);
+
+  /**
+   * Closes today's drawer, then opens the next one. `POST /shifts/open` on the same
+   * day hands back the closed drawer untouched, so the closed one is backdated first
+   * — the next morning's open is what archives it.
+   */
+  const closeAndOpenNext = async (): Promise<string> => {
+    expect((await drawer('close', { physicalCash: '0.00' })).status).toBe(200);
+    await admin.query(
+      `UPDATE shifts SET date_str = '2000-01-01' WHERE tenant_id = $1::uuid AND id = $2`,
+      [TENANT, openShiftId],
+    );
+    const next = await drawer('open', { startingCash: '0.00' });
+    expect(next.status).toBe(200);
+    expect(next.body.data.id).not.toBe(openShiftId);
+    return next.body.data.id as string;
+  };
+
+  const isVoided = async (id: string): Promise<boolean> => {
+    const rows = await admin.query(
+      `SELECT voided FROM sales WHERE tenant_id = $1::uuid AND id = $2`,
+      [TENANT, id],
+    );
+    return rows[0].voided as boolean;
+  };
+
+  it('#94: refuses to void a bill from a closed shift, and that shift report stays as counted', async () => {
+    const sale = await ringUp(2);
+    const closedShiftId = openShiftId;
+    const nextShiftId = await closeAndOpenNext();
+
+    const closing = async (shiftId: string) => {
+      const res = await get(`/reports/closing?shiftId=${shiftId}`);
+      expect(res.status).toBe(200);
+      return res.body.data as Record<string, unknown>;
+    };
+    const counted = await closing(closedShiftId);
+    expect(counted).toMatchObject({
+      cashSales: '170.00',
+      expectedCash: '170.00',
+      variance: '-170.00',
+    });
+
+    const res = await voidSale(sale.id, { pin: PIN });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('SALE_NOT_IN_OPEN_SHIFT');
+    expect(await isVoided(sale.id)).toBe(false);
+    expect(await stockOf('p1')).toBe(38);
+    // Falsified: with the check removed this void answers 200 and `cashSales` of the
+    // closed drawer drops to 0.00 — the retroactive change #94 is about.
+    expect(await closing(closedShiftId)).toEqual(counted);
+
+    // What the counter does instead: a credit note, which lands in today's drawer.
+    const refund = await request(app.getHttpServer())
+      .post('/api/v1/returns')
+      .set('Authorization', `Bearer ${posToken}`)
+      .set('Idempotency-Key', `k-return-${++keySeq}-${Date.now()}`)
+      .send({
+        saleId: sale.id,
+        refundMethod: 'เงินสด',
+        items: [
+          { productId: 'p1', name: 'Oil Filter', qty: 2, price: '85.00' },
+        ],
+      });
+    expect(refund.status).toBe(201);
+    const [cn] = await admin.query(
+      `SELECT shift_id FROM returns WHERE tenant_id = $1::uuid AND sale_id = $2`,
+      [TENANT, sale.id],
+    );
+    expect(cn.shift_id).toBe(nextShiftId);
+    expect(await stockOf('p1')).toBe(40);
+    expect(await closing(nextShiftId)).toMatchObject({
+      cashSales: '0.00',
+      cashRefunds: '170.00',
+    });
+    // The full return auto-voids the bill, which the closing report still counts with
+    // its credit note netted in the drawer that paid it out — so the closed one is
+    // still exactly as it was counted.
+    expect(await isVoided(sale.id)).toBe(true);
+    expect(await closing(closedShiftId)).toEqual(counted);
+  });
+
+  it('#94: refuses a void with no open drawer — 409 NO_OPEN_SHIFT', async () => {
+    const sale = await ringUp(1);
+    expect((await drawer('close', { physicalCash: '85.00' })).status).toBe(200);
+
+    const res = await voidSale(sale.id, { pin: PIN });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
+    expect(await isVoided(sale.id)).toBe(false);
+    expect(await stockOf('p1')).toBe(39);
+  });
+
+  it("#94: refuses a bill with no shift, or from another device's open shift", async () => {
+    const imported = await ringUp(1);
+    await admin.query(
+      `UPDATE sales SET shift_id = NULL WHERE tenant_id = $1::uuid AND id = $2`,
+      [TENANT, imported.id],
+    );
+
+    // Shifts are per device: another till's drawer being open is not this one's.
+    const otherTill = await seedOpenShift(admin, TENANT, 'another-till');
+    const elsewhere = await ringUp(1);
+    await admin.query(
+      `UPDATE sales SET shift_id = $2 WHERE tenant_id = $1::uuid AND id = $3`,
+      [TENANT, otherTill, elsewhere.id],
+    );
+
+    for (const id of [imported.id, elsewhere.id]) {
+      const res = await voidSale(id, { pin: PIN });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('SALE_NOT_IN_OPEN_SHIFT');
+      expect(await isVoided(id)).toBe(false);
+    }
+    expect(await stockOf('p1')).toBe(38);
+  });
+
+  it('#94: a void committed while the drawer was open still replays after it closes', async () => {
+    const sale = await ringUp(2);
+    const key = `k-void-replay-${++keySeq}-${Date.now()}`;
+    const voidWithKey = () =>
+      request(app.getHttpServer())
+        .post(`/api/v1/sales/${sale.id}/void`)
+        .set('Authorization', `Bearer ${posToken}`)
+        .set('Idempotency-Key', key)
+        .send({ pin: PIN });
+
+    const first = await voidWithKey();
+    expect(first.status).toBe(200);
+    await closeAndOpenNext();
+
+    const replay = await voidWithKey();
+    expect(replay.status).toBe(200);
+    expect(replay.body.data).toEqual(first.body.data);
+    // A retry that lost its key is told the truth about the bill, not about the drawer.
+    const keyless = await voidSale(sale.id, { pin: PIN });
+    expect(keyless.status).toBe(409);
+    expect(keyless.body.error.code).toBe('SALE_VOIDED');
+    expect(await stockOf('p1')).toBe(40);
   });
 
   it('a backoffice device cannot void, and an unknown bill 404s', async () => {

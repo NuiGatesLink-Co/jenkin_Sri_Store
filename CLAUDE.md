@@ -245,6 +245,8 @@ is the credit-note transaction ported from `returns_repository.dart`, and `POST 
 reverses the customer and mechanic ledger, which was #23's one remaining AC (1/2/4/5 shipped with #75).
 🔴 **The lock order grew to sale → mechanic → products → `doc_counters` → customer** — `sales` is the
 outermost resource because the sale path only INSERTs it; **#28 and #30 must keep that order**.
+(#94 adds a `shifts` read `FOR SHARE` between the sale and mechanic locks on the void path — shared
+locks cannot cycle with the drawer's exclusive lockers, which lock nothing else; see `shifts.service.ts`.)
 Migration `1788652800004` adds `return_items.cost_at_sale`, carried from the locked `sale_items` read
 (ADR-0008's reasoning, applied to credit notes); #22 also writes `returns.shift_id`, which closes half
 of **#28**'s "every sale *and return* carries `shift_id`" — do not rebuild it there.

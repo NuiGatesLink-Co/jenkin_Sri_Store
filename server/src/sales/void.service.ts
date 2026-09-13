@@ -7,6 +7,7 @@ import { fromSatang, satangOf } from '../common/money.js';
 import { verifyPassword } from '../common/password.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
+import { ShiftsService } from '../shifts/shifts.service.js';
 import {
   SaleReadsService,
   saleNotFound,
@@ -17,6 +18,7 @@ import { MECHANIC_CREDIT } from './sales.service.js';
 /** The bill under its own row lock — everything the void has to undo. */
 interface LockedSale {
   voided: boolean;
+  shift_id: string | null;
   customer_id: string | null;
   mechanic_id: string | null;
   mechanic_delta: string | null;
@@ -54,6 +56,7 @@ export class VoidService {
   constructor(
     private readonly reads: SaleReadsService,
     private readonly audit: AuditService,
+    private readonly shifts: ShiftsService,
     @Inject(AUDIT_DATA_SOURCE) private readonly auditDs: DataSource,
   ) {}
 
@@ -67,7 +70,7 @@ export class VoidService {
     // ride along on that lock: the reversal has to subtract the figures this bill
     // actually wrote, and it reads them under the same lock that makes it exclusive.
     const rows = (await manager.query(
-      `SELECT voided, customer_id, mechanic_id, mechanic_delta,
+      `SELECT voided, shift_id, customer_id, mechanic_id, mechanic_delta,
               payment_method, total, points_granted
          FROM sales WHERE tenant_id = $1::uuid AND id = $2 FOR UPDATE`,
       [tenantId, saleId],
@@ -98,6 +101,33 @@ export class VoidService {
     }
 
     const sale = rows[0];
+    // Only a bill from this device's open drawer (owner's decision on #94, 2026-09-13).
+    // The closing report is computed by `shift_id` and leaves voided bills out, so
+    // voiding a bill from a closed shift would rewrite a drawer already counted, while
+    // the drawer the money actually left shows no outflow. An older bill — another
+    // shift, another device's, or an imported one with no shift — is undone by a credit
+    // note, which lands in the current drawer. After `SALE_VOIDED`/`SALE_HAS_RETURNS`,
+    // so a retry of a void that already committed still says so once the drawer has
+    // closed; an `Idempotency-Key` replay never reaches this method at all. `FOR SHARE`
+    // (see `requireOpenShiftIdFor`) so a close waits for a void in flight instead of
+    // counting a bill this transaction is about to take out of it. Not audited like the
+    // PIN denial: the caller has already proved the PIN, and this is a business rule.
+    const openShiftId = await this.shifts.requireOpenShiftIdFor(
+      manager,
+      tenantId,
+      actor.deviceId,
+    );
+    if (sale.shift_id !== openShiftId) {
+      throw new HttpException(
+        {
+          code: 'SALE_NOT_IN_OPEN_SHIFT',
+          message:
+            'This bill is not from the open shift and cannot be voided. Issue a credit note instead.',
+        },
+        HttpStatus.CONFLICT,
+      );
+    }
+
     // 🔴 The mechanic's row lock is taken here, before the first product row.
     // `sales.service.ts` locks mechanic → products → doc_counters; a void that
     // reached the mechanic after the products would close the cycle and deadlock
