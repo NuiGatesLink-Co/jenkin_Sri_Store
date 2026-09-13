@@ -11,6 +11,7 @@ import 'package:srisurart_pos/core/network/api_client.dart';
 import 'package:srisurart_pos/core/network/api_exception.dart';
 import 'package:srisurart_pos/data/db/database.dart';
 import 'package:srisurart_pos/data/repositories/api_mechanics_repository.dart';
+import 'package:srisurart_pos/data/repositories/mechanics_repository.dart';
 
 void main() {
   late AppDatabase db;
@@ -117,6 +118,27 @@ void main() {
     Future<int> localPayments() async =>
         (await db.select(db.creditPayments).get()).length;
 
+    Future<double> balance() async => (await (db.select(
+      db.mechanics,
+    )..where((t) => t.id.equals('m_target'))).getSingle()).creditBalance;
+
+    http.Response exceedsBalance() => http.Response(
+      jsonEncode({
+        'status': 'error',
+        'error': {
+          'code': 'CREDIT_PAYMENT_EXCEEDS_BALANCE',
+          'message': 'Payment is more than the outstanding balance.',
+          'details': {
+            'creditBalance': '300.00',
+            'amount': '500.00',
+            'overpayBy': '200.00',
+          },
+        },
+      }),
+      409,
+      headers: {'content-type': 'application/json; charset=utf-8'},
+    );
+
     test(
       'sends the method, a client id and an Idempotency-Key, and patches from the string reply',
       () async {
@@ -161,7 +183,7 @@ void main() {
     );
 
     test(
-      'a 5xx keeps the attempt: the next press resends the same id and key',
+      'a 5xx queues the payment: the flush resends the same id and key',
       () async {
         await seedTarget();
         final sentIds = <String>[];
@@ -185,20 +207,22 @@ void main() {
           ),
         );
 
-        Future<void> press() => repo.addCreditPayment(
-          mechanicId: 'm_target',
-          amount: 500.0,
-          paymentMethod: 'เงินสด',
+        await expectLater(
+          repo.addCreditPayment(
+            mechanicId: 'm_target',
+            amount: 500.0,
+            paymentMethod: 'เงินสด',
+          ),
+          throwsA(isA<CreditPaymentQueued>()),
         );
-
-        await expectLater(press(), throwsA(isA<PosException>()));
         // The server may have committed; no local write may happen on its answer.
         expect(await localPayments(), 0);
-        await press();
+        await repo.flushPendingCreditPayments();
 
         expect(sentIds[1], sentIds[0]);
         expect(sentKeys[1], sentKeys[0]);
         expect(await localPayments(), 1);
+        expect(await repo.getPendingCreditPayments(), isEmpty);
       },
     );
 
@@ -209,24 +233,7 @@ void main() {
         final repo = ApiMechanicsRepository(
           db,
           ApiClient(
-            httpClient: MockClient(
-              (request) async => http.Response(
-                jsonEncode({
-                  'status': 'error',
-                  'error': {
-                    'code': 'CREDIT_PAYMENT_EXCEEDS_BALANCE',
-                    'message': 'Payment is more than the outstanding balance.',
-                    'details': {
-                      'creditBalance': '300.00',
-                      'amount': '500.00',
-                      'overpayBy': '200.00',
-                    },
-                  },
-                }),
-                409,
-                headers: {'content-type': 'application/json; charset=utf-8'},
-              ),
-            ),
+            httpClient: MockClient((request) async => exceedsBalance()),
           ),
         );
 
@@ -244,6 +251,8 @@ void main() {
         expect(error!.code, 'CREDIT_PAYMENT_EXCEEDS_BALANCE');
         expect((error.details as Map)['creditBalance'], '300.00');
         expect(await localPayments(), 0);
+        // Refused while the counter watched: dropped, not left for a person.
+        expect(await repo.getPendingCreditPayments(), isEmpty);
       },
     );
 
@@ -270,25 +279,187 @@ void main() {
       expect(sent['allowOverpayment'], isTrue);
     });
 
-    test('with no server at all the payment is still taken on Drift', () async {
-      await seedTarget();
-      final repo = ApiMechanicsRepository(
-        db,
-        ApiClient(
-          httpClient: MockClient(
-            (_) async => throw http.ClientException('Offline'),
+    test(
+      'offline: the payment is queued with nothing written locally, and after a restart the flush sends the same id and key',
+      () async {
+        await seedTarget();
+        final offline = ApiMechanicsRepository(
+          db,
+          ApiClient(
+            httpClient: MockClient(
+              // The server may well have committed this one; only the reply is lost.
+              (_) async => throw http.ClientException('Connection reset'),
+            ),
           ),
-        ),
-      );
+        );
 
-      await repo.addCreditPayment(
-        mechanicId: 'm_target',
-        amount: 500.0,
-        paymentMethod: 'เงินสด',
-      );
+        await expectLater(
+          offline.addCreditPayment(
+            mechanicId: 'm_target',
+            amount: 500.0,
+            paymentMethod: 'เงินสด',
+          ),
+          throwsA(isA<CreditPaymentQueued>()),
+        );
+        final queued = (await offline.getPendingCreditPayments()).single;
+        // No local row under a device-minted id/CP number, no local balance change.
+        expect(await localPayments(), 0);
+        expect(await balance(), 2000.0);
 
-      expect(await localPayments(), 1);
-    });
+        // A new repository on the same database is an app restart: nothing held
+        // in memory survives it, so the id and key must come from Drift.
+        final sent = <Map<String, dynamic>>[];
+        final sentKeys = <String?>[];
+        final restarted = ApiMechanicsRepository(
+          db,
+          ApiClient(
+            httpClient: MockClient((request) async {
+              final body = jsonDecode(request.body) as Map<String, dynamic>;
+              sent.add(body);
+              sentKeys.add(request.headers['Idempotency-Key']);
+              return created(body);
+            }),
+          ),
+        );
+        await restarted.flushPendingCreditPayments();
+
+        expect(sent.single['id'], queued.id);
+        expect(sentKeys.single, queued.idempotencyKey);
+        expect(sent.single['amount'], '500.00');
+        expect(await restarted.getPendingCreditPayments(), isEmpty);
+        expect(await localPayments(), 1);
+        expect(await balance(), 1500.0);
+      },
+    );
+
+    test(
+      'a queued confirmed overpayment is replayed WITH allowOverpayment (M2)',
+      () async {
+        await seedTarget();
+        final sent = <Map<String, dynamic>>[];
+        final sentKeys = <String?>[];
+        var calls = 0;
+        final repo = ApiMechanicsRepository(
+          db,
+          ApiClient(
+            httpClient: MockClient((request) async {
+              final body = jsonDecode(request.body) as Map<String, dynamic>;
+              sent.add(body);
+              sentKeys.add(request.headers['Idempotency-Key']);
+              if (++calls == 1) throw http.ClientException('Connection reset');
+              return created(body);
+            }),
+          ),
+        );
+
+        await expectLater(
+          repo.addCreditPayment(
+            mechanicId: 'm_target',
+            amount: 500.0,
+            paymentMethod: 'เงินสด',
+            allowOverpayment: true,
+          ),
+          throwsA(isA<CreditPaymentQueued>()),
+        );
+        await repo.flushPendingCreditPayments();
+
+        // The resend is the stored body, not a re-derivation: the human's consent
+        // travels with it, so the same key never meets a different body.
+        expect(sent[1], sent[0]);
+        expect(sent[1]['allowOverpayment'], isTrue);
+        expect(sentKeys[1], sentKeys[0]);
+      },
+    );
+
+    test(
+      'a refusal during a flush is kept for a person, never retried; confirming resends the same id under a new key',
+      () async {
+        await seedTarget();
+        final sent = <Map<String, dynamic>>[];
+        final sentKeys = <String?>[];
+        var calls = 0;
+        final repo = ApiMechanicsRepository(
+          db,
+          ApiClient(
+            httpClient: MockClient((request) async {
+              final body = jsonDecode(request.body) as Map<String, dynamic>;
+              sent.add(body);
+              sentKeys.add(request.headers['Idempotency-Key']);
+              switch (++calls) {
+                case 1:
+                  throw http.ClientException('Connection reset');
+                case 2:
+                  return exceedsBalance();
+                default:
+                  return created(body);
+              }
+            }),
+          ),
+        );
+
+        await expectLater(
+          repo.addCreditPayment(
+            mechanicId: 'm_target',
+            amount: 500.0,
+            paymentMethod: 'เงินสด',
+          ),
+          throwsA(isA<CreditPaymentQueued>()),
+        );
+        await repo.flushPendingCreditPayments();
+
+        final rejected = (await repo.getPendingCreditPayments()).single;
+        expect(rejected.rejectedCode, 'CREDIT_PAYMENT_EXCEEDS_BALANCE');
+        expect(rejected.rejectedMessage, isNotEmpty);
+
+        await repo.flushPendingCreditPayments();
+        expect(calls, 2, reason: 'a refused row must not be sent again on its own');
+
+        await repo.resendRejectedAllowingOverpayment(rejected.id);
+
+        expect(sent[2]['id'], sent[0]['id']);
+        expect(sent[2]['allowOverpayment'], isTrue);
+        expect(sentKeys[2], isNot(sentKeys[0]));
+        expect(await repo.getPendingCreditPayments(), isEmpty);
+        expect(await localPayments(), 1);
+      },
+    );
+
+    test(
+      'a 401 during a flush is not a verdict, and a queued row cannot be discarded',
+      () async {
+        await seedTarget();
+        var online = false;
+        final repo = ApiMechanicsRepository(
+          db,
+          ApiClient(
+            httpClient: MockClient((request) async {
+              if (!online) throw http.ClientException('Offline');
+              return http.Response(
+                '{"status":"error","error":{"code":"UNAUTHORIZED","message":"x"}}',
+                401,
+              );
+            }),
+          ),
+        );
+
+        await expectLater(
+          repo.addCreditPayment(
+            mechanicId: 'm_target',
+            amount: 500.0,
+            paymentMethod: 'เงินสด',
+          ),
+          throwsA(isA<CreditPaymentQueued>()),
+        );
+        online = true;
+        await repo.flushPendingCreditPayments();
+
+        final row = (await repo.getPendingCreditPayments()).single;
+        expect(row.rejectedCode, isNull);
+
+        await repo.discardRejectedCreditPayment(row.id);
+        expect(await repo.getPendingCreditPayments(), hasLength(1));
+      },
+    );
   });
 
   test('getMechanics falls back transparently to Drift when network fails', () async {

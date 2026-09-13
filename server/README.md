@@ -549,12 +549,16 @@ transaction: `mechanics FOR UPDATE` → the CP number → the row → the reduce
 - **`shift_id` is stamped like a sale's** — the device's own open drawer, never the body,
   null when none is open. That column is what #30 sums cash settlements by.
 - **Two defences against a duplicate, as on `POST /sales`:** the `Idempotency-Key`, and
-  an optional client `id` (the Dart repository already mints `newId('cp')`). A retry
-  that lost its key replays the stored payment; the same id with a different mechanic,
-  amount or method is `409 CREDIT_PAYMENT_ID_REUSED`. Without the id, an app restart
-  after a dropped reply rings up a *partial* payment twice — the overpayment check only
-  catches a full one. The replay is checked **before** the overpayment check, or a
-  replayed full settlement would meet the zero tab it created and be refused.
+  an optional client `id`. The same id with a different mechanic, amount or method is
+  `409 CREDIT_PAYMENT_ID_REUSED`. The id matters because the client's outbox
+  (`pending_credit_payments`, Drift schema v5) can resend a payment long after the key's
+  24 h have run out — a device offline over a weekend — or under a fresh key after a
+  person confirms a refused overpayment; both replay the stored payment by id alone.
+  The replay is checked **before** the overpayment check, or a replayed full settlement
+  would meet the zero tab it created and be refused.
+- ⚠️ **`shift_id` is the shift open when the server receives the payment,** not when the
+  cash was taken. A payment queued offline and sent after the drawer closed lands in the
+  next shift — #30 has to know that.
 - The mechanic's `deleted_at` is **not** filtered, exactly as `POST /sales` does not
   filter it: he owes the money either way, and refusing it loses the shop both the cash
   and the record of it. An id that never existed is `404 MECHANIC_NOT_FOUND`, thrown off
