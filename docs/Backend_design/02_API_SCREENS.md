@@ -431,6 +431,17 @@ refundTotal, refundMethod, reason, customerId, mechanicId, mechanicName, date, s
 > **ถ้าลืมพจน์ "ช่างจ่ายหนี้เงินสด" ลิ้นชักจะแสดงว่า "ขาด" ทุกวัน** เท่ากับยอดที่ช่างมาจ่าย
 > ซึ่งจะทำให้พนักงานเลิกเชื่อรายงานปิดร้านไปเลย (โค้ดปัจจุบันบวกไว้ถูกแล้ว)
 
+> **#30 — สิ่งที่ `GET /reports/closing?shiftId=` ตอบ:** `startingCash, cashSales, cashCreditPayments, cashRefunds,
+> drawerIn, drawerOut, expectedCash, physicalCash, variance` + `grossProfit, estimatedCostRows, unknownCostRows`
+> (`physicalCash`/`variance` เป็น `null` จนกว่าจะปิดกะ) · ทุกพจน์กรองด้วย `shift_id` + วิธีจ่าย `'เงินสด'` ของเอกสารนั้น ๆ ·
+> บิลที่ **void เอง** ไม่นับ ส่วนบิลที่ void อัตโนมัติจากการคืนครบยังนับ แล้วใบลดหนี้หักออก (ไม่หักซ้ำ) ·
+> กำไรขั้นต้น = `(Σ sales.total − Σ refund_total) ÷ (1 + tax_rate/100) − ต้นทุน` ใช้ `cost_at_sale` ก่อน
+> fallback `products.cost` เฉพาะแถว NULL (ADR-0008)
+>
+> **ข้อจำกัดที่รู้แล้ว (#30):**
+> (ก) void เอง (`POST /sales/:id/void`) บิลของกะที่ปิดไปแล้ว ทำให้รายงานของกะที่ปิดแล้วนั้นเปลี่ยน และลิ้นชักปัจจุบันไม่แสดงเงินออก — ยังเปิดอยู่ รอเจ้าของร้านตัดสิน ticket #94
+> (ข) `POST /returns` ตอนไม่มีกะเปิด แสตมป์ `shift_id` เป็น null ยอดคืนเงินนั้นจึงไม่อยู่ในรายงานปิดร้านใดเลย
+
 > ⚠️ **บั๊กที่จะโผล่ทันทีตอนมี 2 เครื่อง:** ตอนนี้รายงานปิดกะคำนวณจาก "บิลทั้งหมดที่เวลาอยู่ในช่วงกะ"
 > ซึ่งข้ามเครื่องกันไม่ได้และข้ามเที่ยงคืนไม่ได้
 > → นี่คือเหตุผลที่ `01_DATABASE.md` เพิ่ม `sales.shift_id` / `returns.shift_id`
@@ -656,6 +667,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `INSUFFICIENT_STOCK` | `สต็อกไม่พอ:\n<name>: สต็อก <n> แต่ต้องการ <m>` |
 | 409 | `OVER_REFUND` | `คืนเกินจำนวนที่ขาย:\n<name>: คืนได้อีก <n> แต่ขอคืน <m>` |
 | 404 | `SALE_NOT_FOUND` | `Sale not found` |
+| 404 | `SHIFT_NOT_FOUND` | – (ไม่แสดงให้ผู้ใช้เห็น · `GET /reports/closing?shiftId=` กับกะที่ไม่มี หรือเป็นของร้านอื่น — เพิ่มตอน #30) |
 | 409 | `SALE_VOIDED` | `Bill already voided` |
 | 409 | `DRAWER_CLOSED` | `ลิ้นชักปิดแล้ว ไม่สามารถบันทึกรายการเงินเพิ่มได้` |
 | 400 | `INVALID_BACKUP` | `ไฟล์สำรองไม่ถูกต้อง — ไม่พบข้อมูล __meta` |
