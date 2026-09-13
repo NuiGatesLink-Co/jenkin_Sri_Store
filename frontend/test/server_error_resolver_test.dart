@@ -23,8 +23,26 @@ void main() {
       expect(ServerErrorResolver.resolve('SHIFT_ALREADY_CLOSED'), 'กะนี้ปิดแล้ว');
       expect(ServerErrorResolver.resolve('RETURN_PRICE_MISMATCH'), 'ราคาใบลดหนี้ไม่ตรงกับบิลขาย');
       expect(ServerErrorResolver.resolve('REFUND_METHOD_NOT_ALLOWED'), 'วิธีคืนเงินไม่ถูกต้องสำหรับบิลนี้');
+      expect(ServerErrorResolver.resolve('IDEMPOTENCY_KEY_REUSED'), 'คีย์การทำรายการซ้ำกับคำขออื่น');
+      expect(ServerErrorResolver.resolve('IDEMPOTENCY_KEY_IN_FLIGHT'), 'คำขอก่อนหน้ากำลังดำเนินการ กรุณารอสักครู่');
+      expect(ServerErrorResolver.resolve('IDEMPOTENCY_KEY_INVALID'), 'คีย์การทำรายการไม่ถูกต้อง');
+      expect(ServerErrorResolver.resolve('RECEIPT_NO_CONFLICT'), 'เลขที่ใบเสร็จซ้ำ กรุณาทำรายการใหม่');
+      expect(ServerErrorResolver.resolve('CREDIT_PAYMENT_EXCEEDS_BALANCE'), 'จำนวนเงินเกินยอดค้างชำระของช่าง');
+      expect(ServerErrorResolver.resolve('CREDIT_PAYMENT_ID_REUSED'), 'รหัสการรับชำระเงินซ้ำ');
+      expect(ServerErrorResolver.resolve('SALE_NOT_IN_OPEN_SHIFT'), 'บิลนี้ไม่ได้อยู่ในกะที่เปิดอยู่ ไม่สามารถยกเลิกได้ กรุณาออกใบลดหนี้แทน');
+      expect(ServerErrorResolver.resolve('SHIFT_NOT_FOUND'), 'ไม่พบข้อมูลกะ');
       expect(ServerErrorResolver.resolve('UNAUTHENTICATED'), 'กรุณาเข้าสู่ระบบ');
       expect(ServerErrorResolver.resolve('FORBIDDEN'), 'ไม่มีสิทธิ์เข้าถึงข้อมูลหรือดำเนินการนี้');
+    });
+
+    test('English server message quoting Thai phrase falls back to canonical Thai mapping (#83)', () {
+      expect(
+        ServerErrorResolver.resolve(
+          'REFUND_METHOD_NOT_ALLOWED',
+          serverMessage: "Refund method 'หักจากเครดิต' needs a bill with a mechanic.",
+        ),
+        'วิธีคืนเงินไม่ถูกต้องสำหรับบิลนี้',
+      );
     });
 
     test('preserves verbatim English messages where specified in §8', () {
