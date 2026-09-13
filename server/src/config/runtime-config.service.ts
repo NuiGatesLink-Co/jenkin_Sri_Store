@@ -55,10 +55,11 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
   }
 
   async start(): Promise<void> {
-    const etcdUrl = this.config.etcdUrl;
-    if (!etcdUrl) {
+    const rawUrl = this.config.etcdUrl;
+    if (!rawUrl) {
       return;
     }
+    const etcdUrl = rawUrl.replace(/\/+$/, '');
 
     this.abortController = new AbortController();
 
@@ -174,14 +175,30 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
   private async runWatchLoop(etcdUrl: string): Promise<void> {
     while (!this.isStopped) {
       try {
+        if (this.config.etcdPassword && !this.authToken) {
+          await this.authenticate(etcdUrl);
+        }
         await this.watchStream(etcdUrl);
       } catch (err: any) {
         if (this.isStopped) break;
+        if (String(err?.message).includes('401')) {
+          this.authToken = undefined;
+        }
         this.logger.warn(
           { err: err?.message || String(err) },
           'etcd watch stream interrupted; reconnecting...',
         );
-        await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS));
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, RECONNECT_DELAY_MS);
+          this.abortController?.signal.addEventListener(
+            'abort',
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        });
       }
     }
   }

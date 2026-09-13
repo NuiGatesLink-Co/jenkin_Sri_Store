@@ -173,6 +173,24 @@ describe('RuntimeConfigService', () => {
     );
   });
 
+  it('strips trailing slashes from etcdUrl', async () => {
+    mockConfig.etcdUrl = 'http://127.0.0.1:2379///';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ kvs: [] }),
+    } as Response);
+
+    vi.spyOn<any, any>(service, 'runWatchLoop').mockImplementation(async () => {});
+
+    await service.start();
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      'http://127.0.0.1:2379/v3/kv/range',
+      expect.anything(),
+    );
+  });
+
   it('aborts watch controller onModuleDestroy', async () => {
     mockConfig.etcdUrl = 'http://127.0.0.1:2379';
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce({
