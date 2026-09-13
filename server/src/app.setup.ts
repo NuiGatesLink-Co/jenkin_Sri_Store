@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import type { Logger } from 'pino';
+import helmet from 'helmet';
 import { EnvelopeInterceptor } from './common/envelope.interceptor.js';
 import {
   HttpExceptionFilter,
@@ -12,6 +13,7 @@ import {
 } from './common/http-exception.filter.js';
 import { requestLogger } from './common/logger.js';
 import { TransactionInterceptor } from './common/transaction.interceptor.js';
+import { APP_CONFIG, type AppConfig } from './config/config.js';
 
 /** Everything main.ts and the e2e tests must configure identically. */
 export async function configureApp(
@@ -19,6 +21,51 @@ export async function configureApp(
   logger: Logger,
 ): Promise<void> {
   app.getHttpAdapter().getInstance().disable('x-powered-by');
+
+  // Security headers via Helmet (OWASP A05)
+  app.use(
+    helmet({
+      contentSecurityPolicy: false,
+      crossOriginResourcePolicy: { policy: 'cross-origin' },
+    }),
+  );
+
+  // Dynamic CORS configuration (OWASP A05)
+  let allowedOrigins: string[] = ['*'];
+  try {
+    const cfg = app.get<AppConfig>(APP_CONFIG, { strict: false });
+    if (cfg?.corsOrigins && cfg.corsOrigins.length > 0) {
+      allowedOrigins = cfg.corsOrigins;
+    }
+  } catch {
+    // fallback if APP_CONFIG not bound
+  }
+
+  app.enableCors({
+    origin: (
+      origin: string | undefined,
+      callback: (err: Error | null, allow?: boolean) => void,
+    ) => {
+      // Allow requests with no origin (mobile apps, server-to-server, curl)
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+      return callback(new Error('Not allowed by CORS'), false);
+    },
+    credentials: true,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Idempotency-Key',
+      'X-Device-Id',
+      'X-Client-Version',
+      'X-Correlation-ID',
+    ],
+    exposedHeaders: ['Idempotency-Key', 'Retry-After', 'X-Correlation-ID'],
+  });
+
   app.use(requestLogger(logger));
   app.setGlobalPrefix('api/v1', {
     exclude: [

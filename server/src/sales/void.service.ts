@@ -8,6 +8,7 @@ import { verifyPassword } from '../common/password.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
+import { RateLimitService } from '../rate-limit/rate-limit.service.js';
 import {
   SaleReadsService,
   saleNotFound,
@@ -58,6 +59,7 @@ export class VoidService {
     private readonly audit: AuditService,
     private readonly shifts: ShiftsService,
     @Inject(AUDIT_DATA_SOURCE) private readonly auditDs: DataSource,
+    private readonly rateLimit: RateLimitService,
   ) {}
 
   async void(saleId: string, actor: VoidActor): Promise<SaleWithItems> {
@@ -322,6 +324,20 @@ export class VoidService {
     if (!actor.role || !ROLES_THAT_MAY_VOID.has(actor.role))
       throw await deny('role');
 
+    // Per-user PIN brute-force defense (#44, OWASP A07)
+    const pinKey = `void:pin:${tenantId}:${actor.userId}`;
+    const pinStatus = await this.rateLimit.getFailureStatus(pinKey, 5, 300);
+    if (!pinStatus.allowed) {
+      throw new HttpException(
+        {
+          code: 'RATE_LIMITED',
+          message: 'Too many incorrect PIN attempts. Please try again later.',
+          retryAfter: pinStatus.retryAfter ?? 300,
+        },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
     const rows = (await manager.query(
       `SELECT pin_hash FROM users
         WHERE tenant_id = $1::uuid AND id = $2::uuid AND is_active`,
@@ -330,8 +346,13 @@ export class VoidService {
 
     const pinHash = rows[0]?.pin_hash;
     if (!pinHash) throw await deny('no-pin');
-    if (!actor.pin || !(await verifyPassword(actor.pin, pinHash)))
+    if (!actor.pin || !(await verifyPassword(actor.pin, pinHash))) {
+      await this.rateLimit.recordFailure(pinKey, 300);
       throw await deny('pin');
+    }
+
+    // Clear failed PIN counter on success
+    await this.rateLimit.clearKey(pinKey, 300);
   }
 
   /**
