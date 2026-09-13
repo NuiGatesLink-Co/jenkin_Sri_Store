@@ -6,12 +6,14 @@ import {
   createTestApp,
   resetTenant,
   seedMechanic,
+  seedOpenShift,
   type TenantFixture,
 } from './support/fixture.js';
 
 // #24 acceptance suite. `mechanics_repository.dart` `addCreditPayment` reproduced at
-// the HTTP seam, plus the four rules the Dart version has no concept of: device roles,
-// server-issued CP numbers, the `shift_id` stamp, and idempotency.
+// the HTTP seam, plus the rules the Dart version has no concept of: device roles,
+// server-issued CP numbers, the `shift_id` stamp and the open-drawer requirement, and
+// idempotency.
 const TENANT = 'dddddddd-2424-4242-8242-dddddddddddd';
 const MECHANIC = 'm-credit-1';
 
@@ -40,6 +42,13 @@ describe('POST /mechanics/:id/credit-payments (e2e)', () => {
       .set('Authorization', `Bearer ${posToken}`)
       .set('Idempotency-Key', `k-shift-${++keySeq}-${Date.now()}`)
       .send({ startingCash: '1000.00' });
+
+  const closeDrawer = () =>
+    request(app.getHttpServer())
+      .post('/api/v1/shifts/close')
+      .set('Authorization', `Bearer ${posToken}`)
+      .set('Idempotency-Key', `k-close-${++keySeq}-${Date.now()}`)
+      .send({ physicalCash: '1000.00' });
 
   const balanceOf = async (): Promise<string> => {
     const rows = await admin.query(
@@ -90,6 +99,9 @@ describe('POST /mechanics/:id/credit-payments (e2e)', () => {
       deviceId: fixture.backofficeDeviceId,
       deviceRole: 'backoffice',
     });
+    // No open drawer, no payment (owner's decision, 2026-09-13). The cases about the
+    // refusal remove or close it again.
+    await seedOpenShift(admin, TENANT, fixture.posDeviceId, { userId: fixture.userId });
   });
 
   afterAll(async () => {
@@ -124,14 +136,76 @@ describe('POST /mechanics/:id/credit-payments (e2e)', () => {
     expect(rows[0].shift_id).toBe(shift.body.data.id);
   });
 
-  it('a payment taken with no drawer open carries no shift, and is still taken', async () => {
-    // Parity with the sale and the credit note: the old app lets staff work without
-    // opening the drawer, and refusing the money would be a new rule, not a ported one.
+  it('refuses a payment by either method when no drawer is open, and writes nothing', async () => {
+    // Owner's decision, 2026-09-13: money is only taken while this device's drawer is
+    // open — a settlement with no shift is money no closing report counts. Refused
+    // before the overpayment check, so even an overpayment reads NO_OPEN_SHIFT.
+    await admin.query(`DELETE FROM shifts WHERE tenant_id = $1::uuid`, [TENANT]);
+    const key = `cp-noshift-${Date.now()}`;
+    const body = { id: 'cp-noshift', amount: '100.00', paymentMethod: 'เงินสด' };
+
+    for (const [b, k] of [
+      [body, key],
+      [{ amount: '100.00', paymentMethod: 'โอน/QR' }, undefined],
+      [{ amount: '5000.00', paymentMethod: 'เงินสด' }, undefined],
+    ] as const) {
+      const res = await pay(b, { key: k });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
+      expect(res.body.error.message).toBe('No open shift');
+    }
+
+    expect(await balanceOf()).toBe('3000.00');
+    expect(await paymentRows()).toHaveLength(0);
+    const written = await admin.query(
+      `SELECT (SELECT count(*)::int FROM doc_counters WHERE tenant_id = $1::uuid) AS counters,
+              (SELECT count(*)::int FROM idempotency_keys WHERE tenant_id = $1::uuid) AS claims,
+              (SELECT count(*)::int FROM audit_log WHERE tenant_id = $1::uuid) AS audit`,
+      [TENANT],
+    );
+    // No CP number consumed, and the claim rolled back with the refusal.
+    expect(written[0]).toEqual({ counters: 0, claims: 0, audit: 0 });
+
+    // Open the drawer and the counter's retry — same key, same id — goes through.
+    const shift = await openDrawer();
+    const retry = await pay(body, { key });
+    expect(retry.status).toBe(201);
+    expect(retry.body.data.receiptNo).toMatch(/-0001$/);
+    expect(retry.body.data.shiftId).toBe(shift.body.data.id);
+  });
+
+  it('refuses a payment once the drawer is closed', async () => {
+    expect((await closeDrawer()).status).toBe(200);
+
     const res = await pay({ amount: '100.00', paymentMethod: 'เงินสด' });
 
-    expect(res.status).toBe(201);
-    expect(res.body.data.shiftId).toBeNull();
-    expect(await balanceOf()).toBe('2900.00');
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
+    expect(await balanceOf()).toBe('3000.00');
+    expect(await paymentRows()).toHaveLength(0);
+  });
+
+  it('a replay still answers once the drawer the payment went into has closed', async () => {
+    // The refusal is for NEW money only: the replay checks run first. A 409 on the
+    // retry reads at the counter as "it did not go through", and the mechanic pays twice.
+    const shift = await openDrawer();
+    const key = `cp-replay-closed-${Date.now()}`;
+    const body = { id: 'cp-before-close', amount: '500.00', paymentMethod: 'เงินสด' };
+    const first = await pay(body, { key });
+    expect(first.status).toBe(201);
+    expect((await closeDrawer()).status).toBe(200);
+
+    const sameKey = await pay(body, { key });
+    expect(sameKey.status).toBe(201);
+    expect(sameKey.body).toEqual(first.body);
+
+    const sameId = await pay(body);
+    expect(sameId.status).toBe(201);
+    expect(sameId.body.data.receiptNo).toBe(first.body.data.receiptNo);
+    expect(sameId.body.data.shiftId).toBe(shift.body.data.id);
+
+    expect(await paymentRows()).toHaveLength(1);
+    expect(await balanceOf()).toBe('2500.00');
   });
 
   // ── AC1 (the clamp) ──────────────────────────────────────────────────────────

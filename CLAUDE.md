@@ -494,6 +494,16 @@ not clamped:** `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` unless `allowOverpayment: tr
 `audit_log` row) — `GREATEST(0, …)` on an unvalidated amount is #22's money bug again.
 `paymentMethod` is required. The client `id` is a second duplicate defence beside the key, and
 the replay check runs **before** the overpayment check or a replayed full settlement is refused.
+🔴 **No open drawer, no money (owner's decision 2026-09-13, branch `feat/24-shift-guards`):**
+`POST /mechanics/:id/credit-payments` and `POST /sales` now answer `409 NO_OPEN_SHIFT` when the
+calling device has no shift with `closed_at IS NULL`, on every payment method — the old "stamp null
+and take it" port left that cash in no closing report. `ShiftsService.requireOpenShiftIdFor` reads
+the drawer `FOR SHARE` (a close waits for in-flight money; money behind a committed close is
+refused). It runs **after** both replay paths (key and client `id`), so a payment or bill committed
+while the drawer was open still replays after close; credit payment order is mechanic → replay →
+drawer → overpayment → CP number, sale order is `existingSale` → drawer → mechanic → products.
+`POST /returns` is **not** covered (still `currentShiftIdFor`, null without a drawer). No NOT NULL
+migration: imported rows are legitimately null. E2E fixtures open a drawer with `seedOpenShift`.
 The same branch fixes the #55 client write, which sent no key, no method, and cast the string
 balance to `num` straight into a second local row. 🔴 **The client write is an outbox, not a
 Drift fallback:** every payment goes into `pending_credit_payments` (Drift **schema v5**) with

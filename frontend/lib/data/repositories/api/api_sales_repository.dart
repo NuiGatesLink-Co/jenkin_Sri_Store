@@ -62,6 +62,11 @@ class ApiSalesRepository implements SalesRepository {
   @override
   Future<SaleRow> saveSale(SaleInput input) {
     return rethrowThai(() async {
+      // No open drawer, no sale (owner, 2026-09-13). Checked before an attempt is
+      // parked, so a refused press leaves nothing to replay.
+      if (!await hasOpenShift(db)) {
+        throw const PosException('NO_OPEN_SHIFT', noOpenShiftForSale);
+      }
       final attempt = _pending.of(_cartKey(input));
       final body = _saleBody(attempt.id, input);
 
@@ -75,6 +80,10 @@ class ApiSalesRepository implements SalesRepository {
         // NOT an answer — the bill may be committed — so the attempt stays
         // parked for the retry. See [isVerdict].
         _pending.closeIfVerdict(attempt, e);
+        // The cache said open, the server says closed: same words as the pre-check.
+        if (e.code == 'NO_OPEN_SHIFT') {
+          throw PosException(e.code, noOpenShiftForSale, e.details);
+        }
         rethrow;
       }
       // Anything else — a dropped socket, a timeout — left the bill's fate

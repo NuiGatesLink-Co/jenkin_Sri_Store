@@ -326,25 +326,25 @@ describe('shifts and the cash drawer (e2e)', () => {
           items: [{ lineNo: 1, productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' }],
         });
 
-    // Before the drawer is opened: the old app allows this, so the sale goes through
-    // with no shift rather than being refused by a rule the shop never had.
+    // Before the drawer is opened the bill is refused (owner's decision, 2026-09-13):
+    // a bill with no shift is money no closing report counts.
     const before = await sell(`s-noshift-${Date.now()}`);
-    expect(before.status).toBe(201);
+    expect(before.status).toBe(409);
+    expect(before.body.error.code).toBe('NO_OPEN_SHIFT');
 
     const shift = await post('/open', { startingCash: '1000.00' });
     const during = await sell(`s-shift-${Date.now()}`);
     expect(during.status).toBe(201);
+    expect(during.body.data.shiftId).toBe(shift.body.data.id);
 
     const rows = await admin.query(
-      `SELECT id, shift_id FROM sales WHERE tenant_id = $1::uuid AND id = ANY($2::text[])`,
-      [TENANT, [before.body.data.id, during.body.data.id]],
+      `SELECT id, shift_id FROM sales WHERE tenant_id = $1::uuid`,
+      [TENANT],
     );
-    const byId = new Map(rows.map((r: { id: string; shift_id: string }) => [r.id, r.shift_id]));
-    expect(byId.get(before.body.data.id)).toBeNull();
-    expect(byId.get(during.body.data.id)).toBe(shift.body.data.id);
+    expect(rows).toEqual([{ id: during.body.data.id, shift_id: shift.body.data.id }]);
   });
 
-  it('stops stamping once the drawer is closed', async () => {
+  it('refuses a bill once the drawer is closed', async () => {
     await seedProduct(admin, TENANT, {
       id: 'p2',
       partNo: 'BP-2',
@@ -369,15 +369,22 @@ describe('shifts and the cash drawer (e2e)', () => {
         paymentMethod: 'เงินสด',
         items: [{ lineNo: 1, productId: 'p2', name: 'Brake Pad', qty: 1, price: '750.00' }],
       });
-    expect(res.status).toBe(201);
+    // A closed drawer takes no more money: the bill must neither join the closed shift
+    // and skew its counted report nor slip in with no shift at all. "Open" is
+    // `closed_at IS NULL`, so the still-`is_active` closed row does not count.
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
 
     const rows = await admin.query(
-      `SELECT shift_id FROM sales WHERE tenant_id = $1::uuid AND id = $2`,
-      [TENANT, id],
+      `SELECT count(*)::int AS n FROM sales WHERE tenant_id = $1::uuid`,
+      [TENANT],
     );
-    // A closed drawer takes no more money, so a bill after it belongs to no shift —
-    // it must not silently join the closed one and skew its report.
-    expect(rows[0].shift_id).toBeNull();
+    expect(rows[0].n).toBe(0);
+    const stock = await admin.query(
+      `SELECT stock FROM products WHERE tenant_id = $1::uuid AND id = 'p2'`,
+      [TENANT],
+    );
+    expect(stock[0].stock).toBe(10);
   });
 
   it('retiring a device closes the shift it left open, and is a no-op otherwise', async () => {

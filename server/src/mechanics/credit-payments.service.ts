@@ -24,6 +24,7 @@ export interface CreditPayment {
   paymentMethod: string;
   note: string | null;
   date: string;
+  /** Always set on a new payment (no open shift is `409 NO_OPEN_SHIFT`); a replay of an older one may be null. */
   shiftId: string | null;
 }
 
@@ -47,9 +48,10 @@ export interface CreateCreditPaymentResult extends CreditPayment {
  *   1. the idempotency claim (the interceptor, before this method is called)
  *   2. `SELECT … FROM mechanics … FOR UPDATE` — the 404 comes off this row
  *   3. a payment already recorded under the client's `id` is answered, not repeated
- *   4. the overpayment check, from the locked balance
- *   5. issue the CP number
- *   6. read the device's open drawer, for `shift_id`
+ *   4. the device's open drawer `FOR SHARE`, for `shift_id` — `409 NO_OPEN_SHIFT`
+ *      when there is none (owner's decision, 2026-09-13)
+ *   5. the overpayment check, from the locked balance
+ *   6. issue the CP number
  *   7. insert the payment
  *   8. reduce the tab, clamped at zero
  *   9. the audit row, when the counter overpaid on purpose
@@ -59,9 +61,12 @@ export interface CreateCreditPaymentResult extends CreditPayment {
  * two cannot actually contend with a sale or a credit note beyond the mechanic row —
  * `doc_counters` is keyed by `doc_type`, so a CP number never touches the RC or CN
  * row — and one shared resource cannot deadlock. The order is kept anyway because it
- * costs nothing and stays correct if the series ever share a counter.
+ * costs nothing and stays correct if the series ever share a counter. The shift row in
+ * step 4 is taken `FOR SHARE` and sits outside that order on purpose: `POST /sales`
+ * takes it before the mechanic, and shared locks cannot deadlock against each other
+ * (`ShiftsService.requireOpenShiftIdFor`).
  *
- * 🔴 **The lock is also what makes step 3 mean anything.** Two tills settling the same
+ * 🔴 **The lock is also what makes step 5 mean anything.** Two tills settling the same
  * tab at once would otherwise both read the same balance, both pass the check and both
  * clamp — the shop would have taken twice the debt in cash with nothing recording that
  * the second payment was an overpayment. The Dart reference cannot expose that race:
@@ -98,6 +103,18 @@ export class CreditPaymentsService {
       if (existing) return existing;
     }
 
+    // No open drawer, no payment — cash or transfer alike (owner's decision,
+    // 2026-09-13): a settlement stamped with no shift is money no closing report
+    // counts. After the replay, so a payment committed while the drawer was open is
+    // still answered once it has closed; before the overpayment check and the CP
+    // number, so a refusal leaves no hole in the series. Stamped from the device's own
+    // drawer, never from the body (#28).
+    const shiftId = await this.shifts.requireOpenShiftIdFor(
+      manager,
+      tenantId,
+      actor.deviceId,
+    );
+
     const overpaid = dto.amountSatang > balanceBefore;
     if (overpaid && !dto.allowOverpayment) {
       // 🔴 Validate first, then clamp. `GREATEST(0, …)` below is what keeps the tab
@@ -126,14 +143,6 @@ export class CreditPaymentsService {
       deviceId: actor.deviceId,
       docType: 'cp',
     });
-    // Stamped from the device's own open drawer, never from the body (#28), and null
-    // when none is open — the old app lets staff take money without one, and refusing
-    // it here would be a new rule rather than a ported one.
-    const shiftId = await this.shifts.currentShiftIdFor(
-      manager,
-      tenantId,
-      actor.deviceId,
-    );
 
     const id = dto.id ?? newId('cp');
     const inserted = (await manager.query(

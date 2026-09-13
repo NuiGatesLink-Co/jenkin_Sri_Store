@@ -306,6 +306,33 @@ export async function seedCustomer(
   return c.id;
 }
 
+/**
+ * Opens today's drawer for `deviceId`, as `POST /shifts/open` would. Returns its id.
+ *
+ * `POST /sales` and `POST /mechanics/:id/credit-payments` refuse with
+ * `409 NO_OPEN_SHIFT` when the calling device has no open drawer (owner's decision,
+ * 2026-09-13), so every suite that takes money opens one in its setup. Seeded rather
+ * than posted so a fixture spends no idempotency key and no request; `date_str` is
+ * today in the tenant's own timezone, so a later `POST /shifts/open` on the same day
+ * returns this row untouched instead of archiving it.
+ */
+export async function seedOpenShift(
+  admin: DataSource,
+  tenantId: string,
+  deviceId: string,
+  opts: { id?: string; userId?: string; startingCash?: number } = {},
+): Promise<string> {
+  const id = opts.id ?? `sh-${randomUUID()}`;
+  await admin.query(
+    `INSERT INTO shifts (tenant_id, id, date_str, starting_cash, opened_at, is_active, device_id, opened_by)
+          SELECT $1::uuid, $2, to_char(now() AT TIME ZONE t.timezone, 'YYYY-MM-DD'),
+                 $3, now(), TRUE, $4, $5::uuid
+            FROM tenants t WHERE t.id = $1::uuid`,
+    [tenantId, id, opts.startingCash ?? 0, deviceId, opts.userId ?? null],
+  );
+  return id;
+}
+
 /** Inserts a mechanic. Returns its id. */
 export async function seedMechanic(
   admin: DataSource,

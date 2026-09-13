@@ -97,6 +97,35 @@ Future<T> rethrowThai<T>(Future<T> Function() body) async {
 /// that must never close an attempt.
 bool isVerdict(ApiException e) => e.statusCode < 500 && e.statusCode != 429;
 
+/// What the counter reads when it tries to take money with no drawer open
+/// (owner's decision, 2026-09-13). The server answers `409 NO_OPEN_SHIFT` to
+/// both writes; these are the per-action sentences, used for the pre-check below
+/// AND for that 409, so the counter reads the same words either way.
+const noOpenShiftForSale = 'กรุณาเปิดกะก่อนขาย';
+const noOpenShiftForCreditPayment = 'กรุณาเปิดกะก่อนรับชำระ';
+
+/// Whether this device's cache holds an OPEN drawer — the server's own test
+/// (`requireOpenShiftIdFor`): `isActive` and `closedAt IS NULL`, no date check.
+///
+/// Read from Drift, never from the network, so it answers offline — which is the
+/// point: an offline credit payment is queued, and without this it would be
+/// refused only later, during a flush, with the cash already in the drawer.
+///
+/// ⚠️ It is a cache. `ApiShiftsRepository` patches the row from every
+/// open/close reply and nothing else writes shifts on the API build (ADR-0004:
+/// one `pos` device), so it goes stale only when that device's own reply was
+/// lost or the cache was wiped. Stale-open → the server still refuses with
+/// `NO_OPEN_SHIFT`; stale-closed (wiped cache) → pressing เปิดร้าน re-reads the
+/// server's same-day shift and patches it back.
+Future<bool> hasOpenShift(AppDatabase db) async {
+  final open =
+      await (db.select(db.shifts)
+            ..where((t) => t.isActive.equals(true) & t.closedAt.isNull())
+            ..limit(1))
+          .getSingleOrNull();
+  return open != null;
+}
+
 /// A value to write, or [Value.absent] when the response did not carry the
 /// field at all.
 ///

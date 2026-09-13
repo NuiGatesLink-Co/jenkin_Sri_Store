@@ -23,6 +23,7 @@ import '../../../core/network/api_client.dart';
 import '../../../core/network/api_exception.dart';
 import '../../../domain/models/aggregates.dart';
 import '../../db/database.dart';
+import '../mechanics_repository.dart';
 import '../shifts_repository.dart';
 import 'api_wire.dart';
 
@@ -31,9 +32,14 @@ class ApiShiftsRepository implements ShiftsRepository {
     required this.api,
     required this.db,
     required this.drift,
+    this.mechanics,
   });
 
   final ApiClient api;
+
+  /// The credit-payment outbox (#24), consulted before a close — see
+  /// [closeShift]. Null only in tests that do not exercise it.
+  final MechanicsRepository? mechanics;
 
   /// Required by the implicit `ShiftsRepository` interface (its `db` field is
   /// final, so implementing the class means implementing this getter too).
@@ -89,9 +95,32 @@ class ApiShiftsRepository implements ShiftsRepository {
   /// response; the shift stays `isActive` (it is still the current drawer
   /// until the next `openShift` archives it — same rule as the Drift repo,
   /// just enforced server-side now).
+  ///
+  /// 🔴 Refused while a CASH credit payment is still queued on this device
+  /// (owner, 2026-09-13). The server stamps `shift_id` when a payment ARRIVES,
+  /// so one sent after this close lands in the next shift: tonight's drawer
+  /// holds the cash, tomorrow's report counts it. So the outbox is sent first,
+  /// and the close goes out only if no queued `เงินสด` row is left. A row the
+  /// server REFUSED is not counted — it will never be stamped on any shift, and
+  /// it waits for a person on the Mechanics screen. A transfer (`โอน/QR`) is not
+  /// counted either: it never touches the drawer.
   @override
   Future<ShiftRow?> closeShift(double physicalCash) {
     return rethrowThai(() async {
+      final outbox = mechanics;
+      if (outbox != null) {
+        await outbox.flushPendingCreditPayments();
+        final unsent = (await outbox.getPendingCreditPayments())
+            .where((p) => p.rejectedCode == null && p.paymentMethod == 'เงินสด')
+            .length;
+        if (unsent > 0) {
+          throw PosException(
+            'CASH_CREDIT_PAYMENTS_UNSENT',
+            'ยังมีรับชำระเงินสด $unsent รายการที่ส่งเข้าระบบไม่สำเร็จ '
+                '— ต้องต่อระบบให้ส่งได้ก่อนปิดกะ',
+          );
+        }
+      }
       final attempt = _pending.of('close|${wireMoney(physicalCash)}');
       final response = await _send(
         attempt,

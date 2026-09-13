@@ -73,10 +73,6 @@ List<RepositoryProvider> repositoryProviders(
   final returnsRepository = useApi
       ? ApiReturnsRepository(api: client, db: db, drift: driftReturns)
       : driftReturns;
-  final shiftsRepository = useApi
-      ? ApiShiftsRepository(api: client, db: db, drift: driftShifts)
-      : driftShifts;
-
   // The five read paths of #55, switched by their own flag.
   final productsRepo = useApiRepositories
       ? ApiProductsRepository(db, client)
@@ -84,9 +80,23 @@ List<RepositoryProvider> repositoryProviders(
   final customersRepo = useApiRepositories
       ? ApiCustomersRepository(db, client)
       : CustomersRepository(db);
+  // 🔴 A credit payment is a money WRITE, so it follows the write switch, not
+  // this read one: on the Drift build it stays a local Drift write, and only
+  // with `useApi` does it go through the outbox and require an open drawer.
   final mechanicsRepo = useApiRepositories
-      ? ApiMechanicsRepository(db, client)
+      ? ApiMechanicsRepository(db, client, writesToServer: useApi)
       : MechanicsRepository(db);
+
+  // Built after the mechanics repository: closing a shift on the API build
+  // sends the credit-payment outbox first and refuses while cash is unsent.
+  final shiftsRepository = useApi
+      ? ApiShiftsRepository(
+          api: client,
+          db: db,
+          drift: driftShifts,
+          mechanics: mechanicsRepo,
+        )
+      : driftShifts;
   final poRepo = useApiRepositories
       ? ApiPurchaseOrdersRepository(db, client)
       : PurchaseOrdersRepository(db);

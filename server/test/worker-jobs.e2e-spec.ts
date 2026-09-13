@@ -16,6 +16,7 @@ import {
   accessToken,
   createTestApp,
   resetTenant,
+  seedOpenShift,
   seedProduct,
   type TenantFixture,
   type TestApp,
@@ -59,6 +60,11 @@ describe('Worker Jobs & Queue Integration (e2e)', () => {
       role: 'manager',
       deviceId: tenantInfo.posDeviceId,
       deviceRole: 'pos',
+    });
+    // `POST /sales` refuses with 409 NO_OPEN_SHIFT when the device has no open drawer
+    // (owner's decision, 2026-09-13).
+    await seedOpenShift(fixture.admin, TENANT_ID, tenantInfo.posDeviceId, {
+      userId: tenantInfo.userId,
     });
 
     await salePostQueue.obliterate({ force: true });

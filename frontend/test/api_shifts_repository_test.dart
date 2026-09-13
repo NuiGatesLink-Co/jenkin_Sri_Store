@@ -18,6 +18,8 @@ import 'package:srisurart_pos/core/network/api_client.dart';
 import 'package:srisurart_pos/core/network/api_exception.dart';
 import 'package:srisurart_pos/data/db/database.dart';
 import 'package:srisurart_pos/data/repositories/api/api_shifts_repository.dart';
+import 'package:srisurart_pos/data/repositories/api_mechanics_repository.dart';
+import 'package:srisurart_pos/data/repositories/mechanics_repository.dart';
 import 'package:srisurart_pos/data/repositories/shifts_repository.dart';
 
 /// Builds the success envelope as UTF-8 bytes — `http.Response(String, ...)`
@@ -259,6 +261,159 @@ void main() {
         }
       },
     );
+  });
+
+  group('closeShift sends the credit-payment outbox first (owner, 2026-09-13)', () {
+    Map<String, dynamic> closedShift() => {
+      'id': 'srv-shift-9f3a',
+      'dateStr': '2019-03-04',
+      'startingCash': '1500.00',
+      'openedAt': '2019-03-04T02:00:00.000Z',
+      'closedAt': '2019-03-04T11:47:33.000Z',
+      'physicalCash': '100.00',
+      'isActive': true,
+      'autoArchived': false,
+      'archivedAt': null,
+      'deviceId': 'dev-1',
+      'entries': <Object>[],
+    };
+
+    Future<void> queue(
+      String id, {
+      String method = 'เงินสด',
+      String? rejectedCode,
+    }) => db
+        .into(db.pendingCreditPayments)
+        .insert(
+          PendingCreditPaymentsCompanion.insert(
+            id: id,
+            idempotencyKey: 'idem-$id',
+            mechanicId: 'm_close',
+            amount: '300.00',
+            paymentMethod: method,
+            createdAt: DateTime(2019, 3, 4, 10),
+            rejectedCode: Value(rejectedCode),
+          ),
+        );
+
+    /// The outbox as `repository_providers.dart` wires it, over its own client.
+    ApiMechanicsRepository outbox(
+      Future<http.Response> Function(http.Request) handler,
+    ) => ApiMechanicsRepository(
+      db,
+      ApiClient(baseUrl: 'http://example.com', httpClient: MockClient(handler)),
+    );
+
+    ApiShiftsRepository closeRepo(
+      MechanicsRepository mechanics,
+      Future<http.Response> Function(http.Request) handler,
+    ) => ApiShiftsRepository(
+      api: ApiClient(
+        baseUrl: 'http://example.com',
+        httpClient: MockClient(handler),
+      ),
+      db: db,
+      drift: drift,
+      mechanics: mechanics,
+    );
+
+    test(
+      'still offline: refused with the count, and the close is never sent',
+      () async {
+        await queue('cp-a');
+        await queue('cp-b');
+        var flushAttempts = 0;
+        var closes = 0;
+        final repo = closeRepo(
+          outbox((_) async {
+            flushAttempts++;
+            throw http.ClientException('Offline');
+          }),
+          (_) async {
+            closes++;
+            return _successResponse(closedShift());
+          },
+        );
+
+        Object? thrown;
+        try {
+          await repo.closeShift(100);
+        } catch (e) {
+          thrown = e;
+        }
+
+        expect(flushAttempts, greaterThan(0), reason: 'the outbox is tried first');
+        expect(closes, 0);
+        expect(thrown, isA<PosException>());
+        expect(
+          thrown.toString(),
+          'ยังมีรับชำระเงินสด 2 รายการที่ส่งเข้าระบบไม่สำเร็จ '
+          '— ต้องต่อระบบให้ส่งได้ก่อนปิดกะ',
+        );
+      },
+    );
+
+    test('back online: the flush drains the outbox and the close goes out', () async {
+      await db
+          .into(db.mechanics)
+          .insert(
+            MechanicsCompanion.insert(
+              id: 'm_close',
+              code: 'M-CLOSE',
+              name: 'Chang',
+              createdAt: '2019-03-04',
+              creditBalance: const Value(300),
+            ),
+          );
+      await queue('cp-a');
+      final order = <String>[];
+      final repo = closeRepo(
+        outbox((req) async {
+          order.add(req.url.path);
+          return _successResponse({
+            'id': 'cp-a',
+            'receiptNo': 'CP-0001',
+            'mechanicId': 'm_close',
+            'amount': '300.00',
+            'date': '2019-03-04T10:00:00.000Z',
+            'note': null,
+            'mechanicCreditBalanceAfter': '0.00',
+          }, 201);
+        }),
+        (req) async {
+          order.add(req.url.path);
+          return _successResponse(closedShift());
+        },
+      );
+
+      final row = await repo.closeShift(100);
+
+      expect(row!.closedAt, isNotNull);
+      expect(order, [
+        '/api/v1/mechanics/m_close/credit-payments',
+        '/api/v1/shifts/close',
+      ]);
+      expect(await db.select(db.pendingCreditPayments).get(), isEmpty);
+    });
+
+    test('a transfer or a REFUSED cash row does not block the close', () async {
+      // A transfer never touches the drawer; a refused row will never be
+      // stamped on any shift and waits for a person on the Mechanics screen.
+      await queue('cp-qr', method: 'โอน/QR');
+      await queue('cp-refused', rejectedCode: 'CREDIT_PAYMENT_EXCEEDS_BALANCE');
+      var closes = 0;
+      final repo = closeRepo(
+        outbox((_) async => throw http.ClientException('Offline')),
+        (_) async {
+          closes++;
+          return _successResponse(closedShift());
+        },
+      );
+
+      await repo.closeShift(100);
+
+      expect(closes, 1);
+    });
   });
 
   group('addDrawerEntry', () {

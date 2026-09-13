@@ -30,7 +30,14 @@ void main() {
     test('preserves verbatim English messages where specified in §8', () {
       expect(ServerErrorResolver.resolve('SALE_NOT_FOUND'), 'Sale not found');
       expect(ServerErrorResolver.resolve('SALE_VOIDED'), 'Bill already voided');
-      expect(ServerErrorResolver.resolve('NO_OPEN_SHIFT'), 'No open shift');
+    });
+
+    test('NO_OPEN_SHIFT renders in Thai even though the server sends English', () {
+      // Owner, 2026-09-13: the code now refuses money at the counter.
+      expect(
+        ServerErrorResolver.resolve('NO_OPEN_SHIFT', serverMessage: 'No open shift'),
+        'กรุณาเปิดกะก่อน',
+      );
     });
 
     test('prefers server message when server provides formatted Thai details', () {

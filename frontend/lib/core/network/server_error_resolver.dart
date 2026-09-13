@@ -14,7 +14,11 @@ class ServerErrorResolver {
     'SALE_VOIDED': 'Bill already voided',
     'DRAWER_CLOSED': 'ลิ้นชักปิดแล้ว ไม่สามารถบันทึกรายการเงินเพิ่มได้',
     'INVALID_BACKUP': 'ไฟล์สำรองไม่ถูกต้อง — ไม่พบข้อมูล __meta',
-    'NO_OPEN_SHIFT': 'No open shift',
+    // §8 lists the English `No open shift` (the Drift service's own throw), but
+    // since 2026-09-13 it also refuses sales and credit payments at the counter,
+    // so the owner wants it in Thai. The sale / credit-payment paths use their
+    // own sentences (`api_wire.dart`); this is the drawer-entry / close / flush one.
+    'NO_OPEN_SHIFT': 'กรุณาเปิดกะก่อน',
     'PO_ALREADY_RECEIVED': 'ใบสั่งซื้อนี้รับของแล้ว',
     'DUPLICATE_PART_NO': 'รหัสอะไหล่นี้มีอยู่แล้ว',
     'TOTAL_MISMATCH': 'ยอดเงินไม่ตรงกัน กรุณาทำรายการใหม่',

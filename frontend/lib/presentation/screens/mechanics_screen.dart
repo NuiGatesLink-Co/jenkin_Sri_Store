@@ -338,9 +338,15 @@ class _MechanicsScreenState extends State<MechanicsScreen> {
   // ── CREDIT PAYMENT ────────────────────────────────────────────────────────
   Future<void> _openPayCredit(MechanicRow mechanic) async {
     final repo = context.read<MechanicsRepository>();
+    final queued = _queuedCreditPaymentsFor(
+      await repo.getPendingCreditPayments(),
+      mechanic.id,
+    );
+    if (!mounted) return;
     final paid = await showDialog<bool>(
       context: context,
-      builder: (_) => _PayCreditDialog(mechanic: mechanic, repo: repo),
+      builder: (_) =>
+          _PayCreditDialog(mechanic: mechanic, repo: repo, queued: queued),
     );
     if (paid == true) {
       setState(() {
@@ -373,6 +379,19 @@ class _MechanicsScreenState extends State<MechanicsScreen> {
 // ─────────────────────────────────────────────────────────────────────────────
 // PENDING CREDIT PAYMENTS (#24 outbox)
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// What [mechanicId] has paid at this counter that the server has not booked
+/// yet: the queued rows only. A REFUSED row is not money the server will ever
+/// take off the tab, so it does not count.
+double _queuedCreditPaymentsFor(
+  List<PendingCreditPaymentRow> rows,
+  String mechanicId,
+) => round2(
+  rows
+      .where((r) => r.mechanicId == mechanicId && r.rejectedCode == null)
+      .fold<double>(0, (s, r) => s + double.parse(r.amount)),
+);
+
 class _PendingPaymentsBanner extends StatelessWidget {
   final List<PendingCreditPaymentRow> rows;
   final VoidCallback onOpen;
@@ -1510,7 +1529,14 @@ class _MechanicFormDialogState extends State<_MechanicFormDialog> {
 class _PayCreditDialog extends StatefulWidget {
   final MechanicRow mechanic;
   final MechanicsRepository repo;
-  const _PayCreditDialog({required this.mechanic, required this.repo});
+
+  /// This mechanic's payments still in the outbox when the dialog opened.
+  final double queued;
+  const _PayCreditDialog({
+    required this.mechanic,
+    required this.repo,
+    this.queued = 0,
+  });
 
   @override
   State<_PayCreditDialog> createState() => _PayCreditDialogState();
@@ -1523,6 +1549,21 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
   bool _busy = false;
 
   double get _balance => widget.mechanic.creditBalance;
+  late double _queued = widget.queued;
+
+  /// What is still owed once the payments waiting in the outbox land.
+  ///
+  /// 🔴 The overpayment check must use THIS, not [_balance]. The balance is the
+  /// server's and deliberately does not move until a queued payment is booked
+  /// (ADR-0010: no second bookkeeping), so offline — debt 1,000, take 1,000
+  /// (queued), take 1,000 again — the second press saw 1,000 owed, asked
+  /// nothing, and the flush later got `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` with
+  /// the cash already in the drawer. Only this figure moves; the row is not
+  /// written.
+  double get _outstanding {
+    final left = round2(_balance - _queued);
+    return left < 0 ? 0 : left;
+  }
 
   static String _numText(double v) =>
       v == v.roundToDouble() ? v.toInt().toString() : v.toString();
@@ -1530,7 +1571,7 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
   @override
   void initState() {
     super.initState();
-    _amount = TextEditingController(text: _numText(_balance));
+    _amount = TextEditingController(text: _numText(_outstanding));
   }
 
   @override
@@ -1552,9 +1593,15 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
       );
       return;
     }
+    // Re-read the outbox: a payment queued since the dialog opened counts too.
+    final pending = await widget.repo.getPendingCreditPayments();
+    if (!mounted) return;
+    setState(() {
+      _queued = _queuedCreditPaymentsFor(pending, widget.mechanic.id);
+    });
     var allowOverpayment = false;
-    if (amt > _balance) {
-      if (!await _confirmOverpayment(amt, _balance)) return;
+    if (amt > _outstanding) {
+      if (!await _confirmOverpayment(amt, _outstanding)) return;
       allowOverpayment = true;
     }
     setState(() => _busy = true);
@@ -1637,7 +1684,7 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final amt = double.tryParse(_amount.text.trim()) ?? 0;
-    final after = (_balance - amt).clamp(0.0, double.infinity);
+    final after = (_outstanding - amt).clamp(0.0, double.infinity);
 
     return AlertDialog(
       title: Text('💵 รับชำระเครดิต — ${widget.mechanic.nameTH ?? ''}'),
@@ -1666,7 +1713,7 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
                           style: theme.textTheme.bodySmall,
                         ),
                         Text(
-                          baht(_balance),
+                          baht(_outstanding),
                           style: const TextStyle(
                             fontWeight: FontWeight.w800,
                             fontSize: 24,
@@ -1676,6 +1723,17 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
                         ),
                       ],
                     ),
+                    if (_queued > 0)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            'หักรับชำระที่รอส่งเข้าระบบแล้ว ${baht(_queued)}',
+                            style: theme.textTheme.bodySmall,
+                          ),
+                        ),
+                      ),
                     if (amt > 0) ...[
                       const Divider(height: 16),
                       Row(
@@ -1725,7 +1783,7 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
                   _QuickChip(
                     label: 'เต็มจำนวน',
                     onTap: () =>
-                        setState(() => _amount.text = _numText(_balance)),
+                        setState(() => _amount.text = _numText(_outstanding)),
                   ),
                 ],
               ),

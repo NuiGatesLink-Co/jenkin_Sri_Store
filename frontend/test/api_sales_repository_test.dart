@@ -140,6 +140,19 @@ void main() {
             creditBalance: const Value(0),
           ),
         );
+    // An open drawer: since 2026-09-13 the API build sells only with one. Its id
+    // is nothing the server answers with, so it cannot pass for `shiftId` below.
+    await db
+        .into(db.shifts)
+        .insert(
+          ShiftsCompanion.insert(
+            id: 'tsh-local-open',
+            dateStr: '2026-09-12',
+            startingCash: 500,
+            openedAt: DateTime(2026, 9, 12, 8),
+            isActive: const Value(true),
+          ),
+        );
   });
 
   tearDown(() async => db.close());
@@ -187,8 +200,8 @@ void main() {
     'mechanicCreditBalanceAfter': '1234.50',
     'customerAfter': {'id': 'tc1', 'points': 41, 'totalSpend': '999.50'},
     // ── #82's four new fields ──
-    // The drawer the server filed the bill under; this device has no shift open
-    // at all, so nothing local could have produced it.
+    // The drawer the server filed the bill under; this device's own open shift
+    // is `tsh-local-open`, so nothing local could have produced it.
     'shiftId': 'shift-server-9',
     // 58.25, not the local `products.cost` of 60.
     'items': [
@@ -252,8 +265,8 @@ void main() {
       expect(sale.date, DateTime.parse('2026-09-12T03:00:00.000Z').toLocal());
       expect(sales.single.receiptNo, 'RC-00042');
       expect(sales.single.pointsGranted, 7);
-      // #82: the drawer the SERVER filed it under. No shift is open on this
-      // device, so a locally-chosen value could only have been null.
+      // #82: the drawer the SERVER filed it under. A locally-chosen value could
+      // only have been this device's `tsh-local-open`.
       expect(sale.shiftId, 'shift-server-9');
       expect(sales.single.shiftId, 'shift-server-9');
 
@@ -848,6 +861,61 @@ void main() {
       await repo.saveSale(input(paymentMethod: 'เครดิตช่าง'));
 
       expect(bodies.single['overrideCreditLimit'], isFalse);
+    });
+  });
+
+  group('no open shift, no sale (owner, 2026-09-13)', () {
+    Future<Object?> attempt(ApiSalesRepository repo) async {
+      try {
+        await repo.saveSale(input());
+      } catch (e) {
+        return e;
+      }
+      return null;
+    }
+
+    test('with no open drawer the bill never leaves the device', () async {
+      await db.delete(db.shifts).go();
+      final repo = repoWith((req) async => fail('nothing may be sent'));
+
+      final thrown = await attempt(repo);
+
+      expect(thrown, isA<PosException>());
+      expect((thrown as PosException).code, 'NO_OPEN_SHIFT');
+      expect(thrown.toString(), 'กรุณาเปิดกะก่อนขาย');
+      expect(sent, isEmpty);
+      expect(await db.select(db.sales).get(), isEmpty);
+    });
+
+    test('a drawer that is closed but not yet archived is not open', () async {
+      // `closeShift` leaves `isActive` true until the next open archives it, so
+      // `isActive` alone would let this bill through — the server tests
+      // `closed_at IS NULL` and would refuse it.
+      await (db.update(db.shifts)).write(
+        ShiftsCompanion(closedAt: Value(DateTime(2026, 9, 12, 20))),
+      );
+      final repo = repoWith((req) async => fail('nothing may be sent'));
+
+      final thrown = await attempt(repo);
+
+      expect(thrown.toString(), 'กรุณาเปิดกะก่อนขาย');
+      expect(sent, isEmpty);
+    });
+
+    test('a server 409 NO_OPEN_SHIFT (stale cache) reads the same in Thai', () async {
+      final repo = repoWith(
+        (req) async => http.Response(
+          _err('NO_OPEN_SHIFT', 'No open shift'),
+          409,
+          headers: {'content-type': 'application/json'},
+        ),
+      );
+
+      final thrown = await attempt(repo);
+
+      expect(thrown, isNot(isA<ApiException>()));
+      expect(thrown.toString(), 'กรุณาเปิดกะก่อนขาย');
+      expect(await db.select(db.sales).get(), isEmpty);
     });
   });
 
