@@ -50,7 +50,7 @@ Refer to `docs/Backend_design/02_API_SCREENS.md` §3.2, §3.9 and §9, plus `doc
 2. Review the response shape against the consumer added by the frontend API-read slice; the design document specifies meanings but not a full JSON example.
 3. Run the normal server lint, typecheck, unit, and complete E2E gates, remembering the documented single-runner database limitation.
 4. Review the local commit, then push/open the PR only when authorised.
-5. After #29 merges, #30 can implement gross profit and the closing report without reusing the deliberately excluded formulas here.
+5. After #29 merges, #30 can implement gross profit and the closing report without reusing the deliberately excluded formulas here. — **done:** #30, #95 and #97 (2026-09-13), see `p7-closing-report-and-shift-guards.md`.
 
 ## Suggested skills
 

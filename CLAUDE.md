@@ -516,8 +516,38 @@ Drift fallback:** every payment goes into `pending_credit_payments` (Drift **sch
 its id + key BEFORE the request, and leaves only when the server answers. No network / 5xx →
 `CreditPaymentQueued` (the dialog closes and says so; the balance and `credit_payments` are
 patched from the server's reply only). A 4xx during a later flush keeps the row for a person
-(banner on the Mechanics screen). **AC3 stays open until #30** sums cash settlements by
-`shift_id`. Read `docs/handoff_log/lane-a-24-credit-payments.md` before #30.
+(banner on the Mechanics screen). AC3 (cash settlements summed by `shift_id`) was closed by #30.
+Read `docs/handoff_log/lane-a-24-credit-payments.md` before touching credit payments.
+
+**#30, #95, #97, #94 and #100 are merged — PRs #96, #98, #99, #101, #102, 2026-09-13; #7 (Lane A parent) closed.**
+The reports are done, and every cash-moving write is now tied to a drawer:
+- `GET /reports/closing?shiftId=` computes expected cash and variance **by `shift_id` only**, plus gross profit
+  (`cost_at_sale` first, then `products.cost`, disclosed as `estimatedCostRows` / `unknownCostRows`).
+- `GET /reports/summary`, top-products, by-category and product-sales all count the same set of bills
+  (`COUNTED_SALE`): a **manual** void is excluded; a bill **auto**-voided by a full return is kept and its
+  credit note subtracts.
+- Migration `1788652800006` adds `idx_returns_shift`.
+
+🔴 **Reports are live SQL, never snapshotted at close, so a closed shift stays closed only because writes are
+refused.** Two project-owner decisions closed the holes:
+- **#94 (option A):** `POST /sales/:id/void` works only on a bill from the calling device's open drawer.
+  Otherwise the server answers `409 NO_OPEN_SHIFT` or `409 SALE_NOT_IN_OPEN_SHIFT`, and the older bill needs
+  a credit note.
+- **#100 (option A, cash only):** a `'เงินสด'` refund with no open drawer gets `409 NO_OPEN_SHIFT`.
+  `โอน` / `หักจากเครดิต` refunds are still accepted, stamped null.
+
+Every refund reads the drawer `FOR SHARE`. Non-cash credit notes still net into the shift's gross profit,
+and an unlocked read raced a close and stamped the **closed** shift's id — pinned by an e2e that holds the
+row lock.
+
+After today's close, a cash refund waits for tomorrow's open, because `open()` hands back the closed row.
+
+Still open:
+- the Thai wording for `SALE_NOT_IN_OPEN_SHIFT` (the shop's to write, §8.1)
+- the Drift build does not enforce any of these drawer rules (the phase-1 divergence #24 accepted)
+
+Read `docs/handoff_log/p7-closing-report-and-shift-guards.md` before touching `server/src/reports/`,
+the void path or the returns path.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
