@@ -17,6 +17,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
+import '../../core/network/api_exception.dart';
 import '../../core/utils/money.dart';
 import '../../data/db/database.dart';
 import '../../data/repositories/mechanics_repository.dart';
@@ -1328,30 +1329,76 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
       );
       return;
     }
+    var allowOverpayment = false;
     if (amt > _balance) {
-      final ok = await showConfirm(
-        context,
-        'ยืนยันรับเงิน',
-        'จำนวนเงิน ${baht(amt)} เกินยอดค้าง ${baht(_balance)}\n\nยืนยันรับเงิน?',
-      );
-      if (!ok) return;
+      if (!await _confirmOverpayment(amt, _balance)) return;
+      allowOverpayment = true;
     }
     setState(() => _busy = true);
-    // Repo addCreditPayment accepts only mechanicId/amount/note. We fold the
-    // chosen method into the note so it appears in the account history line
-    // ("รับชำระเครดิต · <method> · <note>"), matching the JSX display.
+    // The Drift table has no method column, so the method is still folded into
+    // the note for the account history line ("รับชำระเครดิต · <method> · <note>"),
+    // matching the JSX display — and is ALSO passed on its own, because the
+    // server's closing report needs it as data (#24).
     final typed = _note.text.trim();
     final combinedNote = typed.isEmpty ? _method : '$_method · $typed';
-    await widget.repo.addCreditPayment(
+    Future<void> send(bool allow) => widget.repo.addCreditPayment(
       mechanicId: widget.mechanic.id,
       amount: amt,
       note: combinedNote,
+      paymentMethod: _method,
+      allowOverpayment: allow,
     );
+    try {
+      try {
+        await send(allowOverpayment);
+      } on PosException catch (e) {
+        // The check above tests the balance THIS dialog was opened with; the
+        // server tests the tab as it is now, and another counter may have moved
+        // it. Without this branch the refusal is a dead end that repeats on every
+        // press. Ask the same question again with the SERVER's numbers and resend
+        // only on a yes — the same shape as checkout's credit-limit 409 (#56).
+        if (e.code != 'CREDIT_PAYMENT_EXCEEDS_BALANCE' || allowOverpayment) {
+          rethrow;
+        }
+        final d = e.details;
+        final serverBalance = _detailMoney(
+          d is Map ? d['creditBalance'] : null,
+        );
+        if (serverBalance == null) rethrow;
+        if (!mounted) return;
+        if (!await _confirmOverpayment(amt, serverBalance)) {
+          if (mounted) setState(() => _busy = false);
+          return;
+        }
+        await send(true);
+      }
+    } catch (e) {
+      // Before #24 this call could not fail, so it had no catch — an escaping
+      // error left the button spinning with nothing on screen.
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(e.toString().replaceFirst('Exception: ', ''))),
+      );
+      return;
+    }
     if (!mounted) return;
     Navigator.of(context).pop(true);
     ScaffoldMessenger.of(
       context,
     ).showSnackBar(SnackBar(content: Text('รับชำระ ${baht(amt)} เรียบร้อย')));
+  }
+
+  Future<bool> _confirmOverpayment(double amt, double balance) => showConfirm(
+    context,
+    'ยืนยันรับเงิน',
+    'จำนวนเงิน ${baht(amt)} เกินยอดค้าง ${baht(balance)}\n\nยืนยันรับเงิน?',
+  );
+
+  double? _detailMoney(Object? wire) {
+    if (wire is num) return wire.toDouble();
+    if (wire is String) return double.tryParse(wire);
+    return null;
   }
 
   @override

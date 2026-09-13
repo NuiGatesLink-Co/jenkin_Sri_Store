@@ -26,7 +26,7 @@ import type { MigrationInterface, QueryRunner } from 'typeorm';
  *   money would be a new rule rather than a ported one.
  *
  * `NOT NULL` on `payment_method` is therefore wrong for the table but right for the
- * endpoint, so `parseCreditPayment` requires it there instead: what the server writes
+ * endpoint, so `parseCreateCreditPayment` requires it there instead: what the server writes
  * always carries a method, what history handed us may not.
  *
  * Nothing else changes: RLS and the `pos_app` grants are per table, not per column,

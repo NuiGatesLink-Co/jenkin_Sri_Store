@@ -8,7 +8,7 @@ import '../../core/network/api_exception.dart';
 import 'package:drift/drift.dart';
 
 import '../../core/network/api_client.dart';
-import '../../core/utils/ids.dart';
+import 'api/api_wire.dart';
 import '../db/database.dart';
 import 'mechanics_repository.dart';
 
@@ -164,62 +164,95 @@ class ApiMechanicsRepository extends MechanicsRepository {
     );
   }
 
+  /// The attempts at a settlement that never got a verdict — see [PendingWrites].
+  ///
+  /// 🔴 A credit payment is cash over the counter, so it takes the same two
+  /// defences as a bill (#24): the `Idempotency-Key` and the client's own id,
+  /// both minted once per attempt and resent verbatim. The first version of this
+  /// method sent neither, so the server refused it outright — and a retry with a
+  /// fresh key after a lost reply would have wiped a second instalment of debt
+  /// the mechanic never paid.
+  final PendingWrites _pending = PendingWrites('cp');
+
   @override
   Future<CreditPaymentRow> addCreditPayment({
     required String mechanicId,
     required double amount,
     String? note,
+    required String paymentMethod,
+    bool allowOverpayment = false,
   }) async {
-    try {
-      final body = <String, dynamic>{
-        'amount': amount.toStringAsFixed(2),
-      };
-      if (note != null) body['note'] = note;
+    final attempt = _pending.of(
+      [mechanicId, wireMoney(amount), paymentMethod, note ?? ''].join('|'),
+    );
+    final body = <String, dynamic>{
+      'id': attempt.id,
+      'amount': wireMoney(amount),
+      'paymentMethod': paymentMethod,
+      'note': ?note,
+      // Only ever true when a human confirmed the overpayment dialog — the
+      // screen decides, this layer carries it (consent is never inferred, #56).
+      if (allowOverpayment) 'allowOverpayment': true,
+    };
 
-      final res = await apiClient.post(
+    // An ApiException means the server answered: a 4xx closes the attempt, a 5xx
+    // leaves it parked so the next press replays it — and neither may fall
+    // through to Drift (the contract test checks the guard's exact shape).
+    final Object? res;
+    try {
+      res = await apiClient.post(
         '/api/v1/mechanics/$mechanicId/credit-payments',
         body: body,
+        headers: attempt.headers,
       );
-
-      if (res is Map) {
-        final resMap = Map<String, dynamic>.from(res);
-        final paymentData = (resMap['payment'] is Map
-            ? Map<String, dynamic>.from(resMap['payment'] as Map)
-            : resMap);
-        final id = (paymentData['id'] ?? newId('cp')) as String;
-        final receiptNo = (paymentData['receiptNo'] ?? docNo('CP')) as String;
-        final dateStr = paymentData['date'] as String?;
-        final date = dateStr != null ? DateTime.tryParse(dateStr) ?? DateTime.now() : DateTime.now();
-
-        final row = CreditPaymentRow(
-          id: id,
-          receiptNo: receiptNo,
-          mechanicId: mechanicId,
-          amount: amount,
-          date: date,
-          note: note,
-        );
-        await db.into(db.creditPayments).insertOnConflictUpdate(row);
-
-        // Update mechanic's balance directly from server response
-        if (resMap['mechanicCreditBalanceAfter'] != null) {
-          final balanceAfter = (resMap['mechanicCreditBalanceAfter'] as num).toDouble();
-          await (db.update(db.mechanics)..where((t) => t.id.equals(mechanicId))).write(
-            MechanicsCompanion(
-              creditBalance: Value(balanceAfter),
-              updatedAt: Value(DateTime.now()),
-            ),
-          );
-        }
-
-        return row;
-      }
     } on ApiException catch (e) {
-      rethrowServerRefusal(e);
+      rethrowServerRefusal(_settle(attempt, e));
     } catch (_) {
-      // Offline fallback
+      // Transport failure: phase 1 keeps the shop working on Drift (#55). The
+      // local write completes the action from the counter's point of view, so the
+      // attempt is closed — a later identical payment is a new one.
+      _pending.close(attempt);
+      return super.addCreditPayment(
+        mechanicId: mechanicId,
+        amount: amount,
+        note: note,
+        paymentMethod: paymentMethod,
+      );
     }
 
-    return super.addCreditPayment(mechanicId: mechanicId, amount: amount, note: note);
+    // Outside the try on purpose. A parse or patch error here happens AFTER the
+    // server committed; letting it reach the offline fallback — as the first
+    // version did via a `num` cast on the string wire format — writes the payment
+    // a second time locally. It stays parked instead, so a retry replays.
+    final data = (res as Map).cast<String, dynamic>();
+    final row = CreditPaymentRow(
+      id: data['id'] as String,
+      receiptNo: data['receiptNo'] as String,
+      mechanicId: data['mechanicId'] as String,
+      amount: money(data['amount']),
+      date: stamp(data['date']),
+      note: data['note'] as String?,
+    );
+    await db.transaction(() async {
+      await db.into(db.creditPayments).insertOnConflictUpdate(row);
+      await (db.update(
+        db.mechanics,
+      )..where((t) => t.id.equals(mechanicId))).write(
+        MechanicsCompanion(
+          creditBalance: keepMoney(
+            moneyOrNull(data['mechanicCreditBalanceAfter']),
+          ),
+          updatedAt: Value(DateTime.now()),
+        ),
+      );
+    });
+    _pending.close(attempt);
+    return row;
+  }
+
+  /// Closes [attempt] when [e] is a verdict and hands [e] back to be rethrown.
+  ApiException _settle(PendingWrite attempt, ApiException e) {
+    _pending.closeIfVerdict(attempt, e);
+    return e;
   }
 }

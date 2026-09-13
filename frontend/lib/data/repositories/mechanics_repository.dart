@@ -81,10 +81,18 @@ class MechanicsRepository {
   /// Transactional (mirrors db.js: insert payment + reduce mechanic balance):
   ///   newP = { ...p, id:newId('cp'), receiptNo:docNo('CP'), date:now }
   ///   mech.creditBalance = max(0, (creditBalance||0) - amount)
+  ///
+  /// [paymentMethod] and [allowOverpayment] exist for `POST
+  /// /mechanics/:id/credit-payments` (#24), which needs both on the wire. The
+  /// Drift table has no method column, so this local path does not store them —
+  /// the screen still folds the method into [note] for the history line — and a
+  /// local write has no server to refuse an overpayment, so the flag is moot here.
   Future<CreditPaymentRow> addCreditPayment({
     required String mechanicId,
     required double amount,
     String? note,
+    required String paymentMethod,
+    bool allowOverpayment = false,
   }) async {
     return db.transaction(() async {
       final row = CreditPaymentRow(

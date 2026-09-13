@@ -236,10 +236,10 @@ describe('POST /mechanics/:id/credit-payments (e2e)', () => {
   });
 
   // ── AC3 ──────────────────────────────────────────────────────────────────────
-  it('records the method, so a shift’s cash can be told from its transfers', async () => {
-    // #30 owns the closing report itself; what #24 owes it is data it can compute
-    // from. This is that computation: expected cash must count the 800 handed over
-    // and ignore the 500 that went into the bank.
+  it('stores what #30 needs to count a shift’s cash apart from its transfers', async () => {
+    // Honest about its reach: #30 owns the closing report, and no server code reads
+    // these columns yet. This proves the DATA is separable — the query below is the
+    // one #30 will write — not that anything separates it. AC3 closes with #30.
     const shift = await openDrawer();
     await pay({ amount: '800.00', paymentMethod: 'เงินสด' });
     await pay({ amount: '500.00', paymentMethod: 'โอน/QR' });
@@ -268,6 +268,8 @@ describe('POST /mechanics/:id/credit-payments (e2e)', () => {
     ]) {
       const res = await pay(body);
       expect(res.status).toBe(400);
+      // The field, not just the status: a 400 from any other validator would pass.
+      expect(res.body.error.message).toMatch(/paymentMethod/);
     }
     expect(await balanceOf()).toBe('3000.00');
     expect(await paymentRows()).toHaveLength(0);
@@ -303,6 +305,118 @@ describe('POST /mechanics/:id/credit-payments (e2e)', () => {
 
     expect(await paymentRows()).toHaveLength(2);
     expect(await balanceOf()).toBe('2000.00');
+  });
+
+  it('the counter path: 409, the dialog, the same key resent with the flag', async () => {
+    // The client keys the payment, not the attempt, so the resend after
+    // 'ยืนยันรับเงิน?' carries the same Idempotency-Key with a different body. That is
+    // only not IDEMPOTENCY_KEY_REUSED because the claim rolled back with the refused
+    // transaction — pinned here, as `sales-ledger.e2e-spec.ts` pins it for the credit
+    // limit, so a later change to the claim's lifetime (tx.3) cannot turn the
+    // counter's confirm into a payment that can never be recorded.
+    const key = `cp-confirm-${Date.now()}`;
+    const body = { amount: '5000.00', paymentMethod: 'เงินสด' };
+
+    const refused = await pay(body, { key });
+    expect(refused.status).toBe(409);
+    expect(refused.body.error.code).toBe('CREDIT_PAYMENT_EXCEEDS_BALANCE');
+
+    const confirmed = await pay({ ...body, allowOverpayment: true }, { key });
+    expect(confirmed.status).toBe(201);
+    expect(confirmed.body.data.mechanicCreditBalanceAfter).toBe('0.00');
+    expect(await paymentRows()).toHaveLength(1);
+  });
+
+  it('a retry that lost its key replays the payment recorded under the client id', async () => {
+    // An app restart after a dropped reply: the Idempotency-Key is gone, the id the
+    // repository minted is not. A partial payment is not caught by the overpayment
+    // check, so without this the tab loses 500 the mechanic never paid.
+    const body = {
+      id: 'cp-client-1',
+      amount: '500.00',
+      paymentMethod: 'เงินสด',
+    };
+
+    const first = await pay(body);
+    const retry = await pay(body);
+
+    expect(first.status).toBe(201);
+    expect(retry.status).toBe(201);
+    expect(retry.body.data.id).toBe('cp-client-1');
+    expect(retry.body.data.receiptNo).toBe(first.body.data.receiptNo);
+    expect(retry.body.data.mechanicCreditBalanceAfter).toBe('2500.00');
+    expect(await paymentRows()).toHaveLength(1);
+    expect(await balanceOf()).toBe('2500.00');
+  });
+
+  it('a replayed full settlement is answered, not refused as an overpayment', async () => {
+    // The replay check runs before the overpayment check: the first attempt took the
+    // tab to zero, and a 409 on the retry reads at the counter as "it did not go through".
+    const body = {
+      id: 'cp-client-full',
+      amount: '3000.00',
+      paymentMethod: 'เงินสด',
+    };
+    await pay(body);
+    const retry = await pay(body);
+
+    expect(retry.status).toBe(201);
+    expect(retry.body.data.mechanicCreditBalanceAfter).toBe('0.00');
+    expect(await paymentRows()).toHaveLength(1);
+  });
+
+  it('a client id that names a different payment is refused', async () => {
+    await pay({ id: 'cp-client-2', amount: '500.00', paymentMethod: 'เงินสด' });
+    const clash = await pay({
+      id: 'cp-client-2',
+      amount: '700.00',
+      paymentMethod: 'เงินสด',
+    });
+
+    expect(clash.status).toBe(409);
+    expect(clash.body.error.code).toBe('CREDIT_PAYMENT_ID_REUSED');
+    expect(await paymentRows()).toHaveLength(1);
+    expect(await balanceOf()).toBe('2500.00');
+  });
+
+  it('one Idempotency-Key sent for two different mechanics does not replay across them', async () => {
+    // #75: the fingerprint once used the route pattern, so a reused key answered for
+    // the wrong bill. Here the path parameter chooses whose debt moves.
+    await seedMechanic(admin, TENANT, {
+      id: 'm-credit-2',
+      code: 'M002',
+      name: 'ช่างสมศักดิ์',
+      creditBalance: 1000,
+    });
+    const key = `cp-two-mechanics-${Date.now()}`;
+    const body = { amount: '400.00', paymentMethod: 'เงินสด' };
+
+    const first = await pay(body, { key });
+    const second = await pay(body, { key, mechanicId: 'm-credit-2' });
+
+    expect(first.status).toBe(201);
+    expect(second.status).not.toBe(201);
+    expect(await balanceOf()).toBe('2600.00');
+    const other = await admin.query(
+      `SELECT credit_balance FROM mechanics WHERE tenant_id = $1::uuid AND id = 'm-credit-2'`,
+      [TENANT],
+    );
+    expect(other[0].credit_balance).toBe('1000.00');
+  });
+
+  it('the flag on a payment under the tab records nothing', async () => {
+    const res = await pay({
+      amount: '100.00',
+      paymentMethod: 'เงินสด',
+      allowOverpayment: true,
+    });
+
+    expect(res.status).toBe(201);
+    const audit = await admin.query(
+      `SELECT count(*)::int AS n FROM audit_log WHERE tenant_id = $1::uuid`,
+      [TENANT],
+    );
+    expect(audit[0].n).toBe(0);
   });
 
   // ── AC5 ──────────────────────────────────────────────────────────────────────

@@ -293,7 +293,7 @@ sequenceDiagram
 |---|---|
 | `GET /mechanics?search=` | ส่ง `creditBalance` / `creditLimit` มาด้วยเสมอ |
 | `POST /mechanics` (`code` = `M###`) · `PATCH` · `DELETE` | |
-| **`POST /mechanics/:id/credit-payments`** | ช่างมาจ่ายหนี้ — ลด `credit_balance` (clamp ที่ 0), ออกเลขใบเสร็จรับเงิน (series **CP**), ต้อง idempotent · **pos เท่านั้น** · body `{ amount, paymentMethod, note?, allowOverpayment? }` — `paymentMethod` เป็น `'เงินสด'` \| `'โอน/QR'` **บังคับ** (รายงานปิดร้านต้องแยกเงินสดออกจากเงินโอน) · จ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` = `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` (§8.1) · ตอบ payment + `mechanicCreditBalanceAfter` · server แสตมป์ `shift_id` จากลิ้นชักที่เปิดอยู่ของเครื่องนั้นเอง (#24) |
+| **`POST /mechanics/:id/credit-payments`** | ช่างมาจ่ายหนี้ — ลด `credit_balance` (clamp ที่ 0), ออกเลขใบเสร็จรับเงิน (series **CP**), ต้อง idempotent · **pos เท่านั้น** · body `{ id?, amount, paymentMethod, note?, allowOverpayment? }` — `paymentMethod` เป็น `'เงินสด'` \| `'โอน/QR'` **บังคับ** (รายงานปิดร้านต้องแยกเงินสดออกจากเงินโอน) · จ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` = `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` (§8.1) · ตอบ payment + `mechanicCreditBalanceAfter` · server แสตมป์ `shift_id` จากลิ้นชักที่เปิดอยู่ของเครื่องนั้นเอง (#24) |
 | `GET /credit-payments?mechanicId=&from=&to=` | |
 | **`GET /mechanics/:id/sales?page=`** | ⚠️ เหมือนข้อ 3.5 — เดิม filter ใน client |
 | `GET /mechanics/:id/statement?from=&to=` | ใบแจ้งหนี้: ยอดยกมา + ซื้อ + จ่าย + คงเหลือ |
@@ -663,12 +663,13 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `RETURN_PRICE_MISMATCH` | – **ยังไม่มีข้อความไทย** (บรรทัดใบลดหนี้ราคาไม่ตรงกับที่บิลแม่ขายจริง — เพิ่มตอน #22 ดู §8.1) |
 | 409 | `REFUND_METHOD_NOT_ALLOWED` | – **ยังไม่มีข้อความไทย** (เลือก `หักจากเครดิต` กับบิลที่ไม่มีช่าง — เพิ่มตอน #22 ดู §8.1) |
 | 409 | `CREDIT_PAYMENT_EXCEEDS_BALANCE` | – **ยังไม่มีข้อความไทย** (ช่างจ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` — client แสดง dialog เดิมแล้วส่งซ้ำ เพิ่มตอน #24 ดู §8.1) |
+| 409 | `CREDIT_PAYMENT_ID_REUSED` | – **ยังไม่มีข้อความไทย** (`id` ของการชำระถูกใช้ไปแล้วกับรายการที่ช่าง/ยอด/วิธีจ่ายไม่ตรงกัน — เพิ่มตอน #24 ดู §8.1) |
 | 401/403 | `UNAUTHENTICATED` / `FORBIDDEN` | – |
 | 429 | `RATE_LIMITED` | `ระบบกำลังทำงานหนัก กรุณารอสักครู่` | – |
 
 ### 8.1 Error ที่เป็น **ของใหม่** (ไม่มีใน `db.js`)
 
-ทั้ง 15 ตัวนี้เป็นพฤติกรรมที่ระบบเดิม **ไม่มี** จึงไม่มีข้อความไทยให้ลอก
+ทั้ง 16 ตัวนี้เป็นพฤติกรรมที่ระบบเดิม **ไม่มี** จึงไม่มีข้อความไทยให้ลอก
 
 > **สถานะ 2026-09-04 — ข้อความชั่วคราว ผ่านเจ้าของโปรเจกต์แล้ว ยังไม่ผ่านคนหน้าร้าน**
 > ข้อความในคอลัมน์ *ข้อความไทย* ด้านล่าง **agent เป็นคนร่าง** ไม่ได้ลอกมาจาก `db.js`
@@ -692,6 +693,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `SHIFT_ALREADY_CLOSED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /shifts/close` กับกะที่ปิดไปแล้ว — `physical_cash` คือเงินที่นับจริง กดซ้ำแล้วทับค่าเดิมเงียบ ๆ โดยไม่มีร่องรอย (idempotency key คนละใบกันจึงกันไม่ได้) · ของเดิม `closeShift()` ใน `shifts_repository.dart` **ไม่ throw** แค่เขียนทับค่าเดิม จึงไม่มีข้อความไทยให้ลอก · **ใช้ `DRAWER_CLOSED` ไม่ได้** — ข้อความไทยของ code นั้นพูดถึง“บันทึกรายการเงินเพิ่ม” ซึ่งเป็นคนละการกระทำ · **#28 คืนข้อความอังกฤษไว้ก่อน** |
 | 409 | `CREDIT_LIMIT_EXCEEDED` | 🔴 **ยังไม่ร่าง — client แสดง dialog ไทยของเดิมเอง** | ส่งเฉพาะเมื่อ `paymentMethod = 'เครดิตช่าง'` **และ** `credit_balance + total > credit_limit` **และ** body ไม่มี `overrideCreditLimit: true` — `details { creditLimit, creditBalance, newBalance }` · ของเดิมไม่ใช่ error แต่เป็น confirm dialog (`checkout_screen.dart:567` — ดู §8.2) client จึงแสดง dialog เดิมแล้วส่งบิลซ้ำพร้อม flag; server จึงเขียน `audit_log` (`sale.credit_limit_override`) · **#21 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง |
 | 409 | `CREDIT_PAYMENT_EXCEEDS_BALANCE` | 🔴 **ยังไม่ร่าง — client แสดง dialog ไทยของเดิมเอง** | `POST /mechanics/:id/credit-payments` ที่ `amount > credit_balance` และ body ไม่มี `allowOverpayment: true` — `details { creditBalance, amount, overpayBy }` · ของเดิมไม่ใช่ error แต่เป็น confirm dialog (`mechanics_screen.dart:1331` — *“จำนวนเงิน X เกินยอดค้าง Y ยืนยันรับเงิน?”*) client จึงแสดง dialog เดิมแล้วส่งซ้ำพร้อม flag; server เขียน `audit_log` (`mechanic.credit_payment_overpayment`) · จำเป็นเพราะ AC สั่ง `GREATEST(0, …)` ซึ่งเป็นรูปเดียวกับบั๊กเงินของ #22: clamp บน input ที่ไม่ได้ตรวจ เปลี่ยนการพิมพ์ผิด 100,000 แทน 1,000 ให้กลายเป็นหนี้ที่หายไปเงียบ ๆ พร้อมใบเสร็จของเงินที่ไม่มีใครยื่นให้ · **#24 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง |
+| 409 | `CREDIT_PAYMENT_ID_REUSED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | คู่ของ `SALE_ID_REUSED` — `POST /mechanics/:id/credit-payments` รับ `id` ที่ client สร้าง (`newId('cp')`) เป็นด่านกันซ้ำชั้นที่สองต่อจาก `Idempotency-Key`: ยิงซ้ำด้วย `id` เดิม**และ**ช่าง/ยอด/วิธีจ่ายเท่าเดิม = server คืนรายการเดิม ถ้าไม่ตรง = คนละรายการที่ `id` ชนกัน (บั๊กฝั่ง client) ถ้าเงียบไว้เท่ากับทำเงินของรายการใหม่หาย · **#24 คืนข้อความอังกฤษไว้ก่อน** |
 | 409 | `RETURN_PRICE_MISMATCH` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | ราคาบนบรรทัดใบลดหนี้ไม่ตรงกับราคาที่ `sale_items` ของบิลแม่ขายจริง — `details { lines: [{ productId, price, soldAt[] }] }` · ของเดิม client เป็นคนคิดเงินคืนเอง (`returns_repository.dart` เอา `price` ที่ส่งมาคูณตรง ๆ) จึงไม่มีเคสนี้ แต่บน server ถ้าเชื่อราคาจาก client เครื่อง `pos` จะออกใบลดหนี้ 999,999 บาทจากบิล 85 บาทได้ แล้ว `GREATEST(0, …)` กลบให้เงียบ (ยอดค้างช่างกลายเป็น 0 โดยไม่ error) · บิลเดียวขายของชิ้นเดียวกันได้สองราคา “ราคาของสินค้านี้บนบิล” จึงเป็นเซ็ตไม่ใช่ค่าเดียว — server จึง**ปฏิเสธ** ไม่ใช่แก้ราคาให้เงียบ ๆ · **#22 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง |
 | 409 | `REFUND_METHOD_NOT_ALLOWED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `refundMethod = 'หักจากเครดิต'` กับบิลที่ไม่มี `mechanic_id` — ไม่มีเครดิตให้หัก ใบลดหนี้จะบันทึกว่าหักจากเครดิตทั้งที่ไม่ได้หักอะไร และรายงานปิดกะก็ไม่นับเป็นเงินสด เงินหายทั้งสองทาง · หน้าจอเดิมเปิดตัวเลือกนี้เฉพาะบิลที่มีช่าง (`returns_screen.dart:904`) จึงไม่มีเคสนี้ · whitelist ใน DTO มองไม่เห็นบิล ต้องเช็คหลัง `lockSale` · **#22 คืนข้อความอังกฤษไว้ก่อน** |
 

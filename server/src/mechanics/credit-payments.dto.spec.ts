@@ -54,6 +54,16 @@ describe('parseCreateCreditPayment', () => {
     }
   });
 
+  it('takes the client id when sent, and refuses an empty one', () => {
+    expect(parseCreateCreditPayment(body()).id).toBeNull();
+    expect(parseCreateCreditPayment(body({ id: 'cp-1' })).id).toBe('cp-1');
+    for (const bad of ['', '  ', 42]) {
+      expect(() => parseCreateCreditPayment(body({ id: bad }))).toThrow(
+        /id must be a non-empty string/,
+      );
+    }
+  });
+
   it('treats an empty note as no note', () => {
     expect(parseCreateCreditPayment(body({ note: '' })).note).toBeNull();
     expect(parseCreateCreditPayment(body()).note).toBeNull();

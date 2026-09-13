@@ -528,10 +528,10 @@ device's current drawer* until the next open archives it, exactly as
 `pos` only (it takes cash over the counter and prints a receipt), idempotent, and one
 transaction: `mechanics FOR UPDATE` → the CP number → the row → the reduced balance.
 
-- 🔴 **Lock order is mechanic → `doc_counters`,** the two links of the money path's
-  order (sale → mechanic → products → `doc_counters` → customer) that this endpoint
-  needs. Issuing the number first would deadlock a settlement against a credit bill for
-  the same mechanic.
+- **Lock order is mechanic → `doc_counters`,** the money path's relative order. It
+  cannot deadlock against a sale or a credit note today — `doc_counters` is keyed by
+  `doc_type`, so the CP row is never the RC or CN row and the mechanic is the only
+  resource they share — but the order costs nothing and stays right if that changes.
 - 🔴 **An overpayment is refused, not clamped.** `credit_balance` is written with
   `GREATEST(0, …)` as the ticket asks, but a clamp on an amount nobody checked turns
   100,000 keyed for 1,000 into a wiped debt and a receipt for cash never handed over —
@@ -548,15 +548,23 @@ transaction: `mechanics FOR UPDATE` → the CP number → the row → the reduce
   Drift port dropped the JS app's `p.method`; `cash_drawer_screen.dart:121` says so.
 - **`shift_id` is stamped like a sale's** — the device's own open drawer, never the body,
   null when none is open. That column is what #30 sums cash settlements by.
+- **Two defences against a duplicate, as on `POST /sales`:** the `Idempotency-Key`, and
+  an optional client `id` (the Dart repository already mints `newId('cp')`). A retry
+  that lost its key replays the stored payment; the same id with a different mechanic,
+  amount or method is `409 CREDIT_PAYMENT_ID_REUSED`. Without the id, an app restart
+  after a dropped reply rings up a *partial* payment twice — the overpayment check only
+  catches a full one. The replay is checked **before** the overpayment check, or a
+  replayed full settlement would meet the zero tab it created and be refused.
 - The mechanic's `deleted_at` is **not** filtered, exactly as `POST /sales` does not
   filter it: he owes the money either way, and refusing it loses the shop both the cash
   and the record of it. An id that never existed is `404 MECHANIC_NOT_FOUND`, thrown off
   the locked read rather than left to the insert's foreign key (a `23503` surfaces as a
   500).
-- The response carries the payment plus `mechanicCreditBalanceAfter` — every row the
-  transaction moved (#82) and nothing it did not. There is no `mechanicAfter` here: the
-  three running totals are untouched, and handing them back invites the client to patch
-  them from a stale read.
+- The response carries the payment plus `mechanicCreditBalanceAfter` — every *value*
+  the transaction moved (#82) and nothing it did not. There is no `mechanicAfter` here:
+  the three running totals are untouched, and handing them back invites the client to
+  patch them from a stale read. `mechanics.updated_at` also moves and is not returned;
+  the client stamps its own, as it does after every write.
 
 ## Conventions these slices set
 

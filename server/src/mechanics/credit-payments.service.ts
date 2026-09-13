@@ -46,18 +46,20 @@ export interface CreateCreditPaymentResult extends CreditPayment {
  *
  *   1. the idempotency claim (the interceptor, before this method is called)
  *   2. `SELECT … FROM mechanics … FOR UPDATE` — the 404 comes off this row
- *   3. the overpayment check, from the locked balance
- *   4. issue the CP number
- *   5. read the device's open drawer, for `shift_id`
- *   6. insert the payment
- *   7. reduce the tab, clamped at zero
- *   8. the audit row, when the counter overpaid on purpose
+ *   3. a payment already recorded under the client's `id` is answered, not repeated
+ *   4. the overpayment check, from the locked balance
+ *   5. issue the CP number
+ *   6. read the device's open drawer, for `shift_id`
+ *   7. insert the payment
+ *   8. reduce the tab, clamped at zero
+ *   9. the audit row, when the counter overpaid on purpose
  *
- * 🔴 **Lock order: mechanic → `doc_counters`.** The money path's order is
- * sale → mechanic → products → `doc_counters` → customer (`server/README.md`), and
- * this endpoint takes the two of those it needs in that relative order. Issuing the
- * document number first would let a settlement and a credit bill for the same
- * mechanic deadlock on each other.
+ * **Lock order: mechanic → `doc_counters`**, the same relative order as the rest of
+ * the money path (sale → mechanic → products → `doc_counters` → customer). Today the
+ * two cannot actually contend with a sale or a credit note beyond the mechanic row —
+ * `doc_counters` is keyed by `doc_type`, so a CP number never touches the RC or CN
+ * row — and one shared resource cannot deadlock. The order is kept anyway because it
+ * costs nothing and stays correct if the series ever share a counter.
  *
  * 🔴 **The lock is also what makes step 3 mean anything.** Two tills settling the same
  * tab at once would otherwise both read the same balance, both pass the check and both
@@ -81,6 +83,21 @@ export class CreditPaymentsService {
     const { tenantId, manager } = currentRequestContext();
 
     const balanceBefore = await this.lockBalance(manager, tenantId, mechanicId);
+
+    // Before the overpayment check, on purpose: a replayed full settlement would
+    // otherwise meet a tab that the first attempt already brought to zero and be
+    // refused as an overpayment — a 409 the counter reads as "it did not go through".
+    if (dto.id !== null) {
+      const existing = await this.existingPayment(
+        manager,
+        tenantId,
+        mechanicId,
+        dto,
+        balanceBefore,
+      );
+      if (existing) return existing;
+    }
+
     const overpaid = dto.amountSatang > balanceBefore;
     if (overpaid && !dto.allowOverpayment) {
       // 🔴 Validate first, then clamp. `GREATEST(0, …)` below is what keeps the tab
@@ -118,7 +135,7 @@ export class CreditPaymentsService {
       actor.deviceId,
     );
 
-    const id = newId('cp');
+    const id = dto.id ?? newId('cp');
     const inserted = (await manager.query(
       `INSERT INTO credit_payments
               (tenant_id, id, receipt_no, mechanic_id, amount, payment_method, note, shift_id)
@@ -174,6 +191,66 @@ export class CreditPaymentsService {
       date: inserted[0].date.toISOString(),
       shiftId,
       mechanicCreditBalanceAfter: balanceAfter,
+    };
+  }
+
+  /**
+   * The payment already stored under the client's `id`, answered as the original
+   * was — or null when there is none.
+   *
+   * Runs under the mechanic's lock, so two replays of one payment serialise on it.
+   * The balance answered is the tab as it stands now, which is the one honest figure:
+   * the original reply's number may already have been moved by a later sale.
+   *
+   * An id that names a different payment (another mechanic, amount or method) is
+   * `409 CREDIT_PAYMENT_ID_REUSED`: `newId` makes that a client bug, and answering
+   * with the old payment would lose the new one's money.
+   */
+  private async existingPayment(
+    manager: EntityManager,
+    tenantId: string,
+    mechanicId: string,
+    dto: CreateCreditPayment,
+    balanceSatang: number,
+  ): Promise<CreateCreditPaymentResult | null> {
+    const rows = (await manager.query(
+      `SELECT receipt_no, mechanic_id, amount, payment_method, note, date, shift_id
+         FROM credit_payments WHERE tenant_id = $1::uuid AND id = $2`,
+      [tenantId, dto.id],
+    )) as {
+      receipt_no: string;
+      mechanic_id: string;
+      amount: string;
+      payment_method: string | null;
+      note: string | null;
+      date: Date;
+      shift_id: string | null;
+    }[];
+    if (rows.length === 0) return null;
+    const row = rows[0];
+    if (
+      row.mechanic_id !== mechanicId ||
+      satangOf(row.amount) !== dto.amountSatang ||
+      row.payment_method !== dto.paymentMethod
+    ) {
+      throw new HttpException(
+        {
+          code: 'CREDIT_PAYMENT_ID_REUSED',
+          message: 'A different credit payment already exists under this id.',
+        },
+        HttpStatus.CONFLICT,
+      );
+    }
+    return {
+      id: dto.id!,
+      receiptNo: row.receipt_no,
+      mechanicId,
+      amount: row.amount,
+      paymentMethod: dto.paymentMethod,
+      note: row.note,
+      date: row.date.toISOString(),
+      shiftId: row.shift_id,
+      mechanicCreditBalanceAfter: fromSatang(balanceSatang),
     };
   }
 

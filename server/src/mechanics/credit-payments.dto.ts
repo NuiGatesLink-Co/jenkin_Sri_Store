@@ -3,6 +3,11 @@ import { toSatang } from '../common/money.js';
 
 /** A validated `POST /mechanics/:id/credit-payments` body. */
 export interface CreateCreditPayment {
+  /**
+   * The client's own id for this payment, when it sent one — the second defence
+   * against a duplicate, after the `Idempotency-Key`. See `CreditPaymentsService`.
+   */
+  id: string | null;
   amountSatang: number;
   paymentMethod: string;
   note: string | null;
@@ -28,8 +33,13 @@ const PAYMENT_METHODS = ['เงินสด', 'โอน/QR'] as const;
  * Four things are deliberately not read even when present: `receiptNo` (phase 1 issues
  * every document number server-side, ADR-0007), `shiftId` (stamped from the device's
  * own open drawer), `mechanicId` (the path names it) and anything naming a tenant or a
- * device (ADR-0004). The payment's `id` is the server's too: unlike a sale, the client
- * does not create one ahead of the request.
+ * device (ADR-0004).
+ *
+ * `id` IS read, and optional. The Dart repository already mints `newId('cp')` before
+ * it writes, exactly as the sale path mints the bill id, and a retry that lost its
+ * `Idempotency-Key` — an app restart after a dropped reply — is otherwise a second
+ * payment: a partial one is not caught by the overpayment check, and the intake
+ * dialog's quick-amount chips make partial the common case.
  */
 export function parseCreateCreditPayment(body: unknown): CreateCreditPayment {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
@@ -49,6 +59,7 @@ export function parseCreateCreditPayment(body: unknown): CreateCreditPayment {
   }
 
   return {
+    id: optionalId(b.id),
     amountSatang,
     paymentMethod: requiredPaymentMethod(b.paymentMethod),
     note:
@@ -59,6 +70,14 @@ export function parseCreateCreditPayment(body: unknown): CreateCreditPayment {
     // would confirm an overpayment it never showed the dialog for.
     allowOverpayment: booleanOrFalse(b.allowOverpayment, 'allowOverpayment'),
   };
+}
+
+function optionalId(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new BadRequestException('id must be a non-empty string');
+  }
+  return value;
 }
 
 function requiredPaymentMethod(value: unknown): string {

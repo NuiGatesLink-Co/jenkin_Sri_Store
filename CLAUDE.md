@@ -486,6 +486,18 @@ codepoint over its own canonical string, so `returns.service.ts`'s English
 `Refund method 'หักจากเครดิต' needs a bill with a mechanic.` wins and the mapped Thai never fires.
 Three idempotency codes are unmapped too.
 
+**#24 `p5.7` is built (branch `feat/p5.7-credit-payments`, 2026-09-13, not yet merged).**
+`POST /mechanics/:id/credit-payments` — `pos` only, idempotent, a CP number, and migration
+`1788652800005` adding `credit_payments.payment_method` + `.shift_id` (nullable, **no default**:
+an imported row is neither of our shifts nor necessarily cash). 🔴 **An overpayment is refused,
+not clamped:** `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` unless `allowOverpayment: true` (one
+`audit_log` row) — `GREATEST(0, …)` on an unvalidated amount is #22's money bug again.
+`paymentMethod` is required. The client `id` is a second duplicate defence beside the key, and
+the replay check runs **before** the overpayment check or a replayed full settlement is refused.
+The same branch fixes the #55 client write, which sent no key, no method, and cast the string
+balance to `num` straight into a second local row. **AC3 stays open until #30** sums cash
+settlements by `shift_id`. Read `docs/handoff_log/lane-a-24-credit-payments.md` before #30.
+
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
 back** (decided 2026-09-04). Recover from git history if you ever need the Supabase-era text:
