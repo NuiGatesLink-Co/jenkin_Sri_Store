@@ -2,6 +2,8 @@
 
 1 บรรทัดต่อ handoff · เรียงใหม่ → เก่า · รูปแบบตาม [`handoff-prompt-template.md`](handoff-prompt-template.md)
 
+- 2026-09-14 — [#67 `cd.2` auto-deploy & rollback workflow](ticket-67-cd2-auto-deploy.md) — GitHub Actions workflow `.github/workflows/deploy.yml` (workflow_run trigger หลัง Server CI & Flutter CI สำเร็จบน main + workflow_dispatch rollback) · pre-flight check ตรวจ release images บน GHCR ผ่าน `verify-ghcr-tags.sh` (exit 0 กัน race condition) · concurrency group deploy-demo (ไม่ cancel กลางคัน) · Ansible deploy release บน environment demo — เสร็จสมบูรณ์พร้อม merge
+
 - 2026-09-13 — [#65 `cd.1` Ansible provision & deploy base](ticket-65-cd1-ansible-deploy.md) — Playbooks `provision.yml` (Docker Engine, UFW 22/80/443, deploy user, /opt/pos/ setup) + `deploy.yml` (idempotent SHA check, GHCR pull, web-sync volume update, pre-code DB migration, rolling restart api-1..3, health check) · Compose override `deploy/compose/vm.override.yml` (GHCR images, remove build:, web volume mount) · validation script `deploy/scripts/validate.sh` — เสร็จสมบูรณ์พร้อม merge
 
 - 2026-09-13 — [#44 `sec.1` backend security gate & hardening](ticket-44-sec1-security-hardening.md) — Helmet headers (nosniff, frameguard, CSP-free API) + dynamic CORS · rate limit brute-force บน login (`POST /auth/token`) และ manager PIN (`POST /sales/:id/void`) ตอบ 429 `RATE_LIMITED` พร้อม `Retry-After` · negative-path e2e 20 เคส ครอบคลุม OWASP Top 10 (claim spoofing, SQL injection, JWT forge/alg:none/expiration, misconfig, brute-force) · pin GitHub Actions commit SHA ใน server/flutter workflows + เพิ่ม CodeQL workflow — เสร็จสมบูรณ์พร้อม merge
