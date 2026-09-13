@@ -153,6 +153,71 @@ describe('server-side reports (e2e)', () => {
     });
   });
 
+  /*
+   * #97 — the item reports over August's bill set above. Lines are price × qty
+   * (not bill-discounted, as #29 documents):
+   *
+   *   a1  p2 1@200 (oils), p3 1@100 (filters), 'gone' 1@50 (no product → อื่นๆ)
+   *   a2  manual void — p1 4@100 excluded
+   *   a3  p1 2@100 (brakes), counted;  ra3  p1 −2 @100 nets it to 0 / 0.00
+   *
+   *   top-products  p2 1/200, p3 1/100, gone 1/50 (p1 nets to zero, dropped by HAVING)
+   *   by-category   oils 1/200, filters 1/100, อื่นๆ 1/50
+   *   product-sales p1 0 / 0.00
+   *
+   * Without `COUNTED_SALE` in the sale_events CTEs a2 comes back as p1 4/400: first in
+   * top-products, brakes 4/400 first in by-category, product-sales p1 4 / 400.00.
+   * The other direction guards the auto-void half: a filter as broad as `NOT s.voided`
+   * would also drop a3 and leave p1 at −2/−200 in all three — keep a3 and ra3 in the seed.
+   */
+  it('excludes manual voids from top products, categories, and product sales', async () => {
+    const top = await get('/top-products?from=2026-08&to=2026-08&limit=10');
+    expect(top.status).toBe(200);
+    expect(top.body.data).toEqual([
+      {
+        productId: 'p2',
+        partNo: 'OIL-1',
+        name: 'Oil',
+        qty: 1,
+        revenue: '200.00',
+      },
+      {
+        productId: 'p3',
+        partNo: 'FILTER-1',
+        name: 'Filter',
+        qty: 1,
+        revenue: '100.00',
+      },
+      {
+        productId: 'gone',
+        partNo: 'GONE',
+        name: 'Deleted part',
+        qty: 1,
+        revenue: '50.00',
+      },
+    ]);
+
+    const categories = await get('/by-category?from=2026-08&to=2026-08');
+    expect(categories.status).toBe(200);
+    expect(categories.body.data).toEqual([
+      { category: 'oils', qty: 1, revenue: '200.00' },
+      { category: 'filters', qty: 1, revenue: '100.00' },
+      { category: 'อื่นๆ', qty: 1, revenue: '50.00' },
+    ]);
+
+    const product = await get(
+      '/product-sales?productId=p1&from=2026-08&to=2026-08',
+    );
+    expect(product.status).toBe(200);
+    expect(product.body.data).toEqual({
+      productId: 'p1',
+      partNo: 'BRAKE-1',
+      name: 'Brake Pad',
+      qty: 0,
+      revenue: '0.00',
+    });
+  });
+
   it('aggregates top products, categories, and one product entirely at the SQL seam', async () => {
     const top = await get(
       '/top-products?from=2026-09-01&to=2026-09-30&limit=10',

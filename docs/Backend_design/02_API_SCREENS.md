@@ -250,7 +250,7 @@ sequenceDiagram
 | ประวัติสต็อก | `GET /movements?productId=&from=&to=&page=` |
 | ซัพพลายเออร์ | `GET /products/:id/suppliers` · `POST /suppliers` · `PATCH /suppliers/:id` · `DELETE /suppliers/:id` |
 | รายงานสต็อก | `GET /reports/stock-value` |
-| ยอดขายรายชิ้น | `GET /reports/product-sales?productId=&from=&to=` |
+| ยอดขายรายชิ้น | `GET /reports/product-sales?productId=&from=&to=` — #97: บิลชุดเดียวกับ summary (void เองไม่นับ, void อัตโนมัติจากคืนครบยังนับแล้วหักใบลดหนี้) |
 | พิมพ์ป้าย | `GET /settings` (เอาชื่อร้านไปขึ้นบนป้าย) |
 
 > ⚠️ **จุดที่ต้องแก้จากของเดิม:** ตอนนี้หน้า Products เรียก `salesRepo.getSales()` **โหลดบิลทั้งหมด**
@@ -373,8 +373,8 @@ refundTotal, refundMethod, reason, customerId, mechanicId, mechanicName, date, s
 | Endpoint ใหม่ | คืนอะไร | SQL |
 |---|---|---|
 | `GET /reports/summary?from=&to=` | ยอดขาย, จำนวนบิล, บิลเฉลี่ย, ยอดคืน, ยอดสุทธิ, กำไรขั้นต้น (+ `estimatedCostRows`/`unknownCostRows`) | `SUM/COUNT/AVG` บน `sales` + `returns` — #95: ทุกตัวเลขใช้บิลชุดเดียวกับรายงานปิดร้าน (void เองไม่นับ, void อัตโนมัติจากคืนครบยังนับแล้วหักใบลดหนี้), สูตรกำไรเดียวกับ §3.11, คืนสินค้าลงวันตาม `returns.date` |
-| `GET /reports/top-products?from=&to=&limit=10` | สินค้าขายดี | `GROUP BY product_id` บน `sale_items` |
-| `GET /reports/by-category?from=&to=` | ยอดขายแยกหมวด | join `sale_items → products` |
+| `GET /reports/top-products?from=&to=&limit=10` | สินค้าขายดี | `GROUP BY product_id` บน `sale_items` — #97: บิลชุดเดียวกับ summary (void เองไม่นับ, void อัตโนมัติจากคืนครบยังนับแล้วหักใบลดหนี้) |
+| `GET /reports/by-category?from=&to=` | ยอดขายแยกหมวด | join `sale_items → products` — #97: บิลชุดเดียวกับ summary (void เองไม่นับ, void อัตโนมัติจากคืนครบยังนับแล้วหักใบลดหนี้) |
 | `GET /reports/by-payment?from=&to=` | แยกตามวิธีชำระ (เงินสด/โอน/เครดิต) | |
 | `GET /reports/daily?from=&to=` | ยอดรายวัน (กราฟ) | `GROUP BY date_trunc('day', date)` |
 | `GET /reports/stock-value` | มูลค่าสต็อกรวม = `SUM(stock × cost)` | |
