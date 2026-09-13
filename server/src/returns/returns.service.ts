@@ -147,6 +147,9 @@ interface Demand {
 /** The one refund method that comes off the mechanic's tab instead of out of the drawer. */
 const DEDUCT_FROM_CREDIT = 'หักจากเครดิต';
 
+/** The one refund method that takes money out of the drawer (#100). */
+const CASH = 'เงินสด';
+
 /**
  * The credit-note transaction — a faithful port of `returns_repository.dart`, which
  * is itself the port of `db.js` `createReturn`.
@@ -158,6 +161,8 @@ const DEDUCT_FROM_CREDIT = 'หักจากเครดิต';
  *   2. `SELECT … FROM sales … FOR UPDATE` — 404 / `SALE_VOIDED` come off this row
  *   3. the over-refund guard, from the locked bill and every prior credit note
  *   4. the money, in integer satang
+ *   4½. the drawer, `FOR SHARE`: a cash refund needs this device's open shift (#100);
+ *      any other method takes the open shift's id if there is one
  *   5. lock the mechanic's row, if the bill named one
  *   6. `SELECT … FROM products … ORDER BY id FOR UPDATE`
  *   7. issue the CN number
@@ -171,10 +176,11 @@ const DEDUCT_FROM_CREDIT = 'หักจากเครดิต';
  * same "already refunded" total, both pass, and the shop refunds more than it sold.
  * The Dart reference is single-process and structurally cannot expose that race.
  *
- * 🔴 **Lock order: sale → mechanic → products → `doc_counters`.** `POST /sales` locks
- * the mechanic before the products (README, *Lock order*) so a cash bill and a credit
- * bill for the same mechanic cannot deadlock over a shared part; a return that took
- * the products first would deadlock against any such bill.
+ * 🔴 **Lock order: sale → shift (shared) → mechanic → products → `doc_counters`.**
+ * `POST /sales` locks the mechanic before the products (README, *Lock order*) so a
+ * cash bill and a credit bill for the same mechanic cannot deadlock over a shared
+ * part; a return that took the products first would deadlock against any such bill.
+ * The shift is where `POST /sales/:id/void` takes it too, after the bill's own row.
  */
 @Injectable()
 export class ReturnsService {
@@ -213,6 +219,28 @@ export class ReturnsService {
 
     const money = refundAmounts(demands, sale);
 
+    // Stamped from the device's own open drawer, never from the body (#28): the
+    // closing report is computed by `shift_id`. A cash refund is money leaving the
+    // drawer, so with no open drawer it is `409 NO_OPEN_SHIFT` (owner's decision on
+    // #100, 2026-09-13) — otherwise it lands in no closing report. After the guards,
+    // so a bad body is told what is wrong with it whether or not the drawer is open;
+    // an `Idempotency-Key` replay never reaches this method. A transfer or a deduction
+    // from the tab moves no expected cash, so it is still taken with no drawer and
+    // stamped null — but it does net into that shift's `grossProfit`, so both paths
+    // read the drawer `FOR SHARE` and a close waits for any refund in flight.
+    const shiftId =
+      dto.refundMethod === CASH
+        ? await this.shifts.requireOpenShiftIdFor(
+            manager,
+            tenantId,
+            actor.deviceId,
+          )
+        : await this.shifts.currentShiftIdFor(
+            manager,
+            tenantId,
+            actor.deviceId,
+          );
+
     // Mechanic before products, always — see the class comment.
     const mechanic = await this.lockMechanic(manager, tenantId, sale.mechanic_id);
     const locked = await this.lockProducts(manager, tenantId, demands);
@@ -223,14 +251,6 @@ export class ReturnsService {
       docType: 'cn',
     });
     const returnId = newId('r');
-    // Stamped from the device's own open drawer, never from the body (#28): the
-    // closing report is computed by `shift_id`, and null when the drawer was never
-    // opened — the old app lets staff take goods back without one.
-    const shiftId = await this.shifts.currentShiftIdFor(
-      manager,
-      tenantId,
-      actor.deviceId,
-    );
 
     const date = await this.insertReturn(
       manager,

@@ -245,7 +245,8 @@ is the credit-note transaction ported from `returns_repository.dart`, and `POST 
 reverses the customer and mechanic ledger, which was #23's one remaining AC (1/2/4/5 shipped with #75).
 🔴 **The lock order grew to sale → mechanic → products → `doc_counters` → customer** — `sales` is the
 outermost resource because the sale path only INSERTs it; **#28 and #30 must keep that order**.
-(#94 adds a `shifts` read `FOR SHARE` between the sale and mechanic locks on the void path — shared
+(#94 and #100 add a `shifts` read `FOR SHARE` between the sale and mechanic locks on the void and return
+paths — every return method, since non-cash credit notes still net into a shift's gross profit — shared
 locks cannot cycle with the drawer's exclusive lockers, which lock nothing else; see `shifts.service.ts`.)
 Migration `1788652800004` adds `return_items.cost_at_sale`, carried from the locked `sale_items` read
 (ADR-0008's reasoning, applied to credit notes); #22 also writes `returns.shift_id`, which closes half
@@ -504,7 +505,10 @@ the drawer `FOR SHARE` (a close waits for in-flight money; money behind a commit
 refused). It runs **after** both replay paths (key and client `id`), so a payment or bill committed
 while the drawer was open still replays after close; credit payment order is mechanic → replay →
 drawer → overpayment → CP number, sale order is `existingSale` → drawer → mechanic → products.
-`POST /returns` is **not** covered (still `currentShiftIdFor`, null without a drawer). No NOT NULL
+`POST /returns` is covered **for cash only** since #100 (owner, 2026-09-13): a `'เงินสด'` refund with no
+open drawer is `409 NO_OPEN_SHIFT` (after the bill guards and the key replay; nothing written, no CN number
+consumed); `โอน`/`หักจากเครดิต` are still taken and stamp null. After today's close a cash refund waits for
+tomorrow's open — `open()` hands back the closed row. No NOT NULL
 migration: imported rows are legitimately null. E2E fixtures open a drawer with `seedOpenShift`.
 The same branch fixes the #55 client write, which sent no key, no method, and cast the string
 balance to `num` straight into a second local row. 🔴 **The client write is an outbox, not a

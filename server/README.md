@@ -380,23 +380,26 @@ in this order:
    at once instead of one resubmission at a time
 4. the money, in integer satang: `refundDiscount = round2(refundSubtotal × discount /
    subtotal)`, `refundTotal = refundSubtotal − refundDiscount`
-5. lock the mechanic's row, if the bill named one
-6. `SELECT … FROM products … ORDER BY id FOR UPDATE`
-7. issue the CN number (`CN07-2569-09-0001`)
-8. insert the header and the lines — `cost_at_sale` copied from the **parent sale line**,
+5. the drawer (#100), read `FOR SHARE` either way: a `'เงินสด'` refund takes
+   `ShiftsService.requireOpenShiftIdFor` — `409 NO_OPEN_SHIFT` with no open drawer;
+   `'โอน'` and `'หักจากเครดิต'` take `currentShiftIdFor`, null with no drawer
+6. lock the mechanic's row, if the bill named one
+7. `SELECT … FROM products … ORDER BY id FOR UPDATE`
+8. issue the CN number (`CN07-2569-09-0001`)
+9. insert the header and the lines — `cost_at_sale` copied from the **parent sale line**,
    never re-read from `products.cost`, which a weighted-average PO receive rewrites
-9. stock back, one `movements` row per product, `type='return'`, `ref_id` = the **return**
+10. stock back, one `movements` row per product, `type='return'`, `ref_id` = the **return**
    id (`uq_movements_ref` is `(tenant_id, type, ref_id, product_id)`, so keying on the bill
    would make the second credit note against it a 500). #82 answers those rows in
    `movements[]`; a **void** writes `type='void'` (migration `1788652800003`) against the
    same goods and the two must never be collapsed — every report groups by that column
-10. the ledger, in proportion to `refundTotal / sale.total`: customer `points` and
+11. the ledger, in proportion to `refundTotal / sale.total`: customer `points` and
    `total_spend`; mechanic `total_sales`, `total_discount`, `total_markup`, and
    `credit_balance` **only** for `refundMethod === 'หักจากเครดิต'`. Every accumulator
    clamps with `GREATEST(0, …)` — `total_spend`, `total_sales`, `total_discount` and
    `total_markup` have no CHECK at all, so a missing clamp there fails silently. All four
    come back as `mechanicAfter` (#82), alongside the unchanged `mechanicCreditBalanceAfter`
-11. auto-void the parent bill once the cumulative returned quantity reaches what it sold
+12. auto-void the parent bill once the cumulative returned quantity reaches what it sold
 
 🔴 **The `FOR UPDATE` on the sale in step 2 is the whole endpoint's serialisation point.**
 Without it two concurrent partial returns of one bill both read the same already-refunded
@@ -439,8 +442,25 @@ A cash refund on a credit sale deliberately leaves `credit_balance` alone — th
 over cash and the mechanic still owes what he owed. That is why the Returns screen warns
 before it lets staff choose cash on a credit bill.
 
-`returns.shift_id` is stamped from the device's own open drawer, never from the body, and
-is null when none was opened. `GET /returns?saleId=&from=&to=&page=&limit=` is
+`returns.shift_id` is stamped from the device's own open drawer, never from the body.
+🔴 **A cash refund needs an open drawer** (owner's decision on #100, 2026-09-13): with no
+shift `closed_at IS NULL` on the calling device, `refundMethod = 'เงินสด'` is `409
+NO_OPEN_SHIFT` and nothing is written — no stock, no CN number, no auto-void, no
+idempotency claim. ⚠️ `POST /shifts/open` on the same day hands back today's closed
+row, so **after today's close a cash refund waits for tomorrow's open** (the owner accepted
+this with option A); a transfer refund is still possible. Until #100 it was
+stamped null and the cash that left the drawer appeared in no closing report — the route
+#94's `SALE_NOT_IN_OPEN_SHIFT` sends the counter down after today's close. The check
+follows the bill's guards (a bad body is told so, drawer or not) and a key replay never
+reaches it. It reads `FOR SHARE`, so the lock order is **sale → shift (shared) → mechanic
+→ products → `doc_counters` → customer**, as on the void; the drawer's exclusive holders
+(open, close, entries, retirement) take no other money-path lock, so no cycle. `'โอน'` and
+`'หักจากเครดิต'` do not move expected cash, so they are still taken with no drawer and
+stamped null — but they net into that shift's `grossProfit`, so they read the drawer
+`FOR SHARE` too (`currentShiftIdFor`): a close cannot commit under a refund in flight and
+leave it stamped onto an already-counted shift.
+
+`GET /returns?saleId=&from=&to=&page=&limit=` is
 newest-first and readable from both device roles; `from`/`to` are the filters
 `02_API_SCREENS.md §3.7` defines for the refund history and behave exactly as
 `GET /sales` does, with `saleId` the extra one a single bill's notes need.
@@ -527,8 +547,9 @@ device's current drawer* until the next open archives it, exactly as
   Replays are not refused: the check runs after both replay paths. The helper is
   `ShiftsService.requireOpenShiftIdFor`, and it reads the row **`FOR SHARE`** so a close
   waits for bills in flight and a bill behind a committed close is refused, rather than
-  landing on a shift whose cash was already counted. `POST /returns` is **not** covered —
-  a credit note still stamps null with no drawer open (`currentShiftIdFor`). `shift_id`
+  landing on a shift whose cash was already counted. `POST /returns` is covered for
+  `'เงินสด'` only (#100); a transfer or tab-deduction credit note still stamps null with
+  no drawer open (`currentShiftIdFor`). `shift_id`
   stays nullable in the schema: imported rows are legitimately null.
 - `closeForRetirement()` is the operation `POST /devices/:id/retire` (#6) calls to
   close a machine's drawer in the same transaction that stamps `retired_at`. The
@@ -541,7 +562,8 @@ device's current drawer* until the next open archives it, exactly as
   `shift_id`.** The shipped app's closing report counts by date key
   (`closing_report.dart`), not by shift. New sales and credit payments can no longer be
   taken without a drawer, so #30 only has to decide what to do with those older rows and
-  with credit notes (`POST /returns` still stamps null with no drawer open).
+  with non-cash credit notes (`POST /returns` still stamps those null with no drawer open;
+  cash refunds need one since #100).
 - 🔴 **Expected cash also has a credit-payment term** (#24, #30's first AC): a mechanic
   settling his tab in cash is money in the drawer that no sale accounts for. Sum
   `credit_payments WHERE shift_id = … AND payment_method = 'เงินสด'`; the transfers must
