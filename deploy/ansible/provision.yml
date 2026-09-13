@@ -1,0 +1,128 @@
+---
+# Provisioning Playbook for Srisurart POS Demo VM (ADR-0013, 07_CICD_DEPLOY.md §6).
+# Prepares a clean Ubuntu/Debian VM for automated deployment:
+# - Installs Docker Engine + Docker Compose plugin
+# - Creates 'deploy' user with docker group membership & SSH authorized keys
+# - Configures UFW firewall (allows 22/80/443, denies all other incoming)
+# - Sets up /opt/pos/ application directory structure and initial .env (mode 0600)
+
+- name: Provision Srisurart POS Demo VM
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    deploy_user: "deploy"
+    app_dir: "/opt/pos"
+    demo_ssh_pub_key: "{{ lookup('env', 'DEMO_SSH_KEY_PUB') | default(lookup('file', '~/.ssh/id_rsa.pub', errors='ignore') | default('', true), true) }}"
+    demo_env_content: "{{ lookup('env', 'DEMO_ENV_FILE') | default('', true) }}"
+
+  tasks:
+    - name: Ensure base dependencies are installed
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - ufw
+          - openssl
+        state: present
+        update_cache: yes
+
+    - name: Ensure /etc/apt/keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download Docker official GPG key
+      ansible.builtin.get_url:
+        url: "https://download.docker.com/linux/ubuntu/gpg"
+        dest: /etc/apt/keyrings/docker.asc
+        mode: "0644"
+        force: false
+
+    - name: Add Docker repository to APT sources
+      ansible.builtin.copy:
+        content: "deb [arch={{ ansible_architecture | default('amd64') }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable\n"
+        dest: /etc/apt/sources.list.d/docker.list
+        mode: "0644"
+
+    - name: Install Docker Engine, CLI, and Compose plugin
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker daemon is started and enabled
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Configure UFW firewall (22/80/443 only)
+      ansible.builtin.command: "{{ item }}"
+      loop:
+        - ufw default deny incoming
+        - ufw default allow outgoing
+        - ufw allow 22/tcp
+        - ufw allow 80/tcp
+        - ufw allow 443/tcp
+        - ufw --force enable
+      changed_when: false
+
+    - name: Ensure deploy group exists
+      ansible.builtin.group:
+        name: "{{ deploy_user }}"
+        state: present
+
+    - name: Ensure docker group exists
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Create deploy user
+      ansible.builtin.user:
+        name: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        groups:
+          - docker
+        append: true
+        shell: /bin/bash
+        create_home: true
+        state: present
+
+    - name: Configure SSH authorized key for deploy user
+      ansible.builtin.authorized_key:
+        user: "{{ deploy_user }}"
+        key: "{{ demo_ssh_pub_key }}"
+        state: present
+      when: demo_ssh_pub_key != ""
+
+    - name: Create application directories under /opt/pos
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0755"
+      loop:
+        - "{{ app_dir }}"
+        - "{{ app_dir }}/docker"
+        - "{{ app_dir }}/docker/nginx"
+        - "{{ app_dir }}/docker/postgres"
+        - "{{ app_dir }}/docker/postgres/init"
+
+    - name: Write server .env configuration (0600 mode)
+      ansible.builtin.copy:
+        content: "{{ demo_env_content }}"
+        dest: "{{ app_dir }}/.env"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0600"
+      when: demo_env_content != ""
