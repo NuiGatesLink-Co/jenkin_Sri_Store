@@ -43,6 +43,7 @@ export interface RequestContext {
 interface MutableRequestContext {
   tenantId: string | null;
   manager: EntityManager;
+  postCommitHooks?: Array<() => Promise<void> | void>;
 }
 
 const storage = new AsyncLocalStorage<MutableRequestContext>();
@@ -97,3 +98,37 @@ function requireScope(): MutableRequestContext {
   }
   return ctx;
 }
+
+/**
+ * Registers an action to run strictly AFTER the current request transaction has
+ * successfully committed (e.g. enqueuing post-processing jobs to BullMQ).
+ * If the transaction rolls back or fails, these hooks are discarded.
+ * If called outside an active request context, runs immediately.
+ */
+export function onTransactionCommit(hook: () => Promise<void> | void): void {
+  const store = storage.getStore();
+  if (!store) {
+    void hook();
+    return;
+  }
+  if (!store.postCommitHooks) {
+    store.postCommitHooks = [];
+  }
+  store.postCommitHooks.push(hook);
+}
+
+/** Executes all registered post-commit hooks safely. Called ONLY by TransactionInterceptor. */
+export async function executePostCommitHooks(): Promise<void> {
+  const store = storage.getStore();
+  if (!store?.postCommitHooks || store.postCommitHooks.length === 0) return;
+  const hooks = store.postCommitHooks;
+  store.postCommitHooks = [];
+  for (const hook of hooks) {
+    try {
+      await hook();
+    } catch {
+      // Post-commit failures should never throw to disrupt response of committed transactions
+    }
+  }
+}
+

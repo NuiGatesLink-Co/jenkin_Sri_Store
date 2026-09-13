@@ -1,12 +1,15 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Optional } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import type { EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, pointsFor, satangOf } from '../common/money.js';
-import { currentRequestContext } from '../common/request-context.js';
+import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
+import { JOB_SALE_CREATED, QUEUE_SALE_POST } from '../queue/queue.constants.js';
 import type { CreateSale, SaleLine } from './sales.dto.js';
 
 /** Who is ringing the bill up — read from the token, never from the body. */
@@ -193,6 +196,7 @@ export class SalesService {
     private readonly docNumbers: DocNumberService,
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
+    @Optional() @InjectQueue(QUEUE_SALE_POST) private readonly salePostQueue?: Queue,
   ) {}
 
   async create(dto: CreateSale, actor: SaleActor): Promise<CreateSaleResult> {
@@ -285,6 +289,31 @@ export class SalesService {
           creditBalanceBefore: fromSatang(override.creditBalanceBefore),
           creditBalanceAfter: mechanicCreditBalanceAfter,
         },
+      });
+    }
+
+    if (this.salePostQueue) {
+      const queue = this.salePostQueue;
+      const productIds = demands.map((d) => d.productId);
+      const saleId = dto.id;
+      onTransactionCommit(async () => {
+        try {
+          await queue.add(
+            JOB_SALE_CREATED,
+            {
+              tenantId,
+              correlationId: saleId,
+              saleId,
+              receiptNo,
+              productIds,
+            },
+            {
+              jobId: `sale-created:${tenantId}:${saleId}`,
+            },
+          );
+        } catch {
+          // Worker/queue failure must not fail an already committed transaction
+        }
       });
     }
 

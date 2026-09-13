@@ -22,6 +22,42 @@ export interface BaseJobPayload {
   [key: string]: unknown;
 }
 
+export const JOB_SALE_CREATED = 'sale.created';
+export const JOB_RETURN_CREATED = 'return.created';
+export const JOB_INVENTORY_CHECK = 'inventory.check';
+export const JOB_IDEM_CLEANUP = 'idem.cleanup';
+export const JOB_QUOTES_PURGE = 'quotes.purge';
+export const JOB_TENANT_EXPORT = 'tenant.export';
+
+export interface TenantExportJobPayload extends BaseJobPayload {
+  requestedByUserId: string;
+  ip?: string;
+}
+
+export interface SaleCreatedJobPayload extends BaseJobPayload {
+  saleId: string;
+  receiptNo: string;
+  productIds: string[];
+}
+
+export interface ReturnCreatedJobPayload extends BaseJobPayload {
+  returnId: string;
+  cnNo: string;
+  productIds: string[];
+}
+
+export interface InventoryCheckJobPayload extends BaseJobPayload {
+  productIds?: string[];
+}
+
+export interface QuotesPurgeJobPayload extends BaseJobPayload {
+  olderThanDays: number;
+}
+
+export interface IdemCleanupJobPayload extends BaseJobPayload {
+  olderThanSeconds?: number;
+}
+
 export const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 3,
   backoff: {
