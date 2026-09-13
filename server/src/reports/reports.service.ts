@@ -224,7 +224,9 @@ const BOUNDS = `bounds AS (
 /**
  * Positive sale lines and negative credit-note lines. Returns are filtered on
  * their own date, matching the client: a part sold last month and returned today
- * reduces today's quantity and revenue.
+ * reduces today's quantity and revenue. Sale lines come from `COUNTED_SALE` bills
+ * only, the set `/reports/summary` uses (#97); credit notes need no filter, since a
+ * manually voided bill cannot have one.
  */
 const ITEM_EVENTS = `
 sale_events AS (
@@ -234,6 +236,7 @@ sale_events AS (
     JOIN sales s
       ON s.tenant_id = $1::uuid
      AND s.date >= b.from_at AND s.date < b.to_at
+     AND ${COUNTED_SALE}
     JOIN sale_items si
       ON si.tenant_id = $1::uuid
      AND si.tenant_id = s.tenant_id AND si.sale_id = s.id
@@ -273,6 +276,7 @@ sale_events AS (
     JOIN sales s
       ON s.tenant_id = $1::uuid
      AND s.date >= b.from_at AND s.date < b.to_at
+     AND ${COUNTED_SALE}
     JOIN sale_items si
       ON si.tenant_id = $1::uuid
      AND si.product_id = $4
