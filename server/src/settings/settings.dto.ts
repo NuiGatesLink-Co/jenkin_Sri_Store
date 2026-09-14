@@ -36,7 +36,7 @@ export function parseSettingsPatch(body: unknown): SettingsPatch {
     patch.shopNameEn = optionalString(value.shopNameEn, 'shopNameEn') ?? '';
   }
   if (present(value, 'taxRate')) {
-    patch.taxRate = requiredNumber(value.taxRate, 'taxRate', 0);
+    patch.taxRate = requiredTaxRate(value.taxRate);
   }
   if (present(value, 'quoteValidDays')) {
     patch.quoteValidDays = requiredInteger(value.quoteValidDays, 'quoteValidDays', 1);
@@ -87,10 +87,22 @@ function optionalString(value: unknown, name: string): string | null {
   return trimmed === '' ? null : trimmed;
 }
 
-function requiredNumber(value: unknown, name: string, min = 0): number {
+function requiredNumber(value: unknown, name: string, min = 0, max = Infinity): number {
   const num = typeof value === 'number' ? value : Number(value);
-  if (typeof value === 'boolean' || isNaN(num) || num < min) {
-    throw new BadRequestException(`Field '${name}' must be a number >= ${min}`);
+  if (typeof value === 'boolean' || isNaN(num) || num < min || num > max) {
+    throw new BadRequestException(
+      max < Infinity
+        ? `Field '${name}' must be a number between ${min} and ${max}`
+        : `Field '${name}' must be a number >= ${min}`,
+    );
+  }
+  return num;
+}
+
+function requiredTaxRate(value: unknown): number {
+  const num = requiredNumber(value, 'taxRate', 0, 100);
+  if (Math.round(num * 100) !== Number((num * 100).toFixed(6))) {
+    throw new BadRequestException("Field 'taxRate' must have at most 2 decimal places");
   }
   return num;
 }

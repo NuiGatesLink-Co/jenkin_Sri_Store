@@ -59,11 +59,12 @@ export async function configureApp(
       'Content-Type',
       'Authorization',
       'Idempotency-Key',
+      'If-None-Match',
       'X-Device-Id',
       'X-Client-Version',
       'X-Correlation-ID',
     ],
-    exposedHeaders: ['Idempotency-Key', 'Retry-After', 'X-Correlation-ID'],
+    exposedHeaders: ['Idempotency-Key', 'Retry-After', 'X-Correlation-ID', 'ETag'],
   });
 
   app.use(requestLogger(logger));
