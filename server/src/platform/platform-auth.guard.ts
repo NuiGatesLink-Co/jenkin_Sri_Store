@@ -6,14 +6,22 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
+import { DataSource } from 'typeorm';
+import type { Redis } from 'ioredis';
 import { APP_CONFIG, type AppConfig } from '../config/config.js';
+import { ADMIN_DATA_SOURCE } from '../infra/db.module.js';
+import { REDIS_CACHE } from '../infra/redis.module.js';
 import { verifyJwt } from '../common/jwt.js';
 
 @Injectable()
 export class PlatformAuthGuard implements CanActivate {
-  constructor(@Inject(APP_CONFIG) private readonly config: AppConfig) {}
+  constructor(
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
+    @Inject(ADMIN_DATA_SOURCE) private readonly adminDs: DataSource,
+    @Inject(REDIS_CACHE) private readonly redisCache: Redis,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest();
     const authHeader = req.headers['authorization'];
     if (!authHeader || typeof authHeader !== 'string') {
@@ -32,6 +40,40 @@ export class PlatformAuthGuard implements CanActivate {
 
     if (payload.aud !== 'platform') {
       throw new ForbiddenException('Token audience is not platform');
+    }
+
+    const adminId = payload.sub;
+    if (!adminId) {
+      throw new UnauthorizedException('Token missing platform admin id');
+    }
+
+    // Verify platform admin exists and is active (cache in Redis with 60s TTL)
+    const cacheKey = `pa:${adminId}:exists`;
+    let exists: boolean | null = null;
+    try {
+      const cached = await this.redisCache.get(cacheKey);
+      if (cached !== null) {
+        exists = cached === '1';
+      }
+    } catch {
+      // If Redis fails, fall back to DB query
+    }
+
+    if (exists === null) {
+      const res = await this.adminDs.query(
+        `SELECT id FROM platform_admins WHERE id = $1 AND is_active = true`,
+        [adminId],
+      );
+      exists = Array.isArray(res) && res.length > 0;
+      try {
+        await this.redisCache.setex(cacheKey, 60, exists ? '1' : '0');
+      } catch {
+        // Ignore Redis write errors
+      }
+    }
+
+    if (!exists) {
+      throw new UnauthorizedException('Platform admin does not exist or is inactive');
     }
 
     req.platformAdmin = {

@@ -1,6 +1,6 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { DataSource } from 'typeorm';
-import { ADMIN_DATA_SOURCE } from '../infra/db.module.js';
+import { Injectable } from '@nestjs/common';
+import { DataSource, EntityManager } from 'typeorm';
+import * as net from 'node:net';
 
 export interface AuditLogInput {
   tenantId: string;
@@ -17,12 +17,17 @@ export interface AuditLogInput {
 
 @Injectable()
 export class AuditService {
-  constructor(
-    @Inject(ADMIN_DATA_SOURCE) private readonly adminDs: DataSource,
-  ) {}
+  /** Pass the business transaction's manager so a failed audit rolls the write back (#123). */
+  async log(runner: EntityManager | DataSource, input: AuditLogInput): Promise<void> {
+    let cleanIp: string | null = null;
+    if (input.ip) {
+      const candidate = input.ip.split(',')[0].trim();
+      if (candidate && net.isIP(candidate) !== 0) {
+        cleanIp = candidate;
+      }
+    }
 
-  async log(input: AuditLogInput): Promise<void> {
-    await this.adminDs.query(
+    await runner.query(
       `INSERT INTO audit_log (tenant_id, platform_admin_id, user_id, device_id, action, entity, entity_id, before, after, ip)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
@@ -35,7 +40,7 @@ export class AuditService {
         input.entityId ?? null,
         input.before ? JSON.stringify(input.before) : null,
         input.after ? JSON.stringify(input.after) : null,
-        input.ip ?? null,
+        cleanIp,
       ],
     );
   }
