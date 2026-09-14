@@ -1,0 +1,15 @@
+# Provisioned datasource for the `grafana` service in ../../compose/monitoring.yml (#63 `ops.1`).
+# File-based on purpose: a rebuilt Grafana volume must come back identical with no manual step.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # Pinned so it matches the literal `"Prometheus"` uid every panel in
+    # ../../dashboards/pos-overview.json references — without this Grafana assigns a random
+    # uid and every panel 404s on `GET /api/datasources/uid/Prometheus`.
+    uid: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
