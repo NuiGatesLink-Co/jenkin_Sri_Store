@@ -4,6 +4,10 @@ apiVersion: 1
 
 datasources:
   - name: Prometheus
+    # Pinned so it matches the literal `"Prometheus"` uid every panel in
+    # ../../dashboards/pos-overview.json references — without this Grafana assigns a random
+    # uid and every panel 404s on `GET /api/datasources/uid/Prometheus`.
+    uid: Prometheus
     type: prometheus
     access: proxy
     url: http://prometheus:9090

@@ -730,10 +730,20 @@ cd server
 docker compose -f docker-compose.yml -f ../deploy/compose/monitoring.yml up -d
 ```
 
-(On the VM, `vm.override.yml` goes in between — `deploy/ansible/deploy.yml` doesn't wire this
-overlay in yet; that's `cd.2`'s job.) **`GRAFANA_ADMIN_PASSWORD` is required** in `.env`, the
-same way `POS_APP_PASSWORD`/`REDIS_PASSWORD`/`BULL_BOARD_PASSWORD` already are — the stack
-fails fast if it's unset.
+(On the VM, `vm.override.yml` goes in between.) **`GRAFANA_ADMIN_PASSWORD` is required** in
+`.env`, the same way `POS_APP_PASSWORD`/`REDIS_PASSWORD`/`BULL_BOARD_PASSWORD` already are —
+the stack fails fast if it's unset.
+
+🔴 **Not wired into the deploy playbook, and no open ticket owns that wiring.** `#67` `cd.2`
+merged (PR #108) without adding this overlay: `deploy/ansible/deploy.yml`'s `compose_files` is
+still `-f docker-compose.yml -f vm.override.yml` only, and the playbook copies neither
+`deploy/prometheus/` nor `deploy/grafana/` to `/opt/pos/`. Whoever picks this up next needs a
+new issue, and a trap to avoid: on the VM every compose file lands flat at `/opt/pos/*.yml`, so
+if `monitoring.yml` is copied there the same way, its relative `../deploy/prometheus/…` and
+`../deploy/grafana/…` paths resolve against `/opt/pos/` and land on `/opt/deploy/…`, which
+won't exist — `deploy/prometheus/` and `deploy/grafana/` have to be mirrored to that same
+relative location (or the compose invocation needs `--project-directory`), not just the one
+`monitoring.yml` file.
 
 **Nothing new is reachable from outside the host.** `node-exporter` publishes no port at all
 (Prometheus reaches it on the compose network); `prometheus` (`127.0.0.1:9090`) and `grafana`

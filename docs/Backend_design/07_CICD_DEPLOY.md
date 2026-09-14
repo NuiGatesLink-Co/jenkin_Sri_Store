@@ -22,7 +22,7 @@ ticket ใต้ #10: #61 `ci.4` · #62 `ci.5` · #63 `ops.1` · #64 `ops.2` · 
 | Package / Storage | Docker + **GHCR** (public) | job build image ทั้งสอง workflow → `ghcr.io/nuimanlp/srisurart-pos-server`, `…-web` | server: PR #70 (#61, tarball artefact ถูกยกเลิก) · web: PR #69 (#62) |
 | Config & Deploy (CD) | **Ansible** ผ่าน SSH | `deploy/ansible/`, `.github/workflows/deploy.yml` | ยังไม่มี |
 | KV Storage | **etcd** | service ใน compose + `RuntimeConfigService` ฝั่ง NestJS | ยังไม่มี |
-| Monitoring & Operate | Node Exporter + Prometheus + Grafana | `deploy/compose/monitoring.yml`, `deploy/prometheus/`, `deploy/grafana/` | overlay พร้อม — #63 `ops.1` (ยังไม่ได้ต่อเข้า deploy playbook — #67 `cd.2` ต่อ) |
+| Monitoring & Operate | Node Exporter + Prometheus + Grafana | `deploy/compose/monitoring.yml`, `deploy/prometheus/`, `deploy/grafana/` | overlay พร้อม — #63 `ops.1` (ยังไม่ได้ต่อเข้า deploy playbook — #67 `cd.2` merge ไปแล้วโดยไม่ได้ทำส่วนนี้ ยังไม่มี ticket ใหม่เป็นเจ้าของ) |
 
 **สิ่งที่ตั้งใจไม่ทำ:** Jenkins (มีเครื่องยนต์อยู่แล้ว), Kubernetes (VM เดียว), Alertmanager,
 exporter ของ Postgres/Redis, image signing, WAF, DB backup อัตโนมัติ (ADR-0005 มี export job),
@@ -259,9 +259,19 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
   เหมือน secret ของ datastore ตัวอื่น
 * `deploy/scripts/validate.sh` เช็ค overlay นี้ด้วย (`docker compose config` ของ base + vm.override
   + monitoring, และ `promtool check config` ของ `prometheus.yml`)
-* ยังไม่ได้ต่อเข้า Ansible — `deploy/ansible/deploy.yml` ยังไม่วาง `monitoring.yml` หรือ seed
-  ไฟล์ `deploy/prometheus/` · `deploy/grafana/` ลง `/opt/pos/` เป็นงานของ #67 `cd.2` (07 §6 ขั้นที่
-  2 และ 6) — ticket นี้แค่ทำให้ overlay ถูกต้องเมื่อ compose คู่กับสแต็กหลัก
+* 🔴 **ยังไม่ได้ต่อเข้า Ansible และยังไม่มี ticket เป็นเจ้าของ** — `#67` `cd.2` (PR #108) merge/closed
+  ไปแล้วโดย**ไม่ได้**ทำส่วนนี้: `deploy/ansible/deploy.yml` มี `compose_files: "-f docker-compose.yml
+  -f vm.override.yml"` เท่านั้น ไม่มี `monitoring.yml`, และไม่ copy ทั้ง `deploy/prometheus/` หรือ
+  `deploy/grafana/` ไปที่ `/opt/pos/` เลย — ต้องเปิด issue ใหม่ (07 §6 ขั้นที่ 2 และ 6 ยังเป็นแค่แผน
+  ไม่ใช่ของที่ทำแล้ว) · ticket #63 นี้แค่ทำให้ overlay ถูกต้องเมื่อ compose คู่กับสแต็กหลักจาก repo
+  เท่านั้น — ไม่ได้แตะ Ansible
+* 🔴 **กับดักที่รอ ticket ถัดไป:** บน VM ไฟล์ compose ทุกไฟล์ถูกวางแบนราบที่ `/opt/pos/*.yml`
+  (`docker-compose.yml`, `vm.override.yml`) — ถ้า copy `monitoring.yml` ไปวางแบนราบแบบเดียวกัน
+  path สัมพัทธ์ `../deploy/prometheus/…` และ `../deploy/grafana/…` ในไฟล์นี้จะเด้งไปหา
+  `/opt/deploy/prometheus/…` ซึ่งไม่มีอยู่จริง (project directory = `/opt/pos/`, ไม่ใช่ repo root) —
+  ใครต่อเรื่องนี้ต้อง copy `deploy/prometheus/` และ `deploy/grafana/` ไปไว้ที่ path สัมพัทธ์เดียวกัน
+  (คือ `/opt/deploy/prometheus/`, `/opt/deploy/grafana/` ถ้า `/opt/pos/` แทน `server/`) หรือใช้
+  `--project-directory` บังคับ ไม่ใช่แค่ copy ไฟล์ `monitoring.yml` ไฟล์เดียวแล้วคาดว่าจะทำงาน
 
 ---
 
