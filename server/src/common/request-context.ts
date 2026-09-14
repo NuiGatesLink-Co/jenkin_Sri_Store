@@ -39,10 +39,14 @@ export interface RequestContext {
   manager: EntityManager;
 }
 
-/** What the middleware opens: a transaction with no tenant named on it yet. */
+/**
+ * What a scope holds before it is complete. The middleware opens a transaction with no
+ * tenant named on it yet; `runInTenantScope()` (the shape `tx.4` switches to) opens a
+ * scope with neither, and `TenantService.runTx` publishes the manager later.
+ */
 interface MutableRequestContext {
   tenantId: string | null;
-  manager: EntityManager;
+  manager: EntityManager | null;
   postCommitHooks?: Array<() => Promise<void> | void>;
 }
 
@@ -62,6 +66,28 @@ export function runInRequestContext<T>(
   );
 }
 
+/**
+ * Opens a request scope with no tenant and no transaction (ADR-0003 addendum *"ใครตัดสิน
+ * กับ ใครลงมือ"*). The guard names the tenant later and `TenantService.runTx` publishes
+ * the manager later still. Nothing calls it until `tx.4` replaces the middleware.
+ */
+export function runInTenantScope<T>(fn: () => Promise<T>): Promise<T> {
+  return storage.run({ tenantId: null, manager: null }, fn);
+}
+
+/**
+ * Publishes `manager` under `tenantId` for the duration of `fn`, in a child scope, so
+ * post-commit hooks registered inside belong to this transaction and the outer scope is
+ * restored when it returns. `TenantService.runTx` only — it opened the transaction and
+ * will end it; a manager published by anything else would outlive its own transaction.
+ */
+export function runInTransaction<T>(
+  ctx: { tenantId: string; manager: EntityManager },
+  fn: () => Promise<T>,
+): Promise<T> {
+  return storage.run({ tenantId: ctx.tenantId, manager: ctx.manager }, fn);
+}
+
 /** The current request's context, or throws — never a silent default tenant. */
 export function currentRequestContext(): RequestContext {
   const ctx = requireScope();
@@ -70,22 +96,57 @@ export function currentRequestContext(): RequestContext {
       'Request context has no tenant. TenantGuard names it; this route ran without the guard.',
     );
   }
+  if (ctx.manager === null) {
+    throw new Error(
+      'Request context has no transaction. TenantService.runTx opens one; this code reached ' +
+        'for the database outside it, where RLS would see no tenant at all.',
+    );
+  }
   return { tenantId: ctx.tenantId, manager: ctx.manager };
+}
+
+/**
+ * The tenant the guard authorised, for `TenantService.runTx`, which is about to
+ * `set_config` it on a transaction. Throws when no guard has named one, so no
+ * tenant-scoped transaction can open on an unauthorised request.
+ *
+ * 🔴 There is deliberately no way to pass a tenant in: `runTx(tid, fn)` would let a call
+ * site name another shop's uuid and read its rows with no error (ADR-0003).
+ */
+export function authorisedTenantId(): string {
+  const ctx = requireScope();
+  if (ctx.tenantId === null) {
+    throw new Error(
+      'No tenant on this request. TenantGuard names it (ADR-0003); this route ran without the guard.',
+    );
+  }
+  return ctx.tenantId;
+}
+
+/**
+ * The transaction already open in this scope, or null. `TenantService.runTx` only: it
+ * joins this rather than take a second pooled connection while the first is still held.
+ * The guard, the interceptor and `RateLimitService` use `currentRequestTransaction()`.
+ */
+export function currentTransaction(): EntityManager | null {
+  return storage.getStore()?.manager ?? null;
 }
 
 /**
  * The request's transaction before a tenant is known — for the two components that
  * run either side of the guard: the guard itself (which needs the manager to do
- * `SET LOCAL`) and the interceptor that commits it. Nothing else may use it, because
- * a query through it before the guard runs sees no tenant at all under RLS.
+ * `SET LOCAL`) and the interceptor that commits it. Nothing else may use it except
+ * `RateLimitService` below and `TenantService.runTx`, which reads the same store through
+ * `currentTransaction()` — because a query through it before the guard runs sees no
+ * tenant at all under RLS.
  *
- * One exception, for the same reason the guard reads `tenants.status` here:
+ * The rate-limit exception, for the same reason the guard reads `tenants.status` here:
  * `RateLimitService` reads `tenants.plan` (no RLS) on it, because any global guard that
  * reaches for a second pool connection while the request holds this one deadlocks the
  * pool under a burst (#162).
  */
 export function currentRequestTransaction(): EntityManager | undefined {
-  return storage.getStore()?.manager;
+  return storage.getStore()?.manager ?? undefined;
 }
 
 /** Whether a request scope exists — so `onTransactionCommit` would actually wait for a commit. */
@@ -102,8 +163,8 @@ function requireScope(): MutableRequestContext {
   const ctx = storage.getStore();
   if (!ctx) {
     throw new Error(
-      'No request context. Tenant-scoped work must run inside runInRequestContext(), ' +
-        'which RequestContextMiddleware establishes; this route ran without it.',
+      'No request context. Tenant-scoped work must run inside runInRequestContext() ' +
+        '(RequestContextMiddleware) or runInTenantScope(); this route ran without either.',
     );
   }
   return ctx;
@@ -127,14 +188,26 @@ export function onTransactionCommit(hook: () => Promise<void> | void): void {
   store.postCommitHooks.push(hook);
 }
 
-/** Executes all registered post-commit hooks safely. Called ONLY by TransactionInterceptor. */
+/**
+ * Removes and returns the hooks registered on the current scope. `TenantService.runTx`
+ * takes them inside its transaction's child scope so it can run them outside it, where
+ * the released manager is no longer visible.
+ */
+export function takePostCommitHooks(): Array<() => Promise<void> | void> {
+  const store = storage.getStore();
+  const hooks = store?.postCommitHooks ?? [];
+  if (store) store.postCommitHooks = [];
+  return hooks;
+}
+
+/**
+ * Executes post-commit hooks safely — the current scope's, or `hooks` if given. Called
+ * ONLY by `TransactionInterceptor` and `TenantService.runTx`, after their commit.
+ */
 export async function executePostCommitHooks(
   onError?: (err: unknown) => void,
+  hooks: Array<() => Promise<void> | void> = takePostCommitHooks(),
 ): Promise<void> {
-  const store = storage.getStore();
-  if (!store?.postCommitHooks || store.postCommitHooks.length === 0) return;
-  const hooks = store.postCommitHooks;
-  store.postCommitHooks = [];
   for (const hook of hooks) {
     try {
       await hook();

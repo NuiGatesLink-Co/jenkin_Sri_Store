@@ -305,7 +305,7 @@ voids at `DB_POOL_SIZE=2`). The migration is **not done**: it is planned as six 
 in `docs/Backend_design/adr/0003-handler-scoped-migration-plan.md`, and `tx.3` (idempotency) is the
 one that fails silently and as money. 🔴 **`runTx` must never take a `tid` argument** — the amendment
 is only safe because `runTx(fn)` cannot name a tenant the guard did not authorise; the
-`TenantService` in the tree today still has the `runTx(tid, fn)` signature, and following it would
+`TenantService` used to have the `runTx(tid, fn)` signature (removed by `tx.1` #150), and bringing it back would
 silently restore exactly what ADR-0003 banned, failing as a cross-tenant read that raises nothing.
 The proving prototype is commit `0feaf94` on `worktree-agent-a1756ff02f223b4eb` (never merge it).
 The slices are tracked as issues #149 → #150 → #151 → #152 → #153 → #154 (parent #142).
