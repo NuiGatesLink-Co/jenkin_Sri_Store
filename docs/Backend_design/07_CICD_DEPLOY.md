@@ -241,6 +241,7 @@ on:
 | ครั้งแรก | สร้าง Environment `demo` + secret 4 ตัว (§5) → รัน `provision.yml` ด้วยมือครั้งเดียว → merge อะไรก็ได้ขึ้น main → image ทั้งสองอยู่บน GHCR และ **public อยู่แล้ว** (ไม่ต้องสลับด้วยมือ — ตรวจแล้ว 2026-09-10) → deploy ถัดไป pull ได้เลย |
 | ดู Grafana / Prometheus / Bull-Board | `ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -L 3100:127.0.0.1:3100 deploy@<vm>` |
 | rollback | Actions → Deploy → Run workflow → `image_tag` = SHA ก่อนหน้า |
+| 🔴 **ครั้งเดียว: network สร้างก่อน `ip_range` (#148)** | `docker-compose.yml` เพิ่ม `ip_range: 172.30.0.128/25` + `gateway: 172.30.0.1` ให้ network `default` (IP คงที่ `.11–.13` อยู่นอกช่วง dynamic) · Docker เปลี่ยน IPAM ของ network ที่มี container ต่ออยู่ไม่ได้ — วัดกับ compose v5.0.2: `run --rm` สลับ network ใต้ container ที่รันอยู่แล้วต่อกลับ**โดยไม่มี `ipv4_address`** (api-N เสีย `.11–.13` → Nginx ไม่มี upstream) ส่วน `up -d <บาง service>` หยุด service นั้นแล้ว error · `deploy.yml` จึงเช็ค `srisurart-pos_default` ก่อนแตะอะไรและ **fail ทันที**ถ้ายังไม่มี `ip_range` · ทางแก้ (POS ดับสั้น ๆ, volume ไม่หาย — **ห้าม `-v`**): บน VM `cd /opt/pos && IMAGE_TAG=$(cat .current_sha) docker compose -f docker-compose.yml -f vm.override.yml down --remove-orphans` (orphans = container monitoring) แล้วรัน `deploy.yml` ด้วย **SHA ใหม่** ทันที — SHA เดิมจบที่ข้อ 1 ของ §6 และไม่ start อะไรเลย (ถ้าจำเป็นต้องใช้ SHA เดิม ลบ `.current_sha` ก่อน) · เครื่อง dev ที่รัน stack อยู่: `docker compose down` (ไม่ใส่ `-v`) ครั้งเดียวใน `server/` · VM ที่ยังไม่เคยมี network นี้ผ่านเช็คเอง |
 | VM พัง/ย้ายเครื่อง | เครื่องใหม่ + `provision.yml` + `deploy.yml` — ข้อมูลใน volume ของ Postgres **ไม่ได้ย้ายตาม** (demo ไม่มีข้อมูลจริง; production ต้องมีแผน backup ก่อน — ยังไม่มีเอกสาร) |
 | เพิ่ม required check | **อย่า** — ต่อ job ใหม่เป็น `needs:` ของ status job แทน (§4) |
 | bump base image | base ถูก pin ด้วย digest และ Dependabot ตั้งเป็น **security-only** จึงไม่มีอะไรมาอัปเดตให้เอง — **CVE ที่ประกาศทีหลังจะทำให้ gate แดงตอน push ขึ้น `main` ครั้งถัดไป ซึ่งมักเป็น commit ที่ไม่เกี่ยวกับ image เลย** คนที่เจอบิลด์แดงจึงไม่ใช่คนก่อเหตุ · แก้ด้วยการ**เปลี่ยน digest**: `docker buildx imagetools inspect node:22-alpine` แล้ววาง index digest ลงทั้งสอง `FROM` ใน `server/Dockerfile` → Trivy ใน CI เป็นคนตัดสิน · **ห้ามแก้ด้วย `.trivyignore` หรือไฟล์ยกเว้นใด ๆ** (ADR-0013) |
@@ -358,11 +359,15 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
   compose ของ monitoring (คำสั่งของ POS ไม่โหลดไฟล์นี้ — §6 ข้อ 9), copy `monitoring.yml` ไป `/opt/pos/` และ copy `deploy/prometheus/` + `deploy/grafana/`
   ไป `/opt/pos/deploy/` (ไฟล์ที่ถูกลบ/rename ใน repo ถูกลบบน VM ด้วย — เทียบ path แบบ `relpath` สองฝั่ง
   ห้าม `realpath` ฝั่งเดียว ไม่งั้นรันผ่าน path ที่มี symlink จะลบ config ทั้งหมด), `up -d` ทั้งสาม service
-  **หลัง** `/health/ready` ผ่านและบันทึก SHA แล้ว · config เปลี่ยน → `--force-recreate prometheus grafana`
-  (bind mount ไฟล์เดี่ยวยึด inode เก่าหลัง copy และ config hash ของ compose ไม่เปลี่ยน) · probe
+  **หลัง** `/health/ready` ผ่านและบันทึก SHA แล้ว · `--force-recreate prometheus grafana` **ทุกครั้ง**ที่ block
+  นี้รัน (bind mount ไฟล์เดี่ยวยึด inode เก่าหลัง copy และ config hash ของ compose ไม่เปลี่ยน) — #148: เดิม
+  recreate เฉพาะเมื่อ copy รอบนั้นเปลี่ยนไฟล์ ถ้ารอบนั้น copy แล้วไปพังทีหลังใน block release ถัดไป copy ไม่เปลี่ยน
+  อะไร Prometheus จึงค้าง config เก่าไปตลอด · checksum ของไฟล์ที่ mount ก็แทนไม่ได้ เพราะ provisioning ของ
+  Grafana เป็น mount แบบโฟลเดอร์ ที่เห็นไฟล์ใหม่ทันทีแต่ Grafana ยังใช้ของที่อ่านตอน start · block รันเฉพาะ
+  `image_tag` ใหม่ ต้นทุนคือ monitoring หายไปไม่กี่วินาทีต่อ release (TSDB/Grafana state อยู่ใน named volume) · probe
   `127.0.0.1:9090/-/healthy` + `127.0.0.1:3000/api/health` ไม่ผ่าน = **WARNING ไม่ fail** (§6 ข้อ 9) ·
   ปิดได้ด้วย `-e enable_monitoring=false` (หรือ `ENABLE_MONITORING=false`) ซึ่ง `rm -sf` container
-  monitoring ที่ค้างจาก deploy ก่อน · สลับ flag บน VM ที่รัน SHA นั้นอยู่แล้วไม่มีผลจน release ถัดไป
+  monitoring ที่ค้างจาก deploy ก่อน (`rm` พังไม่ทำให้ deploy fail แต่พิมพ์ WARNING — #148) · สลับ flag บน VM ที่รัน SHA นั้นอยู่แล้วไม่มีผลจน release ถัดไป
   (§6 ข้อ 1 จบ play ก่อน)
 * 🔴 **ก่อน deploy ครั้งแรกหลัง #121 (merge แล้ว, PR #135):** เพิ่ม `GRAFANA_ADMIN_PASSWORD` ใน secret `DEMO_ENV_FILE`
   แล้วรัน `provision.yml` ใหม่ (`.env` บน VM มาจาก secret นี้ทางเดียว) ไม่งั้น monitoring ขึ้นไม่ได้
