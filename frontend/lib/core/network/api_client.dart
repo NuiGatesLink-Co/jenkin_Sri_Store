@@ -191,10 +191,19 @@ class ApiClient {
     required String path,
     required bool skipAuth,
   }) async {
+    final sentWith = await tokenStorage?.getAccessToken();
     final response = await execute();
 
     // 401 Unauthorized handling & automatic token refresh
     if (response.statusCode == 401 && !skipAuth && !_isAuthPath(path)) {
+      // A concurrent caller already refreshed while this request was on the
+      // wire: retry with the token it stored instead of refreshing again.
+      final current = await tokenStorage?.getAccessToken();
+      if (current != null && current.isNotEmpty && current != sentWith) {
+        return await execute();
+      }
+      // Throws when the refresh's fate is unknown (transport failure, 5xx,
+      // 429) — see [_executeRefresh].
       final refreshed = await _handleTokenRefresh();
       if (refreshed) {
         return await execute();
@@ -236,41 +245,80 @@ class ApiClient {
     }
   }
 
+  /// Refreshes the token pair. `true` = refreshed; `false` = the session is
+  /// over (tokens cleared, [onSessionExpired] fired); **throws** when the
+  /// refresh's fate is unknown.
+  ///
+  /// 🔴 Only a server refusal ends the session: `401`/`403` from
+  /// `/auth/refresh` (expired past 04:00, user deactivated, device retired,
+  /// shop suspended — ADR-0009). Everything else — a dropped socket, a timeout,
+  /// a 5xx (nginx's own 502/504 included), a 429, a reply we cannot parse —
+  /// says nothing about the refresh token, which is still valid, so the tokens
+  /// are kept and the ORIGINAL request fails as a connection error. The same
+  /// rule as `isVerdict` for writes (#161): clearing here signed a cashier out
+  /// mid-shift on a flaky shop network.
+  ///
+  /// Rotation is safe to retry: the server reissues a refresh token with a new
+  /// `jti` but the same `exp`, and keeps no denylist or reuse detection
+  /// (ADR-0009 dropped both), so the token kept after a lost reply still works.
   Future<bool> _executeRefresh() async {
     final storage = tokenStorage;
     if (storage == null) return false;
     final currentRefreshToken = await storage.getRefreshToken();
     if (currentRefreshToken == null || currentRefreshToken.isEmpty) {
-      await storage.clearAuthTokens();
-      onSessionExpired?.call();
+      await _expireSession(storage);
       return false;
     }
 
-    try {
-      final uri = _buildUri('/api/v1/auth/refresh');
-      final h = await _buildHeaders(skipAuth: true);
-      final response = await _client.post(
-        uri,
-        headers: h,
-        body: jsonEncode({'refreshToken': currentRefreshToken}),
-      );
+    // A transport failure propagates as-is (ClientException, TimeoutException…):
+    // it is what the original request would have thrown had its own socket
+    // dropped, and every caller already reads it as "the server never answered".
+    final response = await _client.post(
+      _buildUri('/api/v1/auth/refresh'),
+      headers: await _buildHeaders(skipAuth: true),
+      body: jsonEncode({'refreshToken': currentRefreshToken}),
+    );
+    final status = response.statusCode;
 
-      if (response.statusCode >= 200 && response.statusCode < 300) {
-        final json = jsonDecode(response.body) as Map<String, dynamic>;
-        final tokens = AuthTokens.fromJson(json);
-        await storage.setAccessToken(tokens.accessToken);
-        await storage.setRefreshToken(tokens.refreshToken);
-        return true;
-      } else {
-        await storage.clearAuthTokens();
-        onSessionExpired?.call();
-        return false;
+    if (status == 401 || status == 403) {
+      await _expireSession(storage);
+      return false;
+    }
+
+    if (status >= 200 && status < 300) {
+      final AuthTokens tokens;
+      try {
+        final decoded = jsonDecode(response.body);
+        // The server wraps every success in `{status: 'success', data}`
+        // (EnvelopeInterceptor); a flat body is accepted too.
+        final json = decoded is Map<String, dynamic> && decoded['data'] is Map<String, dynamic>
+            ? decoded['data'] as Map<String, dynamic>
+            : decoded as Map<String, dynamic>;
+        tokens = AuthTokens.fromJson(json);
+      } catch (_) {
+        // A 200 we cannot read (a captive portal's HTML page, say) is not a
+        // refusal either.
+        throw http.ClientException('Unreadable refresh response', response.request?.url);
       }
-    } catch (_) {
-      await storage.clearAuthTokens();
-      onSessionExpired?.call();
-      return false;
+      await storage.setAccessToken(tokens.accessToken);
+      await storage.setRefreshToken(tokens.refreshToken);
+      return true;
     }
+
+    if (status >= 500) {
+      // No code and no server text: a proxy's 5xx body is HTML, and the empty
+      // code resolves to ServerErrorResolver's connection sentence.
+      throw ApiException(statusCode: status, code: '');
+    }
+    // 429 (RATE_LIMITED, with Retry-After) and any other 4xx: the refresh's
+    // own error, tokens untouched.
+    _handleResponse(response);
+    throw ApiException(statusCode: status, code: '');
+  }
+
+  Future<void> _expireSession(TokenStorage storage) async {
+    await storage.clearAuthTokens();
+    onSessionExpired?.call();
   }
 
   dynamic _handleResponse(http.Response response) {
