@@ -23,7 +23,7 @@ describe('ProductsService Caching & Reads', () => {
       manager: managerMock,
     } as any);
 
-    service = new ProductsService(redisMock);
+    service = new ProductsService(redisMock, { log: vi.fn() } as any);
   });
 
   it('returns cached products when cache hits (fromCache: true)', async () => {
@@ -36,8 +36,8 @@ describe('ProductsService Caching & Reads', () => {
           nameTH: 'ผ้าเบรก',
           category: 'เบรก',
           brand: 'TEST',
-          price: 500,
-          cost: 300,
+          price: '500.00',
+          cost: '300.00',
           stock: 10,
           minStock: 2,
           compat: null,
@@ -84,8 +84,8 @@ describe('ProductsService Caching & Reads', () => {
     expect(result.fromCache).toBe(false);
     expect(result.items).toHaveLength(1);
     expect(result.items[0].id).toBe('p12');
-    expect(result.items[0].price).toBe(800);
-    expect(result.items[0].cost).toBe(500);
+    expect(result.items[0].price).toBe('800.00');
+    expect(result.items[0].cost).toBe('500.00');
     expect(redisMock.set).toHaveBeenCalledWith(
       expect.stringContaining('t:00000000-0000-4000-8000-000000000001:products:list:'),
       expect.any(String),

@@ -35,6 +35,11 @@ import { BackupModule } from './backup/backup.module.js';
 import { BackupController } from './backup/backup.controller.js';
 import { ProductsController } from './products/products.controller.js';
 import { ProductsModule } from './products/products.module.js';
+import {
+  CategoriesController,
+  MovementsController,
+  SuppliersController,
+} from './products/catalogue.controllers.js';
 
 import { RuntimeConfigService } from './config/runtime-config.service.js';
 
@@ -75,6 +80,9 @@ const TENANT_ROUTES = [
   QuotesController,
   BackupController,
   ProductsController,
+  CategoriesController,
+  SuppliersController,
+  MovementsController,
 ];
 
 /** The HTTP application: core + health + platform. Business modules are added by later tickets. */
