@@ -63,10 +63,30 @@ export function parseCreateSale(body: unknown): CreateSale {
   }
 
   const sale: CreateSale = {
-    id: requiredString(b.id, 'id'),
     subtotalSatang: toSatang(b.subtotal, 'subtotal'),
     discountSatang: toSatang(b.discount ?? 0, 'discount'),
     totalSatang: toSatang(b.total, 'total'),
+    ...parseSaleParty(b),
+    items: parseLines(items),
+  };
+  assertMoneyMakesSense(sale);
+  return sale;
+}
+
+/** Everything on a sale that is not its lines or its money. */
+export type SaleParty = Omit<
+  CreateSale,
+  'subtotalSatang' | 'discountSatang' | 'totalSatang' | 'items'
+>;
+
+/**
+ * The bill's id, payment method, customer, mechanic and override flag — shared by
+ * `POST /sales` and `POST /quotes/:id/convert` (#27), whose lines and money come from
+ * the saved quote instead of the body.
+ */
+export function parseSaleParty(b: Record<string, unknown>): SaleParty {
+  return {
+    id: requiredString(b.id, 'id'),
     paymentMethod: requiredPaymentMethod(b.paymentMethod),
     customerId: optionalString(b.customerId, 'customerId'),
     customerName: optionalString(b.customerName, 'customerName'),
@@ -82,10 +102,7 @@ export function parseCreateSale(body: unknown): CreateSale {
       b.overrideCreditLimit,
       'overrideCreditLimit',
     ),
-    items: parseLines(items),
   };
-  assertMoneyMakesSense(sale);
-  return sale;
 }
 
 /**
