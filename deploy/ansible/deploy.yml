@@ -8,8 +8,9 @@
 # 5. Executes database migrations ('migrate' container: schema before code)
 # 6. Performs rolling restart of api-1 -> api-2 -> api-3 with health checks
 # 7. Restarts worker, bull-board, and Nginx
-# 8. Verifies overall deployment health via GET /health/ready through Nginx
-# 9. Records deployed SHA in /opt/pos/.current_sha
+# 8. Brings up the monitoring overlay and probes it on loopback (unless enable_monitoring=false)
+# 9. Verifies overall deployment health via GET /health/ready through Nginx
+# 10. Records deployed SHA in /opt/pos/.current_sha
 
 - name: Deploy Srisurart POS Release
   hosts: all
@@ -20,7 +21,16 @@
     image_tag: "{{ lookup('env', 'IMAGE_TAG') | default(ansible_image_tag | default(''), true) }}"
     app_dir: "/opt/pos"
     repo_root: "{{ playbook_dir }}/../.."
-    compose_files: "-f docker-compose.yml -f vm.override.yml"
+    # Monitoring overlay (#121). On by default; `-e enable_monitoring=false` or
+    # ENABLE_MONITORING=false leaves it out of every compose command. When on, the VM's .env
+    # must carry GRAFANA_ADMIN_PASSWORD, or the first compose command (pull) fails fast.
+    enable_monitoring: "{{ lookup('env', 'ENABLE_MONITORING') | default('true', true) | bool }}"
+    compose_files: "-f docker-compose.yml -f vm.override.yml{{ ' -f monitoring.yml' if enable_monitoring | bool else '' }}"
+
+  # monitoring.yml's bind mounts resolve against the project directory (/opt/pos); the config
+  # trees are copied to /opt/pos/deploy/ below. Ansible merges this into each task's environment.
+  environment:
+    MONITORING_CONFIG_DIR: "./deploy"
 
   tasks:
     - name: Validate image_tag parameter
@@ -66,6 +76,24 @@
         src: "{{ repo_root }}/server/docker/nginx/nginx.conf"
         dest: "{{ app_dir }}/docker/nginx/nginx.conf"
         mode: "0644"
+
+    - name: Copy monitoring overlay Compose configuration
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/deploy/compose/monitoring.yml"
+        dest: "{{ app_dir }}/monitoring.yml"
+        mode: "0644"
+      when: enable_monitoring | bool
+
+    - name: Copy Prometheus and Grafana configuration trees
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/deploy/{{ item }}/"
+        dest: "{{ app_dir }}/deploy/{{ item }}/"
+        mode: "0644"
+        directory_mode: "0755"
+      loop:
+        - prometheus
+        - grafana
+      when: enable_monitoring | bool
 
     - name: Copy Postgres initialization scripts
       ansible.builtin.copy:
@@ -174,6 +202,28 @@
         IMAGE_TAG: "{{ image_tag }}"
       args:
         chdir: "{{ app_dir }}"
+
+    # Monitoring overlay (#121): host loopback only, reached over an SSH tunnel (07 §7)
+    - name: Bring up node-exporter, Prometheus and Grafana
+      ansible.builtin.command: "docker compose {{ compose_files }} up -d node-exporter prometheus grafana"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+      when: enable_monitoring | bool
+
+    - name: Verify Prometheus and Grafana answer on host loopback
+      ansible.builtin.uri:
+        url: "{{ item }}"
+        status_code: 200
+      loop:
+        - "http://127.0.0.1:9090/-/healthy"
+        - "http://127.0.0.1:3000/api/health"
+      register: monitoring_ready
+      retries: 20
+      delay: 3
+      until: monitoring_ready.status == 200
+      when: enable_monitoring | bool
 
     # Cluster health probe via Nginx
     - name: Verify cluster readiness via Nginx (GET /health/ready)
