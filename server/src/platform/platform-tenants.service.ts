@@ -3,6 +3,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
@@ -35,6 +36,8 @@ export const SEED_CATEGORIES = [
 
 @Injectable()
 export class PlatformTenantsService {
+  private readonly logger = new Logger(PlatformTenantsService.name);
+
   constructor(
     @Inject(ADMIN_DATA_SOURCE) private readonly adminDs: DataSource,
     @Inject(REDIS_CACHE) private readonly redisCache: Redis,
@@ -100,6 +103,15 @@ export class PlatformTenantsService {
           [tid, 'pos1', 'POS #1', enrolCodeHash, enrolExpires],
         );
 
+        // 6. Audit log inside the business transaction
+        await this.auditService.log(manager, {
+          tenantId: tid,
+          platformAdminId: adminId,
+          action: 'platform.tenant.create',
+          after: { code: dto.code, shopName: dto.shopName, plan, timezone },
+          ip,
+        });
+
         return tid;
       });
     } catch (err: unknown) {
@@ -109,14 +121,6 @@ export class PlatformTenantsService {
       }
       throw error;
     }
-
-    await this.auditService.log({
-      tenantId,
-      platformAdminId: adminId,
-      action: 'platform.tenant.create',
-      after: { code: dto.code, shopName: dto.shopName, plan, timezone },
-      ip,
-    });
 
     return {
       tenantId,
@@ -137,25 +141,27 @@ export class PlatformTenantsService {
       throw new BadRequestException('Status must be active, suspended, or closed');
     }
 
-    const res = await this.adminDs.query(
-      `UPDATE tenants SET status = $1 WHERE id = $2 RETURNING id, status`,
-      [status, tenantId],
-    );
+    await this.adminDs.transaction(async (manager) => {
+      const res = await manager.query(
+        `UPDATE tenants SET status = $1 WHERE id = $2 RETURNING id, status`,
+        [status, tenantId],
+      );
 
-    if (!res || res.length === 0) {
-      throw new NotFoundException(`Tenant ${tenantId} not found`);
-    }
+      if (!res || res.length === 0) {
+        throw new NotFoundException(`Tenant ${tenantId} not found`);
+      }
+
+      await this.auditService.log(manager, {
+        tenantId,
+        platformAdminId: adminId,
+        action: 'platform.tenant.update_status',
+        after: { status },
+        ip,
+      });
+    });
 
     // Immediately purge status cache
     await this.redisCache.del(`t:${tenantId}:status`);
-
-    await this.auditService.log({
-      tenantId,
-      platformAdminId: adminId,
-      action: 'platform.tenant.update_status',
-      after: { status },
-      ip,
-    });
 
     return { tenantId, status };
   }
@@ -165,12 +171,17 @@ export class PlatformTenantsService {
       `SELECT id, code, shop_name, shop_name_en, plan, status, timezone, created_at FROM tenants ORDER BY created_at DESC`,
     );
 
-    await this.auditService.log({
-      tenantId: '00000000-0000-0000-0000-000000000000',
-      platformAdminId: adminId,
-      action: 'platform.tenant.list',
-      ip,
-    });
+    try {
+      await this.auditService.log(this.adminDs, {
+        tenantId: '00000000-0000-0000-0000-000000000000',
+        platformAdminId: adminId,
+        action: 'platform.tenant.list',
+        ip,
+      });
+    } catch (err) {
+      // In read endpoints like listTenants, do not fail requests on audit logging errors
+      this.logger.warn(`Failed to write audit log for listTenants: ${err}`);
+    }
 
     return tenants;
   }

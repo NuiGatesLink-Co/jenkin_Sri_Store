@@ -556,6 +556,14 @@ export class TenantImportService {
           [tenantId, shopName, shopNameEn, taxRate, quoteValidDays, address, phone, cashierName, taxId, branchNo],
         );
       }
+
+      // 3.7 Audit log inside the business transaction
+      await this.auditService.log(manager, {
+        tenantId,
+        platformAdminId: adminId,
+        action: 'platform.tenant.import',
+        ip,
+      });
     });
 
     // #32: the transaction above has committed (it is the admin data source's own, not
@@ -565,13 +573,6 @@ export class TenantImportService {
     for (const ns of ['products', 'categories', 'customers', 'mechanics', 'settings'] as const) {
       await this.cache.invalidate(tenantId, ns);
     }
-
-    await this.auditService.log({
-      tenantId,
-      platformAdminId: adminId,
-      action: 'platform.tenant.import',
-      ip,
-    });
 
     return { status: 'success', tenantId };
   }
