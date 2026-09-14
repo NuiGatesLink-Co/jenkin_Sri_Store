@@ -27,6 +27,7 @@ describe('RuntimeConfigService', () => {
       dbPoolSize: 5,
       redisCacheUrl: 'redis://localhost:6379',
       redisQueueUrl: 'redis://localhost:6380',
+      redisCommandTimeoutMs: 200,
       jwtPlatformSecret: 'secret',
       jwtTenantSecret: 'secret',
       etcdUrl: 'http://127.0.0.1:2379',
