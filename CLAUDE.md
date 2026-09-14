@@ -598,6 +598,21 @@ the void path or the returns path.
   - `pnpm db:migrate` needs `DATABASE_URL` set explicitly.
   - A subagent that waits on a background task is never woken, so run e2e in the foreground.
 
+**#123 → PR #130 and #120 → PR #129 are merged (2026-09-14).** Read
+`docs/handoff_log/ops-123-120-platform-audit-etcd-watch.md` before touching `server/src/platform/` or
+`server/src/config/runtime-config.service.ts`.
+- 🔴 **A platform write audits inside its own transaction.** `platform/audit.service.ts` is
+  `log(runner, input)` with no default connection; `createTenant`, `updateStatus` and the import pass the
+  transaction's `manager`, so an audit failure rolls the write back. `PlatformAuthGuard` now checks
+  `platform_admins` (cached `pa:<id>:exists`, 60s) — a future deactivate path must `DEL` that key.
+- 🔴 **A value `net.isIP` accepts can still fail Postgres `inet`** (`fe80::1%eth0`). Once the audit is
+  inside the transaction, a bad client header rolls back the business write — validate, then insert.
+- 🔴 **Every etcd reconnect goes through backoff**, including a stream that ends cleanly, and the counter
+  resets only on a delivered event. The first cut reset on HTTP 200 and broke out on `done`, which looped
+  2,001 watches in 50 ms in a probe. The watch resumes at the last seen revision + 1.
+- **Still open:** the audited IP is the client-controlled leftmost `X-Forwarded-For` entry; PR #113 (#64)
+  still conflicts with `main`; #121 and #124 are unstarted.
+
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
 back** (decided 2026-09-04). Recover from git history if you ever need the Supabase-era text:

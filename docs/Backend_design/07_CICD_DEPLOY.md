@@ -238,6 +238,10 @@ on:
 * service `etcd` บน compose network เท่านั้น, auth เปิด (root password จาก `.env`), `mem_limit 256m`
 * ฝั่ง NestJS: `RuntimeConfigService` อ่านตอน boot แล้ว **watch** ผ่าน gRPC-gateway HTTP ของ etcd v3
   (`/v3/kv/range`, `/v3/watch`) ด้วย `fetch` — ไม่ใช้แพ็กเกจ `etcd3` (CJS + grpc-js บน build ESM)
+* **watch ต่อจาก revision เสมอ (#120, PR #129):** เก็บ `header.revision` จาก range และ `mod_revision`
+  ของทุก event แล้วเปิด watch ที่ `+1` · boot แล้วต่อ etcd ไม่ได้ → ยัง retry ต่อ (อ่าน key ใหม่ก่อน watch) ·
+  compact → อ่านใหม่ · ทุกการต่อใหม่ (รวม stream ที่ปิดเองแบบปกติ) ผ่าน backoff 1–30 s ที่ reset เมื่อได้
+  event จริงเท่านั้น · "เตือนครั้งเดียว" = warn ครั้งแรกของแต่ละช่วงที่ etcd ล่ม ที่เหลือเป็น debug
 * **ไม่มี etcd แอปต้อง boot ได้** — log เตือนครั้งเดียว ใช้ค่าจาก env · การเช็ค `required()` ของ env เดิม
   ไม่เปลี่ยน (smoke ใน `server.yml` พึ่งพฤติกรรมนั้น)
 * key แรกและตัวเดียวในรอบนี้: **`/pos/config/log_level`** (`info`/`debug`) — service ต้องเรียก
