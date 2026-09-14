@@ -39,6 +39,9 @@ import { BackupController } from './backup/backup.controller.js';
 import { ProductsController } from './products/products.controller.js';
 import { ProductsModule } from './products/products.module.js';
 
+import { PurchasingController } from './purchasing/purchasing.controller.js';
+import { PurchasingModule } from './purchasing/purchasing.module.js';
+
 import { RuntimeConfigService } from './config/runtime-config.service.js';
 
 /** Shared infrastructure (config, logger, Postgres, both Redis, runtime config) — no HTTP. */
@@ -80,6 +83,7 @@ const TENANT_ROUTES = [
   QuotesController,
   BackupController,
   ProductsController,
+  PurchasingController,
 ];
 
 /** The HTTP application: core + health + platform. Business modules are added by later tickets. */
@@ -118,6 +122,7 @@ export class AppModule implements NestModule {
         QuotesModule,
         BackupModule,
         ProductsModule,
+        PurchasingModule,
       ],
       providers: [RequestContextMiddleware],
     };
