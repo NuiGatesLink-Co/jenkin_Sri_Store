@@ -128,9 +128,9 @@ export class IdempotencyService {
    * none, so `res.status` here wins — measured, not read, by `idempotency.e2e-spec.ts` ›
    * *the stored status reaches the wire on replay*, which goes red without this call.
    *
-   * 🔴 Everything in `work` runs inside the transaction that holds the claim row — for the
-   * void, that includes the manager-PIN argon2 verify. tx.5 (#154) has to move the PIN check
-   * ahead of this call in the controller; a nested `runTx` would only join.
+   * 🔴 Everything in `work` runs inside the transaction that holds the claim row, and a nested
+   * `runTx` only joins it — so anything slow that is not part of the write (the void's
+   * manager-PIN argon2 verify) belongs before this call, in the controller (tx.5, #154).
    */
   runIdempotent<T>(
     params: IdempotencyParams,

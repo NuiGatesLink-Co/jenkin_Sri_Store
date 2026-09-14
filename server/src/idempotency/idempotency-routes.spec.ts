@@ -27,9 +27,22 @@ const CLAIM =
 const WRAPPER =
   /^\{\s*return this\.tenants\.runTx\(\(\) =>\s*this\.(\w+In)\([^)]*\),?\s*\);\s*\}$/;
 
+/**
+ * The one exception to rule 2, as a whole-body shape rather than a loosened rule: tx.5 (#154)
+ * checks the manager PIN BEFORE the void's claim, because argon2 inside the claim's
+ * transaction held a pooled connection for ~75 ms per void. The key is still read first (a
+ * bad key stays a 400), the PIN check reads nothing about the bill, and the claim is still the
+ * first statement of the only transaction that touches it. A route matching this shape is
+ * reported with ` (PIN pre-check)`, and the pinned list below allows it for
+ * `SalesController.voidSale` alone.
+ */
+const PIN_PRECHECK =
+  /^\{\s*const params = idempotencyParamsOf\(req,\s*([^)]+?)\s*\);\s*const authorised = await this\.voids\.authorise\(id, voidActorOf\(req, body\)\);\s*return this\.idempotency\.runIdempotent\(params, res, \(\) =>\s*this\.voids\.void\(id, authorised\),?\s*\);\s*\}$/;
+
 interface Route {
   route: string;
   successCode: number | 'no claim first';
+  precheck: boolean;
   declared: number;
   passthrough: boolean;
 }
@@ -72,7 +85,8 @@ function idempotentRoutes(
         if (!controller || !verb) continue;
         const body = m.body?.getText(sf) ?? '';
         const inner = WRAPPER.exec(body)?.[1];
-        const claimed = CLAIM.exec(inner ? bodyOf(inner) : body);
+        const precheck = inner ? null : PIN_PRECHECK.exec(body);
+        const claimed = precheck ?? CLAIM.exec(inner ? bodyOf(inner) : body);
         const mentions = (inner ? bodyOf(inner) : body).includes(
           'idempotencyParamsOf',
         );
@@ -88,6 +102,7 @@ function idempotentRoutes(
         out[`${node.name.text}.${m.name.getText(sf)}`] = {
           route: `${verb.name.toUpperCase()} /${path}`,
           successCode: claimed ? statusOf(claimed[1]) : 'no claim first',
+          precheck: precheck !== null,
           declared: httpCode
             ? statusOf(httpCode.arg!)
             : verb.name === 'Post'
@@ -135,25 +150,63 @@ describe('idempotent routes claim first, with the status they send (tx.3 #152)',
         }
         @Get()
         list() { return []; }
+        @Post(':id/void')
+        @HttpCode(200)
+        async pinFirst(@Req() req, @Res({ passthrough: true }) res) {
+          const params = idempotencyParamsOf(req, 200);
+          const authorised = await this.voids.authorise(id, voidActorOf(req, body));
+          return this.idempotency.runIdempotent(params, res, () =>
+            this.voids.void(id, authorised),
+          );
+        }
+        @Post(':id/void2')
+        @HttpCode(200)
+        async pinFirstAndARead(@Req() req, @Res({ passthrough: true }) res) {
+          const params = idempotencyParamsOf(req, 200);
+          const authorised = await this.voids.authorise(id, voidActorOf(req, body));
+          const sale = await this.reads.byId(id);
+          return this.idempotency.runIdempotent(params, res, () =>
+            this.voids.void(id, authorised),
+          );
+        }
       }`;
     expect(idempotentRoutes(src)).toEqual({
       'C.create': {
         route: 'POST /things',
         successCode: 201,
+        precheck: false,
         declared: 201,
         passthrough: true,
       },
       'C.accept': {
         route: 'POST /things/:id/accept',
         successCode: 201,
+        precheck: false,
         declared: 202,
         passthrough: true,
       },
       'C.late': {
         route: 'DELETE /things/:id',
         successCode: 'no claim first',
+        precheck: false,
         declared: 200,
         passthrough: false,
+      },
+      // The tx.5 shape is recognised, and flagged as a pre-check…
+      'C.pinFirst': {
+        route: 'POST /things/:id/void',
+        successCode: 200,
+        precheck: true,
+        declared: 200,
+        passthrough: true,
+      },
+      // …and one more statement between the PIN check and the claim is not that shape.
+      'C.pinFirstAndARead': {
+        route: 'POST /things/:id/void2',
+        successCode: 'no claim first',
+        precheck: false,
+        declared: 200,
+        passthrough: true,
       },
     });
   });
@@ -166,7 +219,7 @@ describe('idempotent routes claim first, with the status they send (tx.3 #152)',
     const summary = Object.fromEntries(
       Object.entries(found).map(([name, r]) => [
         name,
-        `${r.route} ${r.successCode}${r.successCode === r.declared ? '' : ` (declares ${r.declared})`}${r.passthrough ? '' : ' (no @Res passthrough)'}`,
+        `${r.route} ${r.successCode}${r.successCode === r.declared ? '' : ` (declares ${r.declared})`}${r.passthrough ? '' : ' (no @Res passthrough)'}${r.precheck ? ' (PIN pre-check)' : ''}`,
       ]),
     );
     // The 38 routes that carried `@UseInterceptors(IdempotencyInterceptor)` before tx.3.
@@ -207,7 +260,8 @@ describe('idempotent routes claim first, with the status they send (tx.3 #152)',
       'QuotesController.convert': 'POST /quotes/:id/convert 201',
       'ReturnsController.create': 'POST /returns 201',
       'SalesController.create': 'POST /sales 201',
-      'SalesController.voidSale': 'POST /sales/:id/void 200',
+      // The only route allowed work before its claim — see `PIN_PRECHECK`.
+      'SalesController.voidSale': 'POST /sales/:id/void 200 (PIN pre-check)',
       'SettingsController.updateSettings': 'PATCH /settings 200',
       'ShiftsController.open': 'POST /shifts/open 200',
       'ShiftsController.close': 'POST /shifts/close 200',

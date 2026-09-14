@@ -22,7 +22,7 @@ import { Paginated, pageParams } from '../common/paginated.js';
 import { parseCreateSale } from './sales.dto.js';
 import { SalesService, type CreateSaleResult } from './sales.service.js';
 import { SaleReadsService, type SaleWithItems } from './sale-reads.service.js';
-import { VoidService } from './void.service.js';
+import { VoidService, type VoidActor } from './void.service.js';
 
 /** What `TenantGuard` attaches once the token has been verified. */
 interface AuthenticatedRequest extends Request {
@@ -112,34 +112,50 @@ export class SalesController {
    * writes an audit row. Voiding twice, voiding a bill that already has a credit
    * note against it, or voiding a bill that is not from this device's open shift
    * (#94 — a credit note undoes that one), is refused.
+   *
+   * 🔴 The one idempotent route with work before its claim (tx.5, #154), in this order:
+   *   1. the key is read and validated — a missing or oversized key is still a 400 first;
+   *   2. `authorise` checks role + manager PIN: a short `runTx` for `pin_hash`, then argon2
+   *      with no transaction and no connection held;
+   *   3. `runIdempotent` claims the key and voids, in one transaction.
+   * Strictly sequential, never `Promise.all` — each `runTx` takes its own connection.
+   * Nothing about the bill is read between 2 and 3: the PIN is an authorisation, not an
+   * invariant, and the lock order inside 3 is unchanged.
+   * Consequence: a done key no longer skips the PIN — a replay with a wrong or missing PIN
+   * is a 403 plus a `sale.void.denied` row, not the stored 200.
    */
   @Post(':id/void')
   @HttpCode(200)
   @RequireDeviceRole('pos')
-  voidSale(
+  async voidSale(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
     @Res({ passthrough: true }) res: Response,
   ): Promise<SaleWithItems> {
-    return this.idempotency.runIdempotent(
-      idempotencyParamsOf(req, 200),
-      res,
-      () => {
-        if (!req.user.deviceId) {
-          throw new DeviceRoleForbiddenException();
-        }
-        const pin = (body as { pin?: unknown })?.pin;
-        return this.voids.void(id, {
-          userId: req.user.userId,
-          role: req.user.role,
-          deviceId: req.user.deviceId,
-          pin: typeof pin === 'string' ? pin : '',
-          ip: clientIp(req) ?? undefined,
-        });
-      },
+    const params = idempotencyParamsOf(req, 200);
+    const authorised = await this.voids.authorise(id, voidActorOf(req, body));
+    return this.idempotency.runIdempotent(params, res, () =>
+      this.voids.void(id, authorised),
     );
   }
+}
+
+/** Who is voiding: the token's user, role and device, plus the PIN the body carries. */
+function voidActorOf(req: AuthenticatedRequest, body: unknown): VoidActor {
+  // A `pos` token always carries `did` — the guard refuses this route otherwise — but the
+  // audit rows depend on it, so it is checked rather than asserted.
+  if (!req.user.deviceId) {
+    throw new DeviceRoleForbiddenException();
+  }
+  const pin = (body as { pin?: unknown })?.pin;
+  return {
+    userId: req.user.userId,
+    role: req.user.role,
+    deviceId: req.user.deviceId,
+    pin: typeof pin === 'string' ? pin : '',
+    ip: clientIp(req) ?? undefined,
+  };
 }
 
 function isoDate(raw: string | undefined, field: string): string | undefined {

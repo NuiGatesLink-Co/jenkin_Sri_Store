@@ -220,9 +220,24 @@ describe('runTx joins the open transaction instead of taking a second connection
       return fn();
     });
 
-  it('POST /sales/:id/void: one pos_app transaction while parked, one query runner for the whole request (void → byId)', async () => {
+  it('POST /sales/:id/void: one pos_app transaction while parked; two query runners, one after the other — the PIN read, then claim + void → byId (tx.5)', async () => {
     const saleId = await ringUp();
-    const runners = vi.spyOn(ds, 'createQueryRunner');
+    // Records each runner's creation and release, in order.
+    const events: string[] = [];
+    const original = ds.createQueryRunner.bind(ds);
+    vi.spyOn(ds, 'createQueryRunner').mockImplementation(
+      (...args: Parameters<DataSource['createQueryRunner']>) => {
+        const n = events.filter((e) => e.startsWith('create')).length + 1;
+        events.push(`create${n}`);
+        const qr = original(...args);
+        const release = qr.release.bind(qr);
+        qr.release = async () => {
+          events.push(`release${n}`);
+          return release();
+        };
+        return qr;
+      },
+    );
 
     const { most, pending } = await whileParked(
       `SELECT id FROM sales WHERE tenant_id = $1::uuid AND id = $2 FOR UPDATE`,
@@ -235,7 +250,11 @@ describe('runTx joins the open transaction instead of taking a second connection
     expect(most).toBe(1);
 
     const result = await pending;
-    expect(runners).toHaveBeenCalledTimes(1);
+    // tx.5 (#154): the manager-PIN read commits and returns its runner before argon2 and
+    // before the claim, so the request asks for two, the first released before the second is
+    // created. `most` above saw one transaction while the void was parked on the sale lock,
+    // and a third runner would mean `byId` stopped joining.
+    expect(events).toEqual(['create1', 'release1', 'create2', 'release2']);
     expect(result.status).toBe(200);
     expect(result.body.data.voided).toBe(true);
     // `byId` ran after the lock: it read the uncommitted void on the same connection.
@@ -275,16 +294,19 @@ describe('runTx joins the open transaction instead of taking a second connection
   it('with no request transaction (the tx.4 shape), the outer runTx opens one and void → byId joins it', async () => {
     const saleId = await ringUp();
     const voids = app.get(VoidService);
-    const runners = refuseSecondRunner();
-
-    const voided = await inTenantScope(() =>
-      voids.void(saleId, {
+    // tx.5 (#154): the PIN check is its own short transaction, committed before the void's
+    // opens, so it is taken before the spy — this case counts the void's runners only.
+    const authorised = await inTenantScope(() =>
+      voids.authorise(saleId, {
         userId: fixture.userId,
         role: 'manager',
         deviceId: fixture.posDeviceId,
         pin: PIN,
       }),
     );
+    const runners = refuseSecondRunner();
+
+    const voided = await inTenantScope(() => voids.void(saleId, authorised));
 
     expect(voided.voided).toBe(true);
     expect(voided.items).toHaveLength(1);
