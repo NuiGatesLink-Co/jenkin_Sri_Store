@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -45,20 +46,38 @@ export class ProductsController {
     @Query('partNo') partNo: string | undefined,
     @Query('category') category: string | undefined,
     @Query('updatedSince') updatedSince: string | undefined,
+    @Query('afterId') afterId: string | undefined,
     @Query('page') page: string | undefined,
     @Query('limit') limit: string | undefined,
     @Res({ passthrough: true }) res: Response,
   ): Promise<Paginated<Product>> {
     const parsed = pageParams(page, limit);
+    const since = isoDate(updatedSince, 'updatedSince');
+    // The sync read is keyset-paged: a reader follows `meta.nextCursor` and always asks
+    // for the first page after it. An OFFSET under a fixed cursor drifts as soon as a
+    // row is edited mid-pass, so it is refused rather than half-supported.
+    if (afterId && !since) {
+      throw new BadRequestException('afterId requires updatedSince');
+    }
+    if (since && parsed.page > 1) {
+      throw new BadRequestException(
+        'updatedSince is keyset-paged: follow meta.nextCursor instead of page',
+      );
+    }
     const result = await this.products.list({
       search: search || undefined,
-      partNo: partNo || undefined,
+      partNo: partNo?.trim() || undefined,
       category: category || undefined,
-      updatedSince: isoDate(updatedSince, 'updatedSince'),
+      updatedSince: since,
+      afterId: afterId || undefined,
       ...parsed,
     });
     res.setHeader('X-Cache', result.fromCache ? 'HIT' : 'MISS');
-    return new Paginated(result.items, { total: result.total, ...parsed });
+    return new Paginated(result.items, {
+      total: result.total,
+      ...parsed,
+      nextCursor: result.nextCursor,
+    });
   }
 
   @Get(':id/suppliers')

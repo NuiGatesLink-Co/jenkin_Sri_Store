@@ -65,8 +65,15 @@ export interface ListQuery {
   partNo?: string;
   category?: string;
   updatedSince?: string;
+  /** Tie-break for `updatedSince`: the id of the last row already read. */
+  afterId?: string;
   page: number;
   limit: number;
+}
+
+export interface SyncCursor {
+  updatedSince: string;
+  afterId: string;
 }
 
 /** What `POST /products/:id/adjust-stock` answers. */
@@ -87,7 +94,13 @@ const COLUMNS = `id, part_no, name, name_th, category, brand, price, cost, stock
  */
 export const SEARCH_EXPRESSION = `lower(part_no || ' ' || name || ' ' || name_th || ' ' || COALESCE(compat, ''))`;
 
+/** `updated_at` as UTC ISO-8601 with all six fractional digits Postgres stores. */
+const CURSOR_TIMESTAMP = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+
 const INT4_MAX = 2_147_483_647;
+
+/** Postgres `unique_violation`. */
+const UNIQUE_VIOLATION = '23505';
 
 const PRODUCTS_CACHE_TTL_SEC = 60;
 
@@ -109,13 +122,17 @@ export class ProductsService {
       part('n', query.partNo) +
       part('c', query.category) +
       part('u', query.updatedSince) +
+      part('a', query.afterId) +
       `${query.page}:${query.limit}`
     );
   }
 
-  async list(
-    query: ListQuery,
-  ): Promise<{ items: Product[]; total: number; fromCache: boolean }> {
+  async list(query: ListQuery): Promise<{
+    items: Product[];
+    total: number;
+    nextCursor?: SyncCursor | null;
+    fromCache: boolean;
+  }> {
     const { tenantId, manager } = currentRequestContext();
     const key = this.cacheKey(tenantId, query);
 
@@ -125,8 +142,9 @@ export class ProductsService {
         const parsed = JSON.parse(cached) as {
           items: Product[];
           total: number;
+          nextCursor?: SyncCursor | null;
         };
-        return { items: parsed.items, total: parsed.total, fromCache: true };
+        return { ...parsed, fromCache: true };
       }
     } catch {
       // Redis fail-open: if cache fails, proceed to database
@@ -155,9 +173,11 @@ export class ProductsService {
     }
 
     if (query.partNo) {
-      // A barcode scan: exact, never ranked (02_API_SCREENS.md §3.1).
-      params.push(query.partNo);
-      where.push(`part_no = $${params.length}`);
+      // A barcode scan: one product, never a ranked list (02_API_SCREENS.md §3.1).
+      // Compared the way uniqueness is enforced (`uq_products_partno_ci`), so a scan
+      // cannot miss the one live product whose number differs only in case.
+      params.push(query.partNo.trim());
+      where.push(`lower(part_no) = lower($${params.length})`);
     }
 
     if (query.category) {
@@ -165,13 +185,20 @@ export class ProductsService {
       where.push(`category = $${params.length}`);
     }
 
-    if (query.updatedSince) {
+    if (query.updatedSince && query.afterId) {
+      // Keyset on (updated_at, id): many rows share one `updated_at` (a sale stamps
+      // every line with the transaction's `now()`, an import stamps a whole catalogue),
+      // so `updated_at > $ts` alone skips the rest of a tie that a page boundary cut.
+      params.push(query.updatedSince, query.afterId);
+      where.push(
+        `(updated_at, id) > ($${params.length - 1}::timestamptz, $${params.length})`,
+      );
+    } else if (query.updatedSince) {
       params.push(query.updatedSince);
       where.push(`updated_at > $${params.length}::timestamptz`);
     }
 
-    // A sync reader pages forward by `updatedAt`, so it gets the oldest change first:
-    // the last row of a page is then a cursor that skips nothing still unread.
+    // A sync reader walks forward in (updated_at, id) order and follows `nextCursor`.
     const order = query.updatedSince ? 'updated_at ASC, id ASC' : 'id ASC';
 
     const clause = where.join(' AND ');
@@ -182,20 +209,29 @@ export class ProductsService {
 
     params.push(query.limit, (query.page - 1) * query.limit);
     const rows = (await manager.query(
-      `SELECT ${COLUMNS} FROM products
+      `SELECT ${COLUMNS}, ${CURSOR_TIMESTAMP} AS updated_at_cursor FROM products
         WHERE ${clause}
         ORDER BY ${order}
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
-    )) as ProductRow[];
+    )) as (ProductRow & { updated_at_cursor: string })[];
 
     const items = rows.map(toProduct);
     const total = totals[0]?.n ?? 0;
+    // The cursor is the last row's key at full precision. `updatedAt` on the wire is a
+    // JS `toISOString()` — milliseconds — and a truncated cursor sits *below* every row
+    // in its millisecond, so a tie larger than a page would be served again forever.
+    const last = rows[rows.length - 1];
+    const nextCursor = query.updatedSince
+      ? last
+        ? { updatedSince: last.updated_at_cursor, afterId: last.id }
+        : null
+      : undefined;
 
     try {
       await this.redis.set(
         key,
-        JSON.stringify({ items, total }),
+        JSON.stringify({ items, total, nextCursor }),
         'EX',
         PRODUCTS_CACHE_TTL_SEC,
       );
@@ -203,7 +239,7 @@ export class ProductsService {
       // Redis fail-open
     }
 
-    return { items, total, fromCache: false };
+    return { items, total, nextCursor, fromCache: false };
   }
 
   async byId(id: string): Promise<{ product: Product; fromCache: boolean }> {
@@ -245,26 +281,27 @@ export class ProductsService {
   /** `db.js addProduct`: a fresh `p` id, and no second live product with this part number. */
   async create(input: ProductCreate): Promise<Product> {
     const { tenantId, manager } = currentRequestContext();
-    await this.assertPartNoFree(input.partNo, null);
-    const rows = (await manager.query(
-      `INSERT INTO products (tenant_id, id, part_no, name, name_th, category, brand,
+    const rows = (await mapDuplicatePartNo(
+      manager.query(
+        `INSERT INTO products (tenant_id, id, part_no, name, name_th, category, brand,
                              price, cost, stock, min_stock, compat, updated_at)
             VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, clock_timestamp())
          RETURNING ${COLUMNS}`,
-      [
-        tenantId,
-        newId('p'),
-        input.partNo,
-        input.name,
-        input.nameTH,
-        input.category,
-        input.brand,
-        input.price,
-        input.cost,
-        input.stock,
-        input.minStock,
-        input.compat,
-      ],
+        [
+          tenantId,
+          newId('p'),
+          input.partNo,
+          input.name,
+          input.nameTH,
+          input.category,
+          input.brand,
+          input.price,
+          input.cost,
+          input.stock,
+          input.minStock,
+          input.compat,
+        ],
+      ),
     )) as ProductRow[];
     this.invalidateAfterCommit(tenantId);
     return toProduct(rows[0]);
@@ -273,9 +310,6 @@ export class ProductsService {
   /** `db.js updateProduct`: refused when the new part number belongs to ANOTHER product. */
   async update(id: string, patch: ProductPatch): Promise<Product> {
     const { tenantId, manager } = currentRequestContext();
-    if (patch.partNo !== undefined)
-      await this.assertPartNoFree(patch.partNo, id);
-
     const columns: Record<keyof ProductPatch, string> = {
       partNo: 'part_no',
       name: 'name',
@@ -296,11 +330,13 @@ export class ProductsService {
     sets.push('updated_at = clock_timestamp()');
 
     const rows = returning<ProductRow>(
-      await manager.query(
-        `UPDATE products SET ${sets.join(', ')}
-          WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL
-      RETURNING ${COLUMNS}`,
-        values,
+      await mapDuplicatePartNo(
+        manager.query(
+          `UPDATE products SET ${sets.join(', ')}
+            WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL
+        RETURNING ${COLUMNS}`,
+          values,
+        ),
       ),
     );
     if (rows.length === 0) throw productNotFound();
@@ -411,35 +447,6 @@ export class ProductsService {
     return { stockAfter, product, movement: movementOut(movement[0]) };
   }
 
-  /**
-   * `db.js` compares part numbers case-insensitively; `uq_products_partno` does not.
-   * The advisory lock on the lower-cased number serialises two requests racing for
-   * the same one, which the unique index alone would let through as `BP-1` and `bp-1`.
-   */
-  private async assertPartNoFree(
-    partNo: string,
-    exceptId: string | null,
-  ): Promise<void> {
-    const { tenantId, manager } = currentRequestContext();
-    await manager.query(
-      `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-      [`${tenantId}:products:part_no:${partNo.toLowerCase()}`],
-    );
-    const clash = (await manager.query(
-      `SELECT 1 FROM products
-        WHERE tenant_id = $1::uuid AND lower(part_no) = lower($2)
-          AND deleted_at IS NULL AND ($3::text IS NULL OR id <> $3)
-        LIMIT 1`,
-      [tenantId, partNo, exceptId],
-    )) as unknown[];
-    if (clash.length > 0) {
-      throw new HttpException(
-        { code: 'DUPLICATE_PART_NO', message: 'รหัสอะไหล่นี้มีอยู่แล้ว' },
-        HttpStatus.CONFLICT,
-      );
-    }
-  }
-
   /** 02_API_SCREENS.md §5: invalidate only after COMMIT, or a rollback leaves stale cache. */
   private invalidateAfterCommit(tenantId: string): void {
     onTransactionCommit(() => this.invalidateCache(tenantId));
@@ -454,6 +461,31 @@ export class ProductsService {
     } catch {
       // Fail-open
     }
+  }
+}
+
+/**
+ * `db.js` refuses a part number another live product already has, ignoring case.
+ * `uq_products_partno_ci` (migration `1788652800007`) is what enforces it — for every
+ * writer, the platform import included — and a concurrent duplicate blocks on the index
+ * and then fails here, so no check-then-insert race exists to guard.
+ */
+async function mapDuplicatePartNo<T>(write: Promise<T>): Promise<T> {
+  try {
+    return await write;
+  } catch (err) {
+    const e = err as { code?: string; constraint?: string };
+    if (
+      e.code === UNIQUE_VIOLATION &&
+      (e.constraint === 'uq_products_partno_ci' ||
+        e.constraint === 'uq_products_partno')
+    ) {
+      throw new HttpException(
+        { code: 'DUPLICATE_PART_NO', message: 'รหัสอะไหล่นี้มีอยู่แล้ว' },
+        HttpStatus.CONFLICT,
+      );
+    }
+    throw err;
   }
 }
 
