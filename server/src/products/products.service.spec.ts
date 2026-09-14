@@ -57,7 +57,9 @@ describe('ProductsService Caching & Reads', () => {
     // Populate through a miss first, then prove the second read never queries.
     managerMock.query.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
     await service.list({ page: 1, limit: 10 });
-    const listKey = [...redisMock.store.keys()].find((k: string) => k.includes(':list:'))!;
+    const listKey = [...redisMock.store.keys()].find(
+      (k: string) => k.includes(':list:') && !k.endsWith(':lock'),
+    )!;
     redisMock.store.set(listKey, JSON.stringify(cachedData));
     managerMock.query.mockClear();
 
@@ -98,7 +100,7 @@ describe('ProductsService Caching & Reads', () => {
     expect(result.items[0].price).toBe('800.00');
     expect(result.items[0].cost).toBe('500.00');
     const call = redisMock.set.mock.calls.find((c: unknown[]) =>
-      String(c[0]).includes(':list:'),
+      String(c[0]).includes(':list:') && !String(c[0]).endsWith(':lock'),
     );
     expect(call[0]).toMatch(
       /^t:00000000-0000-4000-8000-000000000001:products:g:[0-9a-f]{16}:list:/,

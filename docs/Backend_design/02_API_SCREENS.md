@@ -613,6 +613,9 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 **กฎที่ต้องทำตาม (จาก Backend04):**
 * **ทุก key ต้องมี TTL + jitter** — ไม่งั้นเจอ *cache avalanche* (key หมดอายุพร้อมกันหมด → DB โดนถล่ม)
 * กัน *cache stampede*: cache miss ให้ใช้ Redis lock (`SET key NX PX 5000`) ให้ request แรกเท่านั้นที่ไป query DB
+  — **ที่ทำจริง (#124):** lock เฉพาะ `GET /products` (list) · `TenantGuard` กับ `GET /products/:id` ไม่ lock
+  เพราะวัดแล้วเป็น index lookup 0.008 / 0.026 ms ถูกกว่า round trip ของ lock เอง · waiter รอสูงสุด 1 s แล้วอ่าน DB เอง
+  (ถือ connection ของ request อยู่ตลอดที่รอ) · รายละเอียดใน `server/README.md` *Stampede lock (#124)*
 * **key ต้องขึ้นต้นด้วย `t:{tid}:` เสมอ** — cache รั่วข้ามร้านคือบั๊กที่แย่ที่สุดที่จะเกิดได้ในระบบ multi-tenant
 * invalidate ต้องทำ**หลัง `COMMIT`** เท่านั้น (ถ้าล้างก่อนแล้ว transaction rollback = cache ค้างข้อมูลเก่า)
 * อย่าใช้ `KEYS` ใน production — ใช้ `SCAN` หรือเก็บ tag set (`SADD t:{tid}:tags:products <key>`)

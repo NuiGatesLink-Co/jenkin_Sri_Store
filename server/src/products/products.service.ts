@@ -134,9 +134,16 @@ export class ProductsService {
     const prefix = await this.cache.prefix(tenantId, 'products');
     const key = prefix === null ? null : this.cacheKey(prefix, query);
 
+    let release = async () => {};
     if (key !== null) {
       const cached = await this.cache.get<CachedList>(key);
       if (cached) return { ...cached, fromCache: true };
+      // Only the list is locked (#124): its count + search is milliseconds per miss,
+      // while `byId` and the tenant status probe are a single index lookup that costs
+      // less than the lock's own Redis round trips.
+      const flight = await this.cache.singleFlight<CachedList>(key);
+      if ('value' in flight) return { ...flight.value, fromCache: true };
+      release = flight.release;
     }
 
     const params: unknown[] = [tenantId];
@@ -224,6 +231,7 @@ export class ProductsService {
         'products',
       );
     }
+    await release();
 
     return { items, total, nextCursor, fromCache: false };
   }

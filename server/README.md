@@ -890,6 +890,42 @@ scanned. The old keys become unreachable at once and expire on their own TTL. `K
 `t:{tid}:status` belongs to `TenantGuard` and `PATCH /platform/tenants/:id/status` (a `DEL`). It is
 a separate key, so the two paths cannot interfere.
 
+### Stampede lock (#124)
+
+`TenantCache.singleFlight(key)` implements §5's `SET key NX PX 5000`. `ProductsService.list` calls it
+right after a miss:
+
+- The first miss takes `{cache key}:lock`, reads Postgres, `set`s the value, then releases.
+- A concurrent miss polls every 20 ms. When the value appears it answers it as a `HIT`, and never
+  queries.
+- The release is a compare-and-delete script, so a loader whose lock already expired cannot free the
+  next loader's lock.
+
+🔴 **The lock is keyed on the full cache key, generation included.** A waiter can only receive a value
+stored under the generation it read before its own miss. A reader that starts after an invalidation
+has a new key, so it gets a new lock and never waits on a pre-write loader.
+
+**It never costs a request its answer:**
+- A Redis error means no lock, and the request reads Postgres as before.
+- A waiter stops waiting after **1 s** and reads Postgres itself. That is far below the 5 s lock,
+  because every waiter holds its request's pooled connection while it waits (the request
+  transaction opens before routing).
+- A loader that throws before releasing leaves the lock to expire. Its waiters fall back at 1 s.
+
+**Why only the list.** Measured as `pos_app` under RLS on a 5,000-product tenant:
+
+| Read | Execution time |
+|---|---|
+| `TenantGuard` status (`tenants` by PK) | 0.008 ms |
+| `GET /products/:id` | 0.026 ms |
+| `GET /products` `count(*)` | 1.0 ms |
+| `GET /products?search=เบรก` `count(*)` | 6.9 ms, plus the page query |
+
+A lock costs at least two Redis round trips, which is more than the status and `byId` queries it would
+save. It also saves no connections anywhere, because every request already holds one before the guard
+runs. So the status probe and `byId` stay plain cache-aside. `test/cache-stampede.e2e-spec.ts` proves
+the list: six concurrent misses give one `MISS` and five `HIT`s, and all six `MISS` without the lock.
+
 ### Write path → cache keys
 
 "`products`" in the Keys column means `t:{tid}:products:gen` is replaced. That covers every cached
@@ -942,9 +978,7 @@ Negatives, all in the same spec:
   - The owner decides. Until then they stay live SQL.
 - **`GET /bootstrap` gets no Redis cache.** Neither §4.2 nor §5 assigns one to #32; its body-hash
   `ETag` (#25) stays.
-- **No stampede lock** (§5: `SET key NX PX 5000` on a miss). Not in #32's criteria, and a lock
-  held across a DB read on every miss needs its own design (what a waiter does on timeout, and how
-  it interacts with the generation check) — a follow-up ticket, not a drive-by.
+- **The stampede lock covers `GET /products` only (#124).** See *Stampede lock* below.
 - **Fail-open on invalidation.** If Redis rejects the generation `SET`, a cached value can outlive
   the write by up to its TTL (≤ 360 s for products, ≤ 66 s for people, ≤ 3960 s for settings).
   It is logged.
