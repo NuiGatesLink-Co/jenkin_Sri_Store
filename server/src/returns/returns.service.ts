@@ -5,6 +5,7 @@ import type { EntityManager } from 'typeorm';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
@@ -189,10 +190,18 @@ export class ReturnsService {
     private readonly docNumbers: DocNumberService,
     private readonly shifts: ShiftsService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
     @Optional() @InjectQueue(QUEUE_SALE_POST) private readonly salePostQueue?: Queue,
   ) {}
 
-  async create(
+  create(
+    dto: CreateReturn,
+    actor: ReturnActor,
+  ): Promise<CreateReturnResult> {
+    return this.tenants.runTx(() => this.createIn(dto, actor));
+  }
+
+  private async createIn(
     dto: CreateReturn,
     actor: ReturnActor,
   ): Promise<CreateReturnResult> {
@@ -360,7 +369,17 @@ export class ReturnsService {
    * history) and behave exactly as `GET /sales` does; `saleId` is the extra one
    * `POST /returns` needs to show a bill's own notes.
    */
-  async list(query: {
+  list(query: {
+    saleId?: string;
+    from?: string;
+    to?: string;
+    page: number;
+    limit: number;
+  }): Promise<{ items: ReturnWithItems[]; total: number }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(query: {
     saleId?: string;
     from?: string;
     to?: string;

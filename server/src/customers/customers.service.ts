@@ -1,6 +1,7 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { newId } from '../common/ids.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { returning } from '../common/sql.js';
 import type { SaleWithItems } from '../sales/sale-reads.service.js';
@@ -43,9 +44,19 @@ export class CustomersService {
   constructor(
     private readonly saleReads: SaleReadsService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
   ) {}
 
-  async list(query: {
+  list(query: {
+    search?: string;
+    updatedSince?: string;
+    page: number;
+    limit: number;
+  }): Promise<{ items: Customer[]; total: number; fromCache: boolean }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(query: {
     search?: string;
     updatedSince?: string;
     page: number;
@@ -101,7 +112,11 @@ export class CustomersService {
     return { ...page, fromCache: false };
   }
 
-  async byId(id: string): Promise<Customer> {
+  byId(id: string): Promise<Customer> {
+    return this.tenants.runTx(() => this.byIdIn(id));
+  }
+
+  private async byIdIn(id: string): Promise<Customer> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT ${COLUMNS} FROM customers
@@ -112,7 +127,11 @@ export class CustomersService {
     return toCustomer(rows[0]);
   }
 
-  async create(input: CustomerCreate): Promise<Customer> {
+  create(input: CustomerCreate): Promise<Customer> {
+    return this.tenants.runTx(() => this.createIn(input));
+  }
+
+  private async createIn(input: CustomerCreate): Promise<Customer> {
     const { tenantId, manager } = currentRequestContext();
     await lockCodeSequence(manager, `${tenantId}:customers:code`);
     const maxRows = (await manager.query(
@@ -140,7 +159,11 @@ export class CustomersService {
     return toCustomer(rows[0]);
   }
 
-  async update(id: string, patch: CustomerPatch): Promise<Customer> {
+  update(id: string, patch: CustomerPatch): Promise<Customer> {
+    return this.tenants.runTx(() => this.updateIn(id, patch));
+  }
+
+  private async updateIn(id: string, patch: CustomerPatch): Promise<Customer> {
     const { tenantId, manager } = currentRequestContext();
     const values: unknown[] = [tenantId, id];
     const sets = assignments(patch, values, {
@@ -164,7 +187,11 @@ export class CustomersService {
   }
 
   /** Hard delete used to succeed even for zero rows; soft delete keeps that HTTP contract. */
-  async delete(id: string): Promise<{ id: string; deleted: true }> {
+  delete(id: string): Promise<{ id: string; deleted: true }> {
+    return this.tenants.runTx(() => this.deleteIn(id));
+  }
+
+  private async deleteIn(id: string): Promise<{ id: string; deleted: true }> {
     const { tenantId, manager } = currentRequestContext();
     await manager.query(
       `UPDATE customers
@@ -177,7 +204,15 @@ export class CustomersService {
     return { id, deleted: true };
   }
 
-  async sales(
+  sales(
+    id: string,
+    page: number,
+    limit: number,
+  ): Promise<{ items: SaleWithItems[]; total: number }> {
+    return this.tenants.runTx(() => this.salesIn(id, page, limit));
+  }
+
+  private async salesIn(
     id: string,
     page: number,
     limit: number,

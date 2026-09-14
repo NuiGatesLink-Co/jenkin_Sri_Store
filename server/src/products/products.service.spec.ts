@@ -35,7 +35,7 @@ describe('ProductsService Caching & Reads', () => {
       manager: managerMock,
     } as any);
 
-    service = new ProductsService(new TenantCache(redisMock, { warn: vi.fn() } as any), { log: vi.fn() } as any);
+    service = new ProductsService(new TenantCache(redisMock, { warn: vi.fn() } as any), { log: vi.fn() } as any, { runTx: (fn: () => Promise<unknown>) => fn() } as any);
   });
 
   it('returns cached products when cache hits (fromCache: true)', async () => {

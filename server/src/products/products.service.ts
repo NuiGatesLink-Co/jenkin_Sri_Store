@@ -8,6 +8,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import {
@@ -104,6 +105,7 @@ export class ProductsService {
   constructor(
     private readonly cache: TenantCache,
     private readonly audit: AuditService,
+    private readonly tenants: TenantService,
   ) {}
 
   /** `prefix` carries the tenant and the current generation (`TenantCache.prefix`). */
@@ -123,7 +125,16 @@ export class ProductsService {
     );
   }
 
-  async list(query: ListQuery): Promise<{
+  list(query: ListQuery): Promise<{
+    items: Product[];
+    total: number;
+    nextCursor?: SyncCursor | null;
+    fromCache: boolean;
+  }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(query: ListQuery): Promise<{
     items: Product[];
     total: number;
     nextCursor?: SyncCursor | null;
@@ -241,7 +252,13 @@ export class ProductsService {
     }
   }
 
-  async byId(id: string): Promise<{ product: Product; fromCache: boolean }> {
+  byId(id: string): Promise<{ product: Product; fromCache: boolean }> {
+    return this.tenants.runTx(() => this.byIdIn(id));
+  }
+
+  private async byIdIn(
+    id: string,
+  ): Promise<{ product: Product; fromCache: boolean }> {
     const { tenantId, manager } = currentRequestContext();
     const prefix = await this.cache.prefix(tenantId, 'products');
     const key = prefix === null ? null : `${prefix}item:${id}`;
@@ -272,7 +289,11 @@ export class ProductsService {
   }
 
   /** `db.js addProduct`: a fresh `p` id, and no second live product with this part number. */
-  async create(input: ProductCreate): Promise<Product> {
+  create(input: ProductCreate): Promise<Product> {
+    return this.tenants.runTx(() => this.createIn(input));
+  }
+
+  private async createIn(input: ProductCreate): Promise<Product> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await mapDuplicatePartNo(
       manager.query(
@@ -301,7 +322,11 @@ export class ProductsService {
   }
 
   /** `db.js updateProduct`: refused when the new part number belongs to ANOTHER product. */
-  async update(id: string, patch: ProductPatch): Promise<Product> {
+  update(id: string, patch: ProductPatch): Promise<Product> {
+    return this.tenants.runTx(() => this.updateIn(id, patch));
+  }
+
+  private async updateIn(id: string, patch: ProductPatch): Promise<Product> {
     const { tenantId, manager } = currentRequestContext();
     const columns: Record<keyof ProductPatch, string> = {
       partNo: 'part_no',
@@ -343,7 +368,11 @@ export class ProductsService {
    * ever sold. `200` for an id that is absent or already deleted, as the hard delete
    * the client was written against answered.
    */
-  async delete(id: string): Promise<{ id: string; deleted: true }> {
+  delete(id: string): Promise<{ id: string; deleted: true }> {
+    return this.tenants.runTx(() => this.deleteIn(id));
+  }
+
+  private async deleteIn(id: string): Promise<{ id: string; deleted: true }> {
     const { tenantId, manager } = currentRequestContext();
     await manager.query(
       `UPDATE products
@@ -367,7 +396,15 @@ export class ProductsService {
    * Locks the one product row and nothing else, so it cannot take part in the sale
    * path's lock order (sale → mechanic → products → doc_counters → customer).
    */
-  async adjustStock(
+  adjustStock(
+    id: string,
+    input: StockAdjustment,
+    actor: { userId: string; deviceId?: string },
+  ): Promise<StockAdjustmentResult> {
+    return this.tenants.runTx(() => this.adjustStockIn(id, input, actor));
+  }
+
+  private async adjustStockIn(
     id: string,
     input: StockAdjustment,
     actor: { userId: string; deviceId?: string },

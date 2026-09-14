@@ -7,6 +7,7 @@ import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { verifyPassword } from '../common/password.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import { RateLimitService } from '../rate-limit/rate-limit.service.js';
@@ -62,9 +63,17 @@ export class VoidService {
     @Inject(AUDIT_DATA_SOURCE) private readonly auditDs: DataSource,
     private readonly rateLimit: RateLimitService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
   ) {}
 
-  async void(saleId: string, actor: VoidActor): Promise<SaleWithItems> {
+  void(saleId: string, actor: VoidActor): Promise<SaleWithItems> {
+    return this.tenants.runTx(() => this.voidIn(saleId, actor));
+  }
+
+  private async voidIn(
+    saleId: string,
+    actor: VoidActor,
+  ): Promise<SaleWithItems> {
     const { tenantId, manager } = currentRequestContext();
 
     await this.assertManagerPin(manager, tenantId, actor, saleId);

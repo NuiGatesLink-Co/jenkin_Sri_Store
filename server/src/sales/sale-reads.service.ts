@@ -1,6 +1,7 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /** A bill header as the API hands it back. Money is the wire format, `"1234.50"`. */
 export interface SaleHeader {
@@ -78,8 +79,16 @@ const SALE_COLUMNS = `id, receipt_no, subtotal, discount, total, payment_method,
  */
 @Injectable()
 export class SaleReadsService {
+  constructor(private readonly tenants: TenantService) {}
+
   /** A page of bills, newest first. Never the whole table — this one grows forever. */
-  async list(
+  list(
+    query: SaleListQuery,
+  ): Promise<{ items: SaleWithItems[]; total: number }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(
     query: SaleListQuery,
   ): Promise<{ items: SaleWithItems[]; total: number }> {
     const { tenantId, manager } = currentRequestContext();
@@ -137,7 +146,11 @@ export class SaleReadsService {
   }
 
   /** One bill with its lines, or `404 SALE_NOT_FOUND`. */
-  async byId(id: string): Promise<SaleWithItems> {
+  byId(id: string): Promise<SaleWithItems> {
+    return this.tenants.runTx(() => this.byIdIn(id));
+  }
+
+  private async byIdIn(id: string): Promise<SaleWithItems> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT ${SALE_COLUMNS} FROM sales WHERE tenant_id = $1::uuid AND id = $2`,
@@ -152,7 +165,11 @@ export class SaleReadsService {
    * (`getRefundedQty` in `sales_repository.dart`). This is what makes the over-refund
    * guard visible to staff *before* they submit, rather than as a rejection after.
    */
-  async refundedQty(saleId: string): Promise<Record<string, number>> {
+  refundedQty(saleId: string): Promise<Record<string, number>> {
+    return this.tenants.runTx(() => this.refundedQtyIn(saleId));
+  }
+
+  private async refundedQtyIn(saleId: string): Promise<Record<string, number>> {
     const { tenantId, manager } = currentRequestContext();
     const exists = (await manager.query(
       `SELECT 1 FROM sales WHERE tenant_id = $1::uuid AND id = $2`,

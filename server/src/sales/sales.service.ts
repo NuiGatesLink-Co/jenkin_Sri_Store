@@ -6,6 +6,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, pointsFor, satangOf } from '../common/money.js';
 import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
@@ -201,10 +202,18 @@ export class SalesService {
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
     @Optional() @InjectQueue(QUEUE_SALE_POST) private readonly salePostQueue?: Queue,
   ) {}
 
-  async create(dto: CreateSale, actor: SaleActor): Promise<CreateSaleResult> {
+  create(dto: CreateSale, actor: SaleActor): Promise<CreateSaleResult> {
+    return this.tenants.runTx(() => this.createIn(dto, actor));
+  }
+
+  private async createIn(
+    dto: CreateSale,
+    actor: SaleActor,
+  ): Promise<CreateSaleResult> {
     const { tenantId, manager } = currentRequestContext();
 
     // Arithmetic first: a 409 for a total that does not add up must not take

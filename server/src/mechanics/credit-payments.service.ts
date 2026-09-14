@@ -4,6 +4,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
@@ -80,9 +81,18 @@ export class CreditPaymentsService {
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
   ) {}
 
-  async create(
+  create(
+    mechanicId: string,
+    dto: CreateCreditPayment,
+    actor: CreditPaymentActor,
+  ): Promise<CreateCreditPaymentResult> {
+    return this.tenants.runTx(() => this.createIn(mechanicId, dto, actor));
+  }
+
+  private async createIn(
     mechanicId: string,
     dto: CreateCreditPayment,
     actor: CreditPaymentActor,

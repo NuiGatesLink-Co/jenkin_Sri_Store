@@ -369,7 +369,11 @@ describe('Backup Module (unit)', () => {
         add: vi.fn(),
         getJob: vi.fn(),
       };
-      controller = new BackupController(mockQueue as any);
+      controller = new BackupController(mockQueue as any, {
+        // The role checks run before any context exists here; runTx itself is covered by
+        // tenant.service.spec.ts (tx.2, #151).
+        runTx: (fn: () => Promise<unknown>) => fn(),
+      } as any);
     });
 
     describe('POST /backup/export (AC1 & AC2)', () => {

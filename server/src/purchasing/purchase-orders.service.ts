@@ -9,6 +9,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
@@ -95,10 +96,19 @@ export class PurchaseOrdersService {
     private readonly docNumbers: DocNumberService,
     private readonly cache: TenantCache,
     private readonly audit: AuditService,
+    private readonly tenants: TenantService,
   ) {}
 
   /** Newest first, as `getPOs` orders them, each with its lines. */
-  async list(query: {
+  list(query: {
+    status?: PoStatus;
+    page: number;
+    limit: number;
+  }): Promise<{ items: PurchaseOrder[]; total: number }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(query: {
     status?: PoStatus;
     page: number;
     limit: number;
@@ -133,7 +143,11 @@ export class PurchaseOrdersService {
     };
   }
 
-  async get(id: string): Promise<PurchaseOrder> {
+  get(id: string): Promise<PurchaseOrder> {
+    return this.tenants.runTx(() => this.getIn(id));
+  }
+
+  private async getIn(id: string): Promise<PurchaseOrder> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT id, po_no, supplier, status, created_at, received_at, cancelled_at
@@ -152,7 +166,14 @@ export class PurchaseOrdersService {
   }
 
   /** `savePO`: server-minted id and PO number, status `open`. Touches no stock. */
-  async create(
+  create(
+    input: PoCreate,
+    actor: { deviceId: string },
+  ): Promise<PurchaseOrder> {
+    return this.tenants.runTx(() => this.createIn(input, actor));
+  }
+
+  private async createIn(
     input: PoCreate,
     actor: { deviceId: string },
   ): Promise<PurchaseOrder> {
@@ -200,7 +221,14 @@ export class PurchaseOrdersService {
    * product_id)` allows one `receive` row per product per PO, and that index is also
    * what makes a double receipt impossible at the database even if this guard broke.
    */
-  async receive(
+  receive(
+    id: string,
+    actor: { userId: string; deviceId?: string },
+  ): Promise<ReceiveResult> {
+    return this.tenants.runTx(() => this.receiveIn(id, actor));
+  }
+
+  private async receiveIn(
     id: string,
     actor: { userId: string; deviceId?: string },
   ): Promise<ReceiveResult> {
@@ -375,7 +403,11 @@ export class PurchaseOrdersService {
    * a `cancelled` label on it would say they had not. Cancelling a cancelled PO
    * answers it unchanged.
    */
-  async cancel(id: string): Promise<PurchaseOrder> {
+  cancel(id: string): Promise<PurchaseOrder> {
+    return this.tenants.runTx(() => this.cancelIn(id));
+  }
+
+  private async cancelIn(id: string): Promise<PurchaseOrder> {
     const { tenantId, manager } = currentRequestContext();
     let po = await this.lockPo(manager, tenantId, id);
     if (po.status === 'received') throw poAlreadyReceived();
@@ -398,7 +430,11 @@ export class PurchaseOrdersService {
    * document the `receive` movements point at. `200` for an absent id, as the Dart
    * no-op and `DELETE /products/:id` answer.
    */
-  async delete(id: string): Promise<{ id: string; deleted: true }> {
+  delete(id: string): Promise<{ id: string; deleted: true }> {
+    return this.tenants.runTx(() => this.deleteIn(id));
+  }
+
+  private async deleteIn(id: string): Promise<{ id: string; deleted: true }> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT status FROM purchase_orders

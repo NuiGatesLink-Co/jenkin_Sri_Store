@@ -45,6 +45,10 @@ describe('catColor (db.js getCatColor)', () => {
   });
 });
 
+// runTx itself is covered by tenant.service.spec.ts; here the context is mocked, so the
+// door just runs the work (tx.2, #151).
+const joinedTenants = { runTx: (fn: () => Promise<unknown>) => fn() } as never;
+
 describe('CategoriesService.list', () => {
   let query: ReturnType<typeof vi.fn>;
 
@@ -60,7 +64,7 @@ describe('CategoriesService.list', () => {
     query.mockResolvedValueOnce(
       Array.from({ length: 12 }, (_, i) => ({ name: `c${i}` })),
     );
-    const out = await new CategoriesService({} as never).list();
+    const out = await new CategoriesService({} as never, joinedTenants).list();
     expect(query).toHaveBeenCalledTimes(1);
     expect(out).toHaveLength(12);
     expect(out[11]).toEqual({ name: 'c11', color: CAT_PALETTE[1] });
@@ -68,7 +72,7 @@ describe('CategoriesService.list', () => {
 
   it('stands the five seed categories in when the table is empty', async () => {
     query.mockResolvedValueOnce([]);
-    const out = await new CategoriesService({} as never).list();
+    const out = await new CategoriesService({} as never, joinedTenants).list();
     expect(out.map((c) => c.name)).toEqual([
       'เครื่องยนต์',
       'ไฟฟ้า',

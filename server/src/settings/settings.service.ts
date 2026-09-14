@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import type { Customer } from '../customers/customers.service.js';
 import type { Mechanic } from '../mechanics/mechanics.service.js';
@@ -101,7 +102,10 @@ interface MechanicRow {
 
 @Injectable()
 export class SettingsService {
-  constructor(private readonly cache: TenantCache) {}
+  constructor(
+    private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
+  ) {}
 
   /**
    * `GET /settings` through `t:{tid}:settings:g:{token}:row` (#32).
@@ -109,7 +113,14 @@ export class SettingsService {
    * its write transaction, and `/bootstrap` hashes a fresh body for its ETag,
    * neither of which may touch the cache.
    */
-  async getSettingsCached(): Promise<{ settings: Settings; fromCache: boolean }> {
+  getSettingsCached(): Promise<{ settings: Settings; fromCache: boolean }> {
+    return this.tenants.runTx(() => this.getSettingsCachedIn());
+  }
+
+  private async getSettingsCachedIn(): Promise<{
+    settings: Settings;
+    fromCache: boolean;
+  }> {
     const { tenantId } = currentRequestContext();
     const prefix = await this.cache.prefix(tenantId, 'settings');
     const key = prefix === null ? null : `${prefix}row`;
@@ -122,7 +133,11 @@ export class SettingsService {
     return { settings, fromCache: false };
   }
 
-  async getSettings(): Promise<Settings> {
+  getSettings(): Promise<Settings> {
+    return this.tenants.runTx(() => this.getSettingsIn());
+  }
+
+  private async getSettingsIn(): Promise<Settings> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT shop_name, shop_name_en, tax_rate, quote_valid_days, address, phone, cashier_name, tax_id, branch_no, updated_at
@@ -154,7 +169,11 @@ export class SettingsService {
     return toSettings(inserted[0]);
   }
 
-  async updateSettings(patch: SettingsPatch): Promise<Settings> {
+  updateSettings(patch: SettingsPatch): Promise<Settings> {
+    return this.tenants.runTx(() => this.updateSettingsIn(patch));
+  }
+
+  private async updateSettingsIn(patch: SettingsPatch): Promise<Settings> {
     const { tenantId, manager } = currentRequestContext();
     const current = await this.getSettings();
 
@@ -190,7 +209,11 @@ export class SettingsService {
     return toSettings(rows[0]);
   }
 
-  async getBootstrap(): Promise<BootstrapData> {
+  getBootstrap(): Promise<BootstrapData> {
+    return this.tenants.runTx(() => this.getBootstrapIn());
+  }
+
+  private async getBootstrapIn(): Promise<BootstrapData> {
     const { tenantId, manager } = currentRequestContext();
 
     const productRows = (await manager.query(

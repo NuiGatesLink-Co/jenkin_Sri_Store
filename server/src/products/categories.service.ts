@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { SEED_CATEGORIES } from '../db/seed.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 
@@ -42,14 +43,24 @@ export function catColor(name: string, ordered: readonly string[]): string {
 
 @Injectable()
 export class CategoriesService {
-  constructor(private readonly cache: TenantCache) {}
+  constructor(
+    private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
+  ) {}
 
   /**
    * `GET /categories` through `t:{tid}:categories:g:{token}:list` (§5, 3600 s). `list()`
    * stays a plain read: `create()` calls it inside its write transaction and
    * `/bootstrap` hashes a fresh body, and neither may touch the cache.
    */
-  async listCached(): Promise<{ categories: Category[]; fromCache: boolean }> {
+  listCached(): Promise<{ categories: Category[]; fromCache: boolean }> {
+    return this.tenants.runTx(() => this.listCachedIn());
+  }
+
+  private async listCachedIn(): Promise<{
+    categories: Category[];
+    fromCache: boolean;
+  }> {
     const { tenantId } = currentRequestContext();
     const prefix = await this.cache.prefix(tenantId, 'categories');
     const key = prefix === null ? null : `${prefix}list`;
@@ -69,7 +80,11 @@ export class CategoriesService {
    * `db.js getCategories`: ordered by `position`; when the table is empty the five seed
    * categories stand in, exactly as the Dart repository answers.
    */
-  async list(): Promise<Category[]> {
+  list(): Promise<Category[]> {
+    return this.tenants.runTx(() => this.listIn());
+  }
+
+  private async listIn(): Promise<Category[]> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT name FROM categories WHERE tenant_id = $1::uuid ORDER BY position ASC, name ASC`,
@@ -84,7 +99,11 @@ export class CategoriesService {
    * `db.js addCategory`: appended after the last position; a name that already exists
    * is left alone rather than refused, as the Dart repository ignores it.
    */
-  async create(name: string): Promise<Category> {
+  create(name: string): Promise<Category> {
+    return this.tenants.runTx(() => this.createIn(name));
+  }
+
+  private async createIn(name: string): Promise<Category> {
     const { tenantId, manager } = currentRequestContext();
     // Two concurrent adds would otherwise both read the same MAX(position) and give
     // two categories one palette slot.
@@ -108,7 +127,13 @@ export class CategoriesService {
    * `db.js deleteCategory`: a hard delete of the row, and nothing else — no foreign key
    * points at it, and `products.category` keeps the name (01_DATABASE.md §10).
    */
-  async delete(name: string): Promise<{ name: string; deleted: true }> {
+  delete(name: string): Promise<{ name: string; deleted: true }> {
+    return this.tenants.runTx(() => this.deleteIn(name));
+  }
+
+  private async deleteIn(
+    name: string,
+  ): Promise<{ name: string; deleted: true }> {
     const { tenantId, manager } = currentRequestContext();
     await manager.query(
       `DELETE FROM categories WHERE tenant_id = $1::uuid AND name = $2`,
