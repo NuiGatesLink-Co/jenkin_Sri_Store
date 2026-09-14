@@ -330,17 +330,9 @@ export class QuotesService {
       return { sale, quote: await this.read(manager, tenantId, id) };
     }
 
-    // `quotes_screen.dart` offers convert only when `status == 'open' && !isExpired`.
-    if (q.status !== 'open') {
-      throw new HttpException(
-        {
-          code: 'QUOTE_NOT_OPEN',
-          message: `Quote is ${q.status} and cannot be converted.`,
-          details: { status: q.status },
-        },
-        HttpStatus.CONFLICT,
-      );
-    }
+    // `quotes_screen.dart:559` offers convert on a row that is `!converted && !expired`
+    // (`QuoteRowStatus`) and does not read the status string otherwise, so an imported
+    // row stored as, say, `'cancelled'` but still valid converts here too.
     if (q.expired) {
       throw new HttpException(
         {

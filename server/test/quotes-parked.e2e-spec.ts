@@ -5,6 +5,7 @@ import {
   accessToken,
   createTestApp,
   resetTenant,
+  seedMechanic,
   seedOpenShift,
   seedProduct,
   type TenantFixture,
@@ -556,6 +557,87 @@ describe('quotes and parked sales (e2e)', () => {
         'สต็อกไม่พอ:\nของสั่งพิเศษ: ไม่พบในสต็อก',
       );
       expect((await quoteRow(loose.id))!.status).toBe('open');
+    });
+
+    it('over the credit limit: 409 with nothing written; the same key with the flag converts once and audits once (#21)', async () => {
+      await seedMechanic(admin, TENANT, {
+        id: 'm-27',
+        code: 'M27',
+        name: 'ช่างสมชาย',
+        creditLimit: 100,
+      });
+      const q = (await createQuote()).body.data;
+      const party = {
+        id: 'sale-27-credit',
+        paymentMethod: 'เครดิตช่าง',
+        mechanicId: 'm-27',
+        mechanicName: 'ช่างสมชาย',
+      };
+      const before = await stockState();
+      const auditRows = () =>
+        admin.query(
+          `SELECT action, entity_id FROM audit_log
+            WHERE tenant_id = $1::uuid AND action = 'sale.credit_limit_override'`,
+          [TENANT],
+        );
+      const k = key();
+
+      const refused = await convert(q.id, party, { key: k });
+      expect(refused.status).toBe(409);
+      expect(refused.body.error.code).toBe('CREDIT_LIMIT_EXCEEDED');
+      expect(await stockState()).toEqual(before);
+      expect(await saleCount()).toBe(0);
+      expect(await auditRows()).toHaveLength(0);
+      expect((await quoteRow(q.id))!.status).toBe('open');
+
+      // The counter resends the SAME key with the confirmation: the refused claim
+      // rolled back with its transaction, so the key is free for the new body.
+      const confirmed = await convert(
+        q.id,
+        { ...party, overrideCreditLimit: true },
+        { key: k },
+      );
+      expect(confirmed.status).toBe(201);
+      expect(confirmed.body.data.sale.mechanicCreditBalanceAfter).toBe(
+        '240.00',
+      );
+      expect(await saleCount()).toBe(1);
+      expect(await auditRows()).toEqual([
+        { action: 'sale.credit_limit_override', entity_id: 'm-27' },
+      ]);
+      const row = await quoteRow(q.id);
+      expect(row!.status).toBe('converted');
+      expect(row!.converted_sale_id).toBe('sale-27-credit');
+    });
+
+    it('eligibility is !converted && !expired, not the status string (quotes_screen.dart:559)', async () => {
+      const valid = (await createQuote()).body.data;
+      const stale = (await createQuote()).body.data;
+      // Imported rows may carry a status the app never writes.
+      await admin.query(
+        `UPDATE quotes SET status = 'cancelled' WHERE tenant_id = $1::uuid AND id = ANY($2)`,
+        [TENANT, [valid.id, stale.id]],
+      );
+      await admin.query(
+        `UPDATE quotes SET valid_until = now() - interval '1 second'
+          WHERE tenant_id = $1::uuid AND id = $2`,
+        [TENANT, stale.id],
+      );
+
+      const ok = await convert(valid.id, {
+        id: 'sale-27-cancelled',
+        paymentMethod: 'เงินสด',
+      });
+      expect(ok.status).toBe(201);
+      expect(ok.body.data.quote.status).toBe('converted');
+
+      const refused = await convert(stale.id, {
+        id: 'sale-27-cancelled-stale',
+        paymentMethod: 'เงินสด',
+      });
+      expect(refused.status).toBe(409);
+      expect(refused.body.error.code).toBe('QUOTE_EXPIRED');
+      expect((await quoteRow(stale.id))!.status).toBe('cancelled');
     });
 
     it('no open drawer: NO_OPEN_SHIFT, the quote stays open', async () => {
