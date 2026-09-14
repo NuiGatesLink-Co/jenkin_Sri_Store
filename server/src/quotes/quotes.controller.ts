@@ -1,24 +1,46 @@
 import {
   Body,
   Controller,
+  Delete,
   ForbiddenException,
+  Get,
   HttpCode,
   HttpStatus,
+  Param,
+  Patch,
   Post,
+  Query,
   Req,
   UseGuards,
+  UseInterceptors,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
+import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
+import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { newId } from '../common/ids.js';
+import { Paginated, pageParams } from '../common/paginated.js';
+import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { isoDate } from '../people/people.dto.js';
 import {
   JOB_QUOTES_PURGE,
   QUEUE_MAINTENANCE,
   type QuotesPurgeJobPayload,
 } from '../queue/queue.constants.js';
+import {
+  parseQuoteConvert,
+  parseQuoteCreate,
+  parseQuoteFilter,
+  parseQuotePatch,
+} from './quotes.dto.js';
+import {
+  QuotesService,
+  type ConvertQuoteResult,
+  type Quote,
+} from './quotes.service.js';
 
 interface AuthenticatedRequest extends Request {
   user?: {
@@ -34,12 +56,36 @@ export interface PurgeQuotesDto {
   olderThanDays?: number;
 }
 
+/**
+ * Quotes (#27). Reads and edits are both device roles (ADR-0004: a quote touches
+ * neither stock nor money); convert is `pos` only, because it rings up a bill.
+ * Every write goes through `IdempotencyInterceptor` (02_API_SCREENS.md §4).
+ */
 @Controller('quotes')
 @UseGuards(TenantGuard)
 export class QuotesController {
   constructor(
     @InjectQueue(QUEUE_MAINTENANCE) private readonly maintenanceQueue: Queue,
+    private readonly quotes: QuotesService,
   ) {}
+
+  @Get()
+  async list(
+    @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ): Promise<Paginated<Quote>> {
+    const parsed = pageParams(page, limit);
+    const { items, total } = await this.quotes.list({
+      status: parseQuoteFilter(status),
+      from: isoDate(from, 'from'),
+      to: isoDate(to, 'to'),
+      ...parsed,
+    });
+    return new Paginated(items, { total, ...parsed });
+  }
 
   @Post('purge')
   @HttpCode(HttpStatus.ACCEPTED)
@@ -74,4 +120,64 @@ export class QuotesController {
       olderThanDays,
     };
   }
+
+  @Get(':id')
+  byId(@Param('id') id: string): Promise<Quote> {
+    return this.quotes.byId(id);
+  }
+
+  @Post()
+  @UseInterceptors(IdempotencyInterceptor)
+  create(
+    @Body() body: unknown,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<Quote> {
+    return this.quotes.create(parseQuoteCreate(body), deviceIdOf(req));
+  }
+
+  @Patch(':id')
+  @UseInterceptors(IdempotencyInterceptor)
+  update(@Param('id') id: string, @Body() body: unknown): Promise<Quote> {
+    return this.quotes.update(id, parseQuotePatch(body));
+  }
+
+  @Delete(':id')
+  @UseInterceptors(IdempotencyInterceptor)
+  delete(@Param('id') id: string): Promise<{ id: string; deleted: true }> {
+    return this.quotes.delete(id);
+  }
+
+  @Post(':id/duplicate')
+  @UseInterceptors(IdempotencyInterceptor)
+  duplicate(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<Quote> {
+    return this.quotes.duplicate(id, deviceIdOf(req));
+  }
+
+  @Post(':id/convert')
+  @RequireDeviceRole('pos')
+  @UseInterceptors(IdempotencyInterceptor)
+  convert(
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<ConvertQuoteResult> {
+    const deviceId = deviceIdOf(req);
+    return this.quotes.convert(id, parseQuoteConvert(body), {
+      userId: req.user!.userId!,
+      deviceId,
+    });
+  }
+}
+
+/**
+ * The QT (and, on convert, RC) number is issued in the token's device series
+ * (ADR-0007), so a session with no device token cannot issue one.
+ */
+function deviceIdOf(req: AuthenticatedRequest): string {
+  const deviceId = req.user?.deviceId;
+  if (!deviceId) throw new DeviceRoleForbiddenException();
+  return deviceId;
 }

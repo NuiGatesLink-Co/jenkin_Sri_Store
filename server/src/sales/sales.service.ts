@@ -542,29 +542,7 @@ export class SalesService {
    * up at a haggled price is an ordinary day at this counter, not an error.
    */
   private assertTotals(dto: CreateSale): void {
-    const computedSubtotal = dto.items.reduce(
-      (sum, i) => sum + i.qty * i.priceSatang,
-      0,
-    );
-    const computedTotal = computedSubtotal - dto.discountSatang;
-    const off =
-      Math.abs(computedSubtotal - dto.subtotalSatang) >
-        TOTAL_TOLERANCE_SATANG ||
-      Math.abs(computedTotal - dto.totalSatang) > TOTAL_TOLERANCE_SATANG;
-
-    if (off) {
-      throw new HttpException(
-        {
-          code: 'TOTAL_MISMATCH',
-          message: 'ยอดเงินไม่ตรงกัน กรุณาทำรายการใหม่',
-          details: {
-            subtotal: fromSatang(computedSubtotal),
-            total: fromSatang(computedTotal),
-          },
-        },
-        HttpStatus.CONFLICT,
-      );
-    }
+    assertSaleTotals(dto);
   }
 
   /**
@@ -936,6 +914,42 @@ function aggregate(items: SaleLine[]): Demand[] {
   return [...byProduct.values()].sort(
     (a, b) => a.firstLineIndex - b.firstLineIndex,
   );
+}
+
+/**
+ * `409 TOTAL_MISMATCH` when the three numbers are more than one satang away from the
+ * lines. Exported for the quote path (#27): a quote is refused the same way when it is
+ * saved, so a saved quote can always be converted through `SalesService.create`.
+ */
+export function assertSaleTotals(bill: {
+  items: { qty: number; priceSatang: number }[];
+  subtotalSatang: number;
+  discountSatang: number;
+  totalSatang: number;
+}): void {
+  const computedSubtotal = bill.items.reduce(
+    (sum, i) => sum + i.qty * i.priceSatang,
+    0,
+  );
+  const computedTotal = computedSubtotal - bill.discountSatang;
+  const off =
+    Math.abs(computedSubtotal - bill.subtotalSatang) >
+      TOTAL_TOLERANCE_SATANG ||
+    Math.abs(computedTotal - bill.totalSatang) > TOTAL_TOLERANCE_SATANG;
+
+  if (off) {
+    throw new HttpException(
+      {
+        code: 'TOTAL_MISMATCH',
+        message: 'ยอดเงินไม่ตรงกัน กรุณาทำรายการใหม่',
+        details: {
+          subtotal: fromSatang(computedSubtotal),
+          total: fromSatang(computedTotal),
+        },
+      },
+      HttpStatus.CONFLICT,
+    );
+  }
 }
 
 /** A `NUMERIC` as `pg` hands it back, normalised to the wire shape. */
