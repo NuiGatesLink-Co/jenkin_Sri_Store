@@ -9,7 +9,8 @@ export default defineConfig({
     include: ['**/*.e2e-spec.ts'],
     // #141: one run per Postgres. Takes a session advisory lock before any file starts
     // and refuses to start, naming the holder, if another `pnpm test:e2e` has it.
-    globalSetup: ['./test/support/e2e-runner-lock.ts'],
+    // #160: warns when this Node has the Windows libuv bug that kills a worker at random.
+    globalSetup: ['./test/support/windows-node-check.ts', './test/support/e2e-runner-lock.ts'],
     // One file at a time. Each e2e file boots the whole application, so parallel
     // files multiply the connection pools: seven files at `DB_POOL_SIZE` 20, plus an
     // admin pool each, blows past the compose Postgres's `max_connections=100` and

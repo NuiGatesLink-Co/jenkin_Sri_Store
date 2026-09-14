@@ -1254,6 +1254,36 @@ Redis, mints access tokens from a per-run RSA key pair, and resets one tenant pe
   CI has one Postgres per job and always gets the lock. Per-run databases were not chosen:
   the Redis ports, the `pos_app` URL in `fixture.ts` and the migrate step are all fixed, so
   isolation would mean a database *and* two Redis per run.
+- **On Windows, run the suite on Node 24.16.0 or later (#160).** On Node 24.15.0, about half of
+  the full runs lost one file to Vitest's `Worker exited unexpectedly`: exit code `0xC0000409`,
+  nothing on stderr, and a different file each time (`security`, `cache-stampede`, `sales`,
+  `returns`, `people`). This is a bug in Node's bundled libuv, not in our code:
+  `uv__is_fast_loopback_fail_supported()` in `deps/uv/src/win/tcp.c` passes a stack
+  `OSVERSIONINFOW` to `RtlGetVersion` without setting `dwOSVersionInfoSize`. When the leftover
+  stack value there happens to be `0x11C` (`sizeof(OSVERSIONINFOEXW)`), Windows writes the
+  8-byte EX tail past the 276-byte buffer and over the /GS stack cookie. The worker then
+  fast-fails on its next loopback `connect()`, and every pg, Redis and supertest socket in this
+  suite is a loopback connect.
+  - **Evidence.** Three `procdump -e` dumps, symbolised with the v24.15.0 `node.pdb`, all show
+    the same crash: `__report_gsfailure` (subcode 2, `FAST_FAIL_STACK_COOKIE_CHECK_FAILURE`),
+    reached from `uv__tcp_try_connect` → `uv_tcp_connect` → `TCPWrap::Connect<sockaddr_in>`.
+    In each dump the cookie slot holds `0x0001010000000000`, which is exactly SP 0.0,
+    `wSuiteMask=0x0100` and `wProductType=1`, and the size field reads `0x11C`.
+  - **The fix is upstream.** libuv `aabb765` (libuv#5107, "win: properly initialize
+    OSVERSIONINFOW") shipped in Node 24.16.0 and 26.1.0. The 22.x and 25.x lines did not have it
+    on 2026-09-14.
+  - **Before and after.** On Node 24.15.0, 5 of 9 full runs crashed. On Node 24.21.0, 0 of 8
+    crashed, on the same machine, stack and commit. The only other failures in those runs were
+    #162's two known ones.
+  - **What was ruled out.** argon2 hash/verify in 120 forked processes never crashed.
+    `security.e2e-spec.ts` alone, 8 runs, never crashed. No third-party Winsock provider is
+    loaded in the process.
+  - **CI is not affected.** It runs Linux, which never compiles `src/win/`.
+  - The e2e `globalSetup` (`test/support/windows-node-check.ts`) prints a warning when it sees
+    an affected Node on Windows. It only warns: a dropped file still makes the run exit non-zero.
+  - Earlier notes (`fileParallelism` above, the `DB_POOL_SIZE` comment in `fixture.ts`) blamed
+    "worker exited unexpectedly" on connection-pool pressure. Nobody captured a dump for those
+    runs, so they may have been this bug.
 - `TEST_LOG_LEVEL=error pnpm test:e2e` is how you find out why a suite is getting a 500.
 
 ## Invariants this stack enforces (from #14 / #2)
