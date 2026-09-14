@@ -517,7 +517,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | PATCH | `/products/:id` | manager | ทั้งคู่ | invalidate | – | ✔ |
 | DELETE | `/products/:id` | manager | ทั้งคู่ | invalidate | – | ✔ |
 | POST | `/products/:id/adjust-stock` | manager | ทั้งคู่ | invalidate | – | ✔ |
-| GET | `/categories` (คืน `[{name,color}]`) | ✔ | ทั้งคู่ | ✅ 1h *(ยังไม่ทำ — อยู่นอกรายการของ #32)* | – | – |
+| GET | `/categories` (คืน `[{name,color}]`) | ✔ | ทั้งคู่ | ✅ 3600s ±10% (#32) | – | – |
 | POST/DELETE | `/categories` | manager | ทั้งคู่ | invalidate | – | ✔ |
 | GET | `/products/:id/suppliers` | ✔ | ทั้งคู่ | – | – | – |
 | POST/PATCH/DELETE | `/suppliers/:id?` | manager | ทั้งคู่ | – | – | ✔ |
@@ -601,7 +601,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | `t:{tid}:{ns}:gen` | generation token ต่อ namespace (#32) | 3600s ± 300s | ถูก `SET` เป็น token ใหม่ = invalidate ทั้ง namespace |
 | `t:{tid}:products:g:{token}:list:…` | หน้ารายการสินค้า | 300s **+ jitter ±60s** | ขาย / void / คืน / รับของ / แก้สินค้า / ปรับสต็อก / import |
 | `t:{tid}:products:g:{token}:item:{id}` | สินค้ารายชิ้น | 300s + jitter | เหมือนบน |
-| `t:{tid}:categories` | หมวดหมู่ | 3600s | เพิ่ม/ลบหมวด *(ยังไม่ทำ)* |
+| `t:{tid}:categories:g:{token}:list` | หมวดหมู่ | 3600s ± 360s | เพิ่ม/ลบหมวด / import |
 | `t:{tid}:settings:g:{token}:row` | ตั้งค่าร้าน | 3600s ± 360s | `PATCH /settings` / import |
 | `t:{tid}:customers:g:{token}:list:…` | รายชื่อลูกค้า | 60s ± 6s | ดูตาราง write path ใน `server/README.md` |
 | `t:{tid}:mechanics:g:{token}:list:…` | รายชื่อช่าง | 60s ± 6s | เหมือนบน |

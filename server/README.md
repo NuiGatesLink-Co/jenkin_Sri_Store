@@ -826,12 +826,13 @@ answered.
 | Read | Namespace | TTL | Source |
 |---|---|---|---|
 | `GET /products`, `GET /products/:id` | `products` | 300 s ± 60 s | §5 (a flat 60 s before #32) |
+| `GET /categories` | `categories` | 3600 s ± 360 s | §5 TTL, ±10 % |
 | `GET /settings` | `settings` | 3600 s ± 360 s | §5 TTL; §5 gives no jitter amount, so ±10 % |
 | `GET /customers` (list only) | `customers` | 60 s ± 6 s | §4.2 "1m", ±10 % |
 | `GET /mechanics` (list only) | `mechanics` | 60 s ± 6 s | §4.2 "1m", ±10 % |
 
 The TTLs are in one table, `CACHE_TTL`. These are **not** cached: `GET /customers/:id`,
-`GET /mechanics/:id`, the `/:id/sales` reads, categories, report summaries, and `/bootstrap`
+`GET /mechanics/:id`, the `/:id/sales` reads, report summaries, and `/bootstrap`
 (see *Not done*).
 
 **Every namespace has its own generation key.**
@@ -840,6 +841,7 @@ The TTLs are in one table, `CACHE_TTL`. These are **not** cached: `GET /customer
 t:{tid}:{ns}:gen                              random token, 1 h ± 5 min
 t:{tid}:products:g:{token}:list:[s:…][n:…][c:…][u:…][a:…]{page}:{limit}
 t:{tid}:products:g:{token}:item:{id}
+t:{tid}:categories:g:{token}:list
 t:{tid}:settings:g:{token}:row
 t:{tid}:customers:g:{token}:list:[s:…][u:…]{page}:{limit}
 t:{tid}:mechanics:g:{token}:list:[s:…][u:…]{page}:{limit}
@@ -907,10 +909,11 @@ showing the new value.
 | `POST /customers` · `PATCH` · `DELETE /customers/:id` | customer row | `customers` | `customers.service.ts` |
 | `POST /mechanics` · `PATCH` · `DELETE /mechanics/:id` | mechanic row | `mechanics` | `mechanics.service.ts` |
 | `PATCH /settings` | settings row | `settings` | `settings.service.ts` |
-| `POST /platform/tenants/:id/import` | all four tables | `products`, `customers`, `mechanics`, `settings` (directly, after its own commit) | `tenant-import.service.ts` |
+| `POST /categories` · `DELETE /categories/:name` | category list | `categories` | `categories.service.ts` |
+| `POST /platform/tenants/:id/import` | all five tables | `products`, `categories`, `customers`, `mechanics`, `settings` (directly, after its own commit) | `tenant-import.service.ts` |
 
 These write paths invalidate nothing, because nothing they change is cached:
-- categories and suppliers
+- suppliers
 - shifts and drawer entries
 - quotes: create, update, delete, duplicate, purge
 - parked sales
@@ -939,9 +942,9 @@ Negatives, all in the same spec:
   - The owner decides. Until then they stay live SQL.
 - **`GET /bootstrap` gets no Redis cache.** Neither §4.2 nor §5 assigns one to #32; its body-hash
   `ETag` (#25) stays.
-- **`GET /categories` is not cached**, although §4.2 marks it "1h". Categories are outside #32's
-  list.
-- **No stampede lock** (§5: `SET key NX PX 5000` on a miss). It is not in #32's criteria.
+- **No stampede lock** (§5: `SET key NX PX 5000` on a miss). Not in #32's criteria, and a lock
+  held across a DB read on every miss needs its own design (what a waiter does on timeout, and how
+  it interacts with the generation check) — a follow-up ticket, not a drive-by.
 - **Fail-open on invalidation.** If Redis rejects the generation `SET`, a cached value can outlive
   the write by up to its TTL (≤ 360 s for products, ≤ 66 s for people, ≤ 3960 s for settings).
   It is logged.
@@ -951,10 +954,10 @@ Negatives, all in the same spec:
 - 🔴 **For #55:** the import writes rows with the snapshot's own `updated_at`, often in the past.
   A device whose `?updatedSince=` cursor is already later never sees them. The cache is
   invalidated, but a cache cannot fix the sync cursor.
-- **Separate ticket, pre-existing on `main`:** the import writes its `audit_log` row **after** its
-  transaction commits (`tenant-import.service.ts`). A platform-admin id with no row (for example,
-  an admin deleted while their token is still valid) commits the import and then answers 500 on
-  `audit_log_platform_admin_id_fkey`.
+- **Fixed here (was pre-existing on `main`):** the import wrote its `audit_log` row after its
+  transaction committed, so a platform-admin id with no row committed the import and then answered
+  500. The row is now written on the import's own transaction (`AuditService.log(input, manager)`),
+  so that import rolls back whole and invalidates nothing — pinned by an e2e.
 
 ## Conventions these slices set
 
