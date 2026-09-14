@@ -248,4 +248,63 @@ describe('Platform Realm E2E & Atomic Audit Invariants (#123)', () => {
       await adminDs.query(`DELETE FROM tenants WHERE id = $1`, [tenantId]);
     });
   });
+
+  // Same trick as the createTenant rollback test: a cached '1' lets a token for an admin
+  // that is not in platform_admins past the guard, so the audit INSERT fails its FK.
+  describe('Audit failure rolls back status change and import (AC2)', () => {
+    let tenantId: string;
+    let ghostAdminId: string;
+    let ghostToken: string;
+
+    beforeEach(async () => {
+      const code = `rb-${randomUUID().slice(0, 8)}`;
+      const createRes = await request(app.getHttpServer())
+        .post('/api/v1/platform/tenants')
+        .set('Authorization', `Bearer ${adminToken}`)
+        .send({ code, shopName: 'ร้านทดสอบ โรลแบ็ค', ownerUsername: `owner_${code}`, ownerPassword: 'password123' });
+      expect(createRes.status).toBe(201);
+      tenantId = createRes.body.data.tenantId;
+
+      ghostAdminId = randomUUID();
+      await cache.setex(`pa:${ghostAdminId}:exists`, 60, '1');
+      ghostToken = signJwt(
+        { iss: 'srisurart-pos', aud: 'platform', sub: ghostAdminId, username: 'ghost-admin' },
+        config.jwtPlatformSecret,
+      );
+    });
+
+    afterEach(async () => {
+      await cache.del(`pa:${ghostAdminId}:exists`);
+      for (const table of ['audit_log', 'products', 'devices', 'categories', 'settings', 'users']) {
+        await adminDs.query(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]);
+      }
+      await adminDs.query(`DELETE FROM tenants WHERE id = $1`, [tenantId]);
+    });
+
+    it('leaves tenants.status unchanged when the status-change audit fails', async () => {
+      const res = await request(app.getHttpServer())
+        .patch(`/api/v1/platform/tenants/${tenantId}/status`)
+        .set('Authorization', `Bearer ${ghostToken}`)
+        .send({ status: 'suspended' });
+
+      expect(res.status).toBe(500);
+      const rows = await adminDs.query(`SELECT status FROM tenants WHERE id = $1`, [tenantId]);
+      expect(rows[0].status).toBe('active');
+    });
+
+    it('writes no imported rows when the import audit fails', async () => {
+      const categoryName = `import-cat-${randomUUID().slice(0, 8)}`;
+      const res = await request(app.getHttpServer())
+        .post(`/api/v1/platform/tenants/${tenantId}/import`)
+        .set('Authorization', `Bearer ${ghostToken}`)
+        .send({ __meta: {}, sa_categories: [{ name: categoryName, position: 99 }] });
+
+      expect(res.status).toBe(500);
+      const rows = await adminDs.query(
+        `SELECT 1 FROM categories WHERE tenant_id = $1 AND name = $2`,
+        [tenantId, categoryName],
+      );
+      expect(rows.length).toBe(0);
+    });
+  });
 });

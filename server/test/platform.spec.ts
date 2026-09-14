@@ -72,6 +72,19 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
         expect.arrayContaining(['203.0.113.195']),
       );
     });
+
+    it('drops an IPv6 zone id that Postgres inet would reject', async () => {
+      const managerMock = { query: vi.fn().mockResolvedValue([]) };
+      await auditService.log(managerMock as any, {
+        tenantId: 't1',
+        platformAdminId: 'adm1',
+        action: 'test.action',
+        ip: 'fe80::1%eth0',
+      });
+
+      const params = managerMock.query.mock.calls[0][1] as unknown[];
+      expect(params[9]).toBeNull();
+    });
   });
 
   describe('PlatformAuthGuard', () => {

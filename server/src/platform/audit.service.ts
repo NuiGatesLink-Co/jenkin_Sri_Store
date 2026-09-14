@@ -22,7 +22,9 @@ export class AuditService {
     let cleanIp: string | null = null;
     if (input.ip) {
       const candidate = input.ip.split(',')[0].trim();
-      if (candidate && net.isIP(candidate) !== 0) {
+      // Node accepts an IPv6 zone id (`fe80::1%eth0`); Postgres `inet` does not, and a
+      // failed insert here rolls the whole platform write back.
+      if (candidate && !candidate.includes('%') && net.isIP(candidate) !== 0) {
         cleanIp = candidate;
       }
     }
