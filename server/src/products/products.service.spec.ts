@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ProductsService } from './products.service.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import * as requestContext from '../common/request-context.js';
 
 describe('ProductsService Caching & Reads', () => {
@@ -8,11 +9,17 @@ describe('ProductsService Caching & Reads', () => {
   let managerMock: any;
 
   beforeEach(() => {
+    // A tiny in-memory Redis: enough for `TenantCache`'s GET / SET [EX] [NX].
+    const store = new Map<string, string>();
     redisMock = {
-      get: vi.fn(),
-      set: vi.fn(),
+      store,
+      get: vi.fn(async (k: string) => store.get(k) ?? null),
+      set: vi.fn(async (k: string, v: string, ...args: unknown[]) => {
+        if (args.includes('NX') && store.has(k)) return null;
+        store.set(k, v);
+        return 'OK';
+      }),
       keys: vi.fn(),
-      del: vi.fn(),
     };
     managerMock = {
       query: vi.fn(),
@@ -23,7 +30,7 @@ describe('ProductsService Caching & Reads', () => {
       manager: managerMock,
     } as any);
 
-    service = new ProductsService(redisMock, { log: vi.fn() } as any);
+    service = new ProductsService(new TenantCache(redisMock), { log: vi.fn() } as any);
   });
 
   it('returns cached products when cache hits (fromCache: true)', async () => {
@@ -47,7 +54,12 @@ describe('ProductsService Caching & Reads', () => {
       ],
       total: 1,
     };
-    redisMock.get.mockResolvedValue(JSON.stringify(cachedData));
+    // Populate through a miss first, then prove the second read never queries.
+    managerMock.query.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
+    await service.list({ page: 1, limit: 10 });
+    const listKey = [...redisMock.store.keys()].find((k: string) => k.includes(':list:'))!;
+    redisMock.store.set(listKey, JSON.stringify(cachedData));
+    managerMock.query.mockClear();
 
     const result = await service.list({ page: 1, limit: 10 });
 
@@ -58,7 +70,6 @@ describe('ProductsService Caching & Reads', () => {
   });
 
   it('queries database and populates Redis cache on cache miss (fromCache: false)', async () => {
-    redisMock.get.mockResolvedValue(null);
     managerMock.query
       .mockResolvedValueOnce([{ n: 1 }]) // totals
       .mockResolvedValueOnce([
@@ -86,17 +97,55 @@ describe('ProductsService Caching & Reads', () => {
     expect(result.items[0].id).toBe('p12');
     expect(result.items[0].price).toBe('800.00');
     expect(result.items[0].cost).toBe('500.00');
-    expect(redisMock.set).toHaveBeenCalledWith(
-      expect.stringContaining('t:00000000-0000-4000-8000-000000000001:products:list:'),
-      expect.any(String),
-      'EX',
-      60,
+    const call = redisMock.set.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes(':list:'),
     );
+    expect(call[0]).toMatch(
+      /^t:00000000-0000-4000-8000-000000000001:products:g:[0-9a-f]{16}:list:/,
+    );
+    expect(call[2]).toBe('EX');
+    // 02_API_SCREENS.md §5: 300s ± 60s.
+    expect(call[3]).toBeGreaterThanOrEqual(240);
+    expect(call[3]).toBeLessThanOrEqual(360);
   });
 
-  it('invalidates cache properly', async () => {
-    redisMock.keys.mockResolvedValue(['t:t1:products:list:1', 't:t1:products:item:p1']);
-    await service.invalidateCache('t1');
-    expect(redisMock.del).toHaveBeenCalledWith('t:t1:products:list:1', 't:t1:products:item:p1');
+  it('invalidates by replacing the generation, never with KEYS (#32)', async () => {
+    managerMock.query.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
+    await service.list({ page: 1, limit: 10 });
+    expect((await service.list({ page: 1, limit: 10 })).fromCache).toBe(true);
+
+    await new TenantCache(redisMock).invalidate(
+      '00000000-0000-4000-8000-000000000001',
+      'products',
+    );
+
+    managerMock.query.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
+    expect((await service.list({ page: 1, limit: 10 })).fromCache).toBe(false);
+    expect(redisMock.keys).not.toHaveBeenCalled();
+  });
+
+  it('a reader that read before a commit cannot cache over the invalidation (read-populate race)', async () => {
+    const cache = new TenantCache(redisMock);
+    const tid = '00000000-0000-4000-8000-000000000001';
+    const row = (stock: number) => ({
+      id: 'p1', part_no: 'BP-1', name: 'n', name_th: 'n', category: 'c', brand: 'b',
+      price: '1.00', cost: '1.00', stock, min_stock: 0, compat: null,
+      updated_at: new Date('2026-09-13T00:00:00.000Z'), deleted_at: null,
+    });
+    // The slow reader: it misses, reads stock 10, and while its query is "running" a
+    // writer commits stock 9 and invalidates.
+    managerMock.query
+      .mockImplementationOnce(async () => {
+        await cache.invalidate(tid, 'products');
+        return [{ n: 1 }];
+      })
+      .mockResolvedValueOnce([row(10)]);
+    expect((await service.list({ page: 1, limit: 10 })).items[0].stock).toBe(10);
+
+    // The next reader must not be handed the slow reader's stale page.
+    managerMock.query.mockResolvedValueOnce([{ n: 1 }]).mockResolvedValueOnce([row(9)]);
+    const next = await service.list({ page: 1, limit: 10 });
+    expect(next.fromCache).toBe(false);
+    expect(next.items[0].stock).toBe(9);
   });
 });

@@ -8,13 +8,10 @@ import type { EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
-import {
-  currentRequestContext,
-  onTransactionCommit,
-} from '../common/request-context.js';
+import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
-import { ProductsService } from '../products/products.service.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import {
   MOVEMENT_COLUMNS,
   movementOut,
@@ -96,7 +93,7 @@ const INT4_MAX = 2_147_483_647;
 export class PurchaseOrdersService {
   constructor(
     private readonly docNumbers: DocNumberService,
-    private readonly products: ProductsService,
+    private readonly cache: TenantCache,
     private readonly audit: AuditService,
   ) {}
 
@@ -342,7 +339,7 @@ export class PurchaseOrdersService {
     });
 
     if (touched.length > 0) {
-      onTransactionCommit(() => this.products.invalidateCache(tenantId));
+      this.cache.invalidateAfterCommit(tenantId, 'products');
     }
 
     return {
