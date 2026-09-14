@@ -48,9 +48,6 @@ import {
 import { PurchaseOrdersController } from './purchasing/purchase-orders.controller.js';
 import { PurchasingModule } from './purchasing/purchasing.module.js';
 
-import { PurchasingController } from './purchasing/purchasing.controller.js';
-import { PurchasingModule } from './purchasing/purchasing.module.js';
-
 import { RuntimeConfigService } from './config/runtime-config.service.js';
 
 /** Shared infrastructure (config, logger, Postgres, both Redis, runtime config) — no HTTP. */
@@ -93,7 +90,6 @@ const TENANT_ROUTES = [
   ParkedSalesController,
   BackupController,
   ProductsController,
-  PurchasingController,
   CategoriesController,
   SuppliersController,
   MovementsController,
