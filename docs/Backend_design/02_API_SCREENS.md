@@ -612,6 +612,12 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 * invalidate ต้องทำ**หลัง `COMMIT`** เท่านั้น (ถ้าล้างก่อนแล้ว transaction rollback = cache ค้างข้อมูลเก่า)
 * อย่าใช้ `KEYS` ใน production — ใช้ `SCAN` หรือเก็บ tag set (`SADD t:{tid}:tags:products <key>`)
 
+> **ที่ทำจริง (#32, 2026-09-14):** ไม่ใช้ tag set แต่ใช้ **generation token ต่อ tenant** —
+> key จริงคือ `t:{tid}:products:g:{token}:list:…` / `…:item:{id}` และ invalidate = `SET t:{tid}:products:gen <token ใหม่>`
+> ครั้งเดียว (ไม่มี `KEYS` ไม่มี `SCAN`) เหตุผล: `redis-cache` เป็น `allkeys-lru` ถ้า tag set ถูก evict key ที่มันจดไว้จะค้างและลบไม่ได้อีก
+> ส่วน generation ที่ถูก evict = token สุ่มใหม่ = invalidate ในตัว และ reader อ่าน token **ก่อน** query จึงกัน read-populate race ได้ด้วย
+> ตอนนี้ cache อยู่แค่ `GET /products` และ `GET /products/:id` — ตาราง write path → key และสิ่งที่ยังไม่ทำอยู่ใน `server/README.md` *The server cache (#32)*
+
 ### 5.1 Rate limit ต่อ tenant (ADR-0006) — บังคับ 2 ชั้น คนละหน้าที่
 
 | ชั้น | ที่ไหน | key | กันอะไร |

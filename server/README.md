@@ -764,6 +764,108 @@ ledger's row count across the whole lifecycle.
   recall.** When two tills recall the same bill, one `DELETE … RETURNING` finds it and the other
   gets `404 PARKED_SALE_NOT_FOUND`.
 
+## The server cache (#32)
+
+`src/infra/tenant-cache.service.ts` (`TenantCache`, global via `TenantCacheModule`). Cache-aside
+on `redis-cache`; every Redis failure fails open (the read goes to Postgres, a write is still
+answered).
+
+**What is cached today: `GET /products` and `GET /products/:id`, nothing else.** 300 s ± 60 s
+(`02_API_SCREENS.md §5`; it was a flat 60 s before #32). The response carries `X-Cache: HIT|MISS`.
+Settings, customers, mechanics, categories, report summaries and `/bootstrap` are **not** cached —
+see *Not done* below.
+
+**Keys carry a generation.**
+
+```
+t:{tid}:products:gen                         random token, 1 h ± 5 min
+t:{tid}:products:g:{token}:list:[s:…][n:…][c:…][u:…][a:…]{page}:{limit}
+t:{tid}:products:g:{token}:item:{id}
+```
+
+Invalidating is **one `SET` of a new token**. Nothing is deleted and nothing is scanned: the
+old keys are unreachable at once and expire on their own TTL. `KEYS` is gone from `src/`
+(the test fixture's `clearTenantCache` still uses it; it is not production code).
+
+Why a generation and not §5's tag set (`SADD t:{tid}:tags:products <key>`):
+- 🔴 `redis-cache` is `allkeys-lru`. When Redis evicts a tag set, every key the set listed
+  can still be read, and nothing can find those keys to delete them. When Redis evicts a
+  generation, the next reader creates a new random token, and that invalidates everything.
+  This is also why the token is random and not an `INCR` counter: a counter restarts at 1
+  after eviction and brings back the keys written under 1.
+- 🔴 **The read-populate race.** A reader misses the cache and reads the rows. A writer then
+  commits and invalidates. The reader stores what it read, which is now stale, and that
+  entry would last a whole TTL. To prevent this, `TenantCache.prefix()` is called **before**
+  the query. The reader's late write lands under the token the writer already replaced.
+  Proved by *read-populate race* in `test/cache-invalidation.e2e-spec.ts`, which fails when
+  the prefix is taken after the query.
+
+**Invalidation runs only after commit.** Request-scoped writes call
+`TenantCache.invalidateAfterCommit(tid, 'products')`. That uses `onTransactionCommit`, the
+same hook the BullMQ enqueues use, so "after the transaction" is defined in one place.
+`TransactionInterceptor` runs the hook after `COMMIT` and before the response is sent, so a
+read right after a `201` is already fresh. A rollback (a thrown error, a 409) drops the hook.
+The call is also placed after every refusal check.
+
+The platform import runs on `ADMIN_DATA_SOURCE` in its own transaction, outside any request
+context. There `onTransactionCommit` would run the hook **immediately**, so the import instead
+calls `invalidate()` after `await adminDs.transaction(…)` resolves.
+
+`t:{tid}:status` belongs to `TenantGuard` and `PATCH /platform/tenants/:id/status` (a `DEL`).
+It is a separate key, so the two paths cannot interfere.
+
+### Write path → cache keys
+
+Each row invalidates `t:{tid}:products:gen`, which covers every `list:` and `item:` key of
+that tenant only. Each row has a case in `test/cache-invalidation.e2e-spec.ts`: read twice to
+get a HIT, write, then the next read must be a MISS with the new value.
+
+| Write path | Why | Keys invalidated | Where |
+|---|---|---|---|
+| `POST /products` | new row | `t:{tid}:products:*` (generation) | `products.service.ts` `create` |
+| `PATCH /products/:id` | fields | same | `update` |
+| `DELETE /products/:id` | tombstone | same | `delete` |
+| `POST /products/:id/adjust-stock` | stock | same | `adjustStock` |
+| `POST /purchase-orders/:id/receive` | stock + cost (only when a line matched) | same | `purchase-orders.service.ts` |
+| `POST /sales` | stock | same | `sales.service.ts` `create` |
+| `POST /quotes/:id/convert` | stock (sells through `SalesService.create`) | same | via `POST /sales` |
+| `POST /sales/:id/void` | stock restored | same | `void.service.ts` |
+| `POST /returns` | stock restored | same | `returns.service.ts` |
+| `POST /platform/tenants/:id/import` | products inserted | same (direct, after its own commit) | `tenant-import.service.ts` |
+
+These write paths invalidate nothing, because nothing they change is cached: categories,
+suppliers, customers, mechanics, credit payments, shifts and drawer entries, settings, quotes
+(create, update, delete, duplicate, purge), parked sales, PO create/cancel/delete, and backup
+export. The tenant-status `DEL` is described above.
+
+Negatives, also in that spec:
+- `409 INSUFFICIENT_STOCK` and `409 CREDIT_LIMIT_EXCEEDED` keep the same generation, and the
+  next read is still a HIT.
+- A probe route writes stock, registers the invalidation, and then throws. The generation is
+  unchanged and the rolled-back stock is never served.
+- A sale in tenant A leaves tenant B's generation alone, and B's next read is still a HIT
+  with B's own rows.
+
+### Not done / known limits
+
+- **Only products are cached.** The issue body also asks for settings, customers, mechanics and
+  report summaries; its acceptance criteria do not, and `§5`'s own `reports:summary` row says
+  *"let it expire"*, which contradicts *"a read immediately after a write returns the new value"*.
+  Customers and mechanics have no `§5` key at all. Adding any of them means adding a namespace to
+  `CacheNamespace` and an `invalidateAfterCommit` on every writer of that table (customers and
+  mechanics are also written by sales, returns, voids and credit payments).
+  `GET /bootstrap` keeps its body-hash `ETag` (#25) and gets no Redis cache: nothing in #32's
+  criteria needs one, and it would need every writer of five tables to invalidate it.
+- **No stampede lock** (`§5`: `SET key NX PX 5000` on a miss). Not in #32's criteria.
+- **Fail-open on invalidation.** If Redis rejects the generation `SET`, a cached page can outlive
+  the write by up to its TTL (≤ 360 s).
+- A read that populates the cache **inside a write transaction** would cache uncommitted rows under
+  the current generation, and a rollback would not replace it. No route does this today (only the
+  two `GET` handlers read through the cache); keep it that way.
+- 🔴 **For #55:** the import writes rows with the snapshot's own `updated_at`, often in the past, so a
+  device whose `?updatedSince=` cursor is already later never sees them. The cache is invalidated; the
+  sync cursor is not something a cache can fix.
+
 ## Conventions these slices set
 
 - **Pagination lives in `meta`, not in `data`** (§1.2). A handler returns
