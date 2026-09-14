@@ -1227,10 +1227,12 @@ docker compose -f docker-compose.yml -f ../deploy/compose/monitoring.yml up -d
 `.env`, the same way `POS_APP_PASSWORD`/`REDIS_PASSWORD`/`BULL_BOARD_PASSWORD` already are —
 the stack fails fast if it's unset.
 
-**Wired into the deploy playbook by #121.** `deploy/ansible/deploy.yml` adds `-f monitoring.yml`
-to every compose command, copies `monitoring.yml` to `/opt/pos/` and the `deploy/prometheus/` and
-`deploy/grafana/` trees to `/opt/pos/deploy/` (pruning files the repo no longer has), and brings
-the three services up **after** `/health/ready` passes and `.current_sha` is recorded. A changed
+**Wired into the deploy playbook by #121.** The POS steps of `deploy/ansible/deploy.yml` never load
+`monitoring.yml`. Only **after** `/health/ready` passes and `.current_sha` is recorded does it copy
+`monitoring.yml` to `/opt/pos/` and the `deploy/prometheus/` and `deploy/grafana/` trees to
+`/opt/pos/deploy/` (pruning files the repo no longer has, compared as paths relative to each tree —
+never `realpath` on one side, which deleted every file when run through a symlinked path), pull the
+monitoring images and bring the three services up, all inside one `block`/`rescue`. A changed
 config recreates Prometheus and Grafana — a single-file bind mount keeps the old inode after the
 copy, and the compose config hash does not change. If `127.0.0.1:9090/-/healthy` or
 `127.0.0.1:3000/api/health` does not answer 200, the deploy **warns and still succeeds**: monitoring
@@ -1238,8 +1240,10 @@ is not a gate for the POS. `-e enable_monitoring=false` (or `ENABLE_MONITORING=f
 overlay out and removes containers an earlier deploy left running; toggling it on a VM already
 running that SHA waits for the next release, because the duplicate-release check ends the play.
 While it is on, the VM's `.env` must carry `GRAFANA_ADMIN_PASSWORD` — add it to the
-`DEMO_ENV_FILE` secret and re-run `provision.yml` first — or the first compose command fails
-before anything changes.
+`DEMO_ENV_FILE` secret and re-run `provision.yml` first — or monitoring stays down with a warning
+(the POS release still goes out). Re-running the same `image_tag` stops at the duplicate-release
+check, so a fixed monitoring problem is picked up by the next release, or by deleting
+`/opt/pos/.current_sha` and re-running the tag (which repeats the whole rollout).
 
 🔴 **The bind mounts are `${MONITORING_CONFIG_DIR:-../deploy}/…`.** Relative paths resolve
 against the project directory — `server/` from the repo, but the flat `/opt/pos/` on the VM,

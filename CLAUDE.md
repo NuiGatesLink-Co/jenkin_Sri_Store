@@ -624,12 +624,14 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
 - 🔴 **The stampede lock is on `GET /products` only**, released in `finally`. `TenantGuard` and `byId` were
   measured at 0.008 / 0.026 ms and deliberately left without one — at 1–7 ms the list lock saves duplicate
   Postgres work, not latency.
-- 🔴 **Monitoring never fails a POS deploy.** `deploy.yml` records `/health/ready` and `.current_sha` first; the
-  overlay runs in `block`/`rescue`, force-recreates Prometheus/Grafana when copied config changed, prunes
-  stale dashboards, and `enable_monitoring=false` removes the containers. Not yet run on the VM.
+- 🔴 **Monitoring never fails a POS deploy.** `deploy.yml`'s POS steps use `pos_compose_files` (no
+  `monitoring.yml`); `/health/ready` and `.current_sha` come first, then the copy, prune, pull and `up` of the
+  overlay all run in one `block`/`rescue`. Prune compares `relpath`s on both sides — a one-sided `realpath`
+  deleted every config file when the playbook ran through a symlinked path. Not yet run on the VM.
 - 🔴 **Deploy prerequisite:** `DEMO_ENV_FILE` must gain `ETCD_ROOT_PASSWORD` **and** `GRAFANA_ADMIN_PASSWORD`
-  (strong random values, not `.env.example`'s), then re-run `provision.yml` — otherwise the next Ansible deploy
-  fails at compose interpolation. CI is unaffected.
+  (strong random values, not `.env.example`'s), then re-run `provision.yml`. A missing `ETCD_ROOT_PASSWORD` fails
+  the next Ansible deploy at compose interpolation; a missing Grafana password only leaves monitoring down.
+  CI is unaffected.
 - **Still open:** #138; branch protection on `main` (owner runs 07 §4); no `.github/workflows/deploy.yml` yet.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
