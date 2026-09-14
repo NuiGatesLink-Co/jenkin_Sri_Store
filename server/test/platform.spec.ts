@@ -58,7 +58,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
       expect(mockAdminDs.query).not.toHaveBeenCalled();
     });
 
-    it('cleans proxy IP chain before inserting', async () => {
+    it('stores null for a raw proxy chain (controllers resolve it with clientIp, #132)', async () => {
       const managerMock = { query: vi.fn().mockResolvedValue([]) };
       await auditService.log(managerMock as any, {
         tenantId: 't1',
@@ -67,10 +67,8 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
         ip: '203.0.113.195, 70.41.3.18',
       });
 
-      expect(managerMock.query).toHaveBeenCalledWith(
-        expect.stringContaining('INSERT INTO audit_log'),
-        expect.arrayContaining(['203.0.113.195']),
-      );
+      const params = managerMock.query.mock.calls[0][1] as unknown[];
+      expect(params[9]).toBeNull();
     });
 
     it('drops an IPv6 zone id that Postgres inet would reject', async () => {

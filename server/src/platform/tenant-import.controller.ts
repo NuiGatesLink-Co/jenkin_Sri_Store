@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { PlatformAuthGuard } from './platform-auth.guard.js';
+import { clientIp } from '../common/client-ip.js';
 import {
   SnapshotPayload,
   TenantImportService,
@@ -31,7 +32,7 @@ export class TenantImportController {
     @Body() body: SnapshotPayload,
     @Req() req: AuthenticatedRequest,
   ) {
-    const ip = (req.headers['x-forwarded-for'] as string) || req.ip;
+    const ip = clientIp(req) ?? undefined;
     return this.importService.importSnapshot(
       id,
       body,
