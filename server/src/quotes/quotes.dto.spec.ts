@@ -1,0 +1,93 @@
+import { BadRequestException } from '@nestjs/common';
+import {
+  parseQuoteConvert,
+  parseQuoteCreate,
+  parseQuoteFilter,
+  parseQuotePatch,
+} from './quotes.dto.js';
+
+const body = (over: Record<string, unknown> = {}) => ({
+  subtotal: '150.00',
+  total: '150.00',
+  items: [{ productId: 'p1', name: 'x', qty: 1, price: '150.00' }],
+  ...over,
+});
+
+describe('parseQuoteCreate', () => {
+  it('reads a Checkout quote, defaulting discount and keeping an empty customer name', () => {
+    const q = parseQuoteCreate(body({ customerName: '' }));
+    expect(q.discountSatang).toBe(0);
+    expect(q.customerName).toBe('');
+    expect(q.validDays).toBeNull();
+    expect(q.items[0]).toEqual({
+      lineNo: 1,
+      productId: 'p1',
+      name: 'x',
+      qty: 1,
+      priceSatang: 15000,
+    });
+  });
+
+  it('keeps a line with no product as null', () => {
+    const q = parseQuoteCreate(
+      body({ items: [{ name: 'special', qty: 1, price: '150.00' }] }),
+    );
+    expect(q.items[0].productId).toBeNull();
+  });
+
+  it.each([
+    ['no lines', { items: [] }],
+    ['a negative price', { items: [{ name: 'x', qty: 1, price: '-1.00' }] }],
+    ['a zero qty', { items: [{ name: 'x', qty: 0, price: '1.00' }] }],
+    ['a discount past the subtotal', { discount: '200.00' }],
+    ['validDays of 0', { validDays: 0 }],
+    ['a converted status', { status: 'converted' }],
+  ])('refuses %s', (_label, over) => {
+    expect(() => parseQuoteCreate(body(over))).toThrow(BadRequestException);
+  });
+});
+
+describe('parseQuotePatch', () => {
+  it('takes header text only', () => {
+    expect(parseQuotePatch({ notes: 'n', customerPhone: null })).toEqual({
+      notes: 'n',
+      customerPhone: null,
+    });
+  });
+
+  it.each(['status', 'convertedSaleId', 'items', 'total'])(
+    'refuses %s',
+    (field) => {
+      expect(() => parseQuotePatch({ [field]: 'x' })).toThrow(
+        BadRequestException,
+      );
+    },
+  );
+});
+
+describe('parseQuoteConvert', () => {
+  it('reads the sale party', () => {
+    expect(
+      parseQuoteConvert({ id: 's1', paymentMethod: 'เงินสด' }),
+    ).toMatchObject({
+      id: 's1',
+      paymentMethod: 'เงินสด',
+      overrideCreditLimit: false,
+    });
+  });
+
+  it('refuses lines or money in the body', () => {
+    expect(() =>
+      parseQuoteConvert({ id: 's1', paymentMethod: 'เงินสด', items: [] }),
+    ).toThrow(BadRequestException);
+  });
+});
+
+describe('parseQuoteFilter', () => {
+  it('maps all and blank to no filter, and refuses anything else', () => {
+    expect(parseQuoteFilter('all')).toBeUndefined();
+    expect(parseQuoteFilter(undefined)).toBeUndefined();
+    expect(parseQuoteFilter('expired')).toBe('expired');
+    expect(() => parseQuoteFilter('cancelled')).toThrow(BadRequestException);
+  });
+});

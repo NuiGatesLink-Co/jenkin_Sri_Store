@@ -6,6 +6,11 @@ export interface PaginationMeta {
   page: number;
   limit: number;
   totalPages: number;
+  /**
+   * Keyset cursor for a sync read (#16 `GET /products?updatedSince=`): the query
+   * parameters that fetch the rows after this page. Absent on ordinary lists.
+   */
+  nextCursor?: { updatedSince: string; afterId: string } | null;
 }
 
 /**
@@ -21,13 +26,19 @@ export class Paginated<T> {
 
   constructor(
     readonly items: T[],
-    page: { total: number; page: number; limit: number },
+    page: {
+      total: number;
+      page: number;
+      limit: number;
+      nextCursor?: PaginationMeta['nextCursor'];
+    },
   ) {
     this.meta = {
       total: page.total,
       page: page.page,
       limit: page.limit,
       totalPages: Math.max(1, Math.ceil(page.total / page.limit)),
+      ...(page.nextCursor !== undefined ? { nextCursor: page.nextCursor } : {}),
     };
   }
 }

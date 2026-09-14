@@ -140,6 +140,10 @@ group ด้วยคอลัมน์นี้ การยุบสองค�
 
 ## ยังไม่เคาะ
 
+* [ ] **(#55, เพิ่ม 2026-09-14 จาก #16) read-back window ของ `?updatedSince=`** — write ที่ประทับ `updated_at = now()`
+      (เวลาเริ่ม transaction) แล้ว commit ช้า อาจ commit หลังจาก client เลื่อน cursor ผ่านเวลานั้นไปแล้ว → แถวนั้นไม่ถูกดึงเลย
+      server แก้เรื่อง tie/ความละเอียดของ cursor แล้ว (keyset `(updated_at, id)` + `meta.nextCursor`) แต่ยังไม่เคาะว่า
+      client ต้องถอย cursor ย้อนหลังกี่วินาที หรือ server ต้องเปลี่ยนวิธีประทับเวลา
 * [ ] cache invalidation ฝั่ง client — Drift ที่ค้างอยู่จะถือว่าหมดอายุเมื่อไหร่ (TTL? ตอน login? ตอน sync เสร็จ?)
 * [ ] อ่านตอน Online อ่านจาก Drift ก่อนแล้ว refresh (stale-while-revalidate) หรือรอ server เสมอ
 * [ ] **ถามเจ้าของโปรเจกต์:** เมื่อ server รับบิลแล้ว แอปต้องเชื่อตัวเลขของ server และทับของในเครื่อง
