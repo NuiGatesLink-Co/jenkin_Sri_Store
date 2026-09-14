@@ -625,6 +625,34 @@ the CP number → the row → the reduced balance.
   patch them from a stale read. `mechanics.updated_at` also moves and is not returned;
   the client stamps its own, as it does after every write.
 
+## The catalogue (#16)
+
+`src/products/` — products, categories, suppliers, `movements`, ported from
+`products_repository.dart` / `suppliers_repository.dart` / `movements_repository.dart`.
+Reads are open to any tenant token; every write is `manager`/`owner`, both device roles,
+`Idempotency-Key` mandatory (`02_API_SCREENS.md §4`). `test/catalogue.e2e-spec.ts` replays
+every case of `frontend/test/products_repository_test.dart` at the HTTP seam.
+
+- **Products are soft-deleted** (`01_DATABASE.md §10`); every read hides tombstones except
+  `?updatedSince=`, which is the sync read and must carry them. That read is ordered
+  `updated_at ASC, id ASC`, so the last row of a page is a cursor that skips nothing.
+- **`?partNo=` is exact**; `?search=` puts the predicate on `SEARCH_EXPRESSION` — the exact
+  expression `idx_products_search` is built on, which the e2e proves with `EXPLAIN` — then
+  rechecks `part_no`/`name`/`name_th` so matching stays what the screens do (no `compat`).
+- **A part number is unique case-insensitively among live products** (`409 DUPLICATE_PART_NO`,
+  `รหัสอะไหล่นี้มีอยู่แล้ว`), serialised by an advisory lock on the lower-cased number — the
+  unique index alone is case-sensitive. A tombstone's number is free to reuse.
+- **`adjust-stock` clamps at zero** (`01_DATABASE.md §7.6`) **after** validating the body: an
+  integer `delta`, a `type` of `adjustment-in`/`adjustment-out` whose direction matches the sign,
+  and a result that fits `INT`. The `movements` row keeps the requested `delta` beside the clamped
+  `stock_after`, as the Dart repository does. One `stock.adjust` audit row (#43). It locks one
+  product row and nothing else, so it cannot join the sale path's lock order.
+- **Categories are hard-deleted with no foreign key** from `products.category`; an orphaned name
+  renders through `catColor`'s hash fallback. `GET /categories` answers `[{name, color}]` from
+  one query, and stands the five seed names in when the table is empty, as the Dart repository.
+- `PATCH /products/:id` never reads `stock` — stock moves only through writes that log a movement.
+- Product money is now a string on the wire (`price`/`cost`, §1.1); it was a number before #16.
+
 ## Conventions these slices set
 
 - **Pagination lives in `meta`, not in `data`** (§1.2). A handler returns
