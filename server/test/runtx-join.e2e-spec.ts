@@ -222,7 +222,22 @@ describe('runTx joins the open transaction instead of taking a second connection
 
   it('POST /sales/:id/void: one pos_app transaction while parked; two query runners, one after the other — the PIN read, then claim + void → byId (tx.5)', async () => {
     const saleId = await ringUp();
-    const runners = vi.spyOn(ds, 'createQueryRunner');
+    // Records each runner's creation and release, in order.
+    const events: string[] = [];
+    const original = ds.createQueryRunner.bind(ds);
+    vi.spyOn(ds, 'createQueryRunner').mockImplementation(
+      (...args: Parameters<DataSource['createQueryRunner']>) => {
+        const n = events.filter((e) => e.startsWith('create')).length + 1;
+        events.push(`create${n}`);
+        const qr = original(...args);
+        const release = qr.release.bind(qr);
+        qr.release = async () => {
+          events.push(`release${n}`);
+          return release();
+        };
+        return qr;
+      },
+    );
 
     const { most, pending } = await whileParked(
       `SELECT id FROM sales WHERE tenant_id = $1::uuid AND id = $2 FOR UPDATE`,
@@ -236,10 +251,10 @@ describe('runTx joins the open transaction instead of taking a second connection
 
     const result = await pending;
     // tx.5 (#154): the manager-PIN read commits and returns its runner before argon2 and
-    // before the claim, so the request asks for two, one after the other (`voidSale` awaits
-    // `authorise` before `runIdempotent`). `most` above saw one transaction while the void
-    // was parked on the sale lock, and a third runner would mean `byId` stopped joining.
-    expect(runners).toHaveBeenCalledTimes(2);
+    // before the claim, so the request asks for two, the first released before the second is
+    // created. `most` above saw one transaction while the void was parked on the sale lock,
+    // and a third runner would mean `byId` stopped joining.
+    expect(events).toEqual(['create1', 'release1', 'create2', 'release2']);
     expect(result.status).toBe(200);
     expect(result.body.data.voided).toBe(true);
     // `byId` ran after the lock: it read the uncommitted void on the same connection.

@@ -1,12 +1,17 @@
 import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { DataSource, type EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service.js';
+import type { Logger } from 'pino';
 import { AUDIT_DATA_SOURCE } from '../infra/db.module.js';
+import { LOGGER } from '../infra/logger.provider.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { verifyPassword } from '../common/password.js';
-import { currentRequestContext } from '../common/request-context.js';
+import {
+  currentRequestContext,
+  hasOpenTransaction,
+} from '../common/request-context.js';
 import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
@@ -51,13 +56,19 @@ function mayVoid(role: string | undefined): boolean {
 }
 
 /**
- * Proof that `VoidService.authorise` passed for this actor. Exported as a type only, and
- * the private member makes it nominal, so nothing outside this file can build one and
- * `void` cannot be reached without the PIN check.
+ * Proof that `VoidService.authorise` passed for this actor, this bill and this tenant.
+ * Exported as a type only, and the private member makes it nominal, so nothing outside this
+ * file can build one. The type cannot tie it to a bill, so `voidIn` checks `saleId` and
+ * `tenantId` at run time: a proof for bill A cannot void bill B.
  */
 class AuthorisedVoid {
+  // nominal brand: a structural look-alike object literal does not type-check
   private readonly pinChecked = true;
-  constructor(readonly actor: VoidActor) {}
+  constructor(
+    readonly actor: VoidActor,
+    readonly saleId: string,
+    readonly tenantId: string,
+  ) {}
 }
 export type { AuthorisedVoid };
 
@@ -79,6 +90,7 @@ export class VoidService {
     private readonly rateLimit: RateLimitService,
     private readonly cache: TenantCache,
     private readonly tenants: TenantService,
+    @Inject(LOGGER) private readonly logger: Logger,
   ) {}
 
   /**
@@ -95,6 +107,10 @@ export class VoidService {
     authorised: AuthorisedVoid,
   ): Promise<SaleWithItems> {
     const { tenantId, manager } = currentRequestContext();
+    if (authorised.saleId !== saleId || authorised.tenantId !== tenantId) {
+      // A programming error, not a client one: the PIN was checked for another bill or shop.
+      throw new Error('AuthorisedVoid does not match the bill and tenant being voided');
+    }
     const { actor } = authorised;
 
     // Locked, because two clerks voiding the same bill would otherwise both restore
@@ -350,8 +366,9 @@ export class VoidService {
    * staircase. So, strictly in sequence:
    *   1. one short `runTx` reads the tenant and `pin_hash` (`users` is under RLS, so the
    *      read needs the tenant scope), commits, and gives its connection back;
-   *   2. the role check, the per-user PIN rate limit (Redis), the missing-PIN check —
-   *      the same three refusals in the same order they had inside the transaction;
+   *   2. the role check, the per-user PIN rate limit (an atomic Redis `consumeAttempt`,
+   *      counted before the verify), the missing-PIN check — the same three refusals in the
+   *      same order they had inside the transaction;
    *   3. `verifyPassword`, with no transaction and no connection held.
    *
    * Safe because the PIN is an **authorisation, not an invariant**: nothing about the bill
@@ -363,8 +380,15 @@ export class VoidService {
    * stored 200 — and a replay with the right PIN spends one argon2 verify before replaying.
    */
   async authorise(saleId: string, actor: VoidActor): Promise<AuthorisedVoid> {
+    // Called inside a transaction, argon2 below would silently hold its connection again —
+    // exactly what this method exists to avoid, and a nested `runTx` here would only join.
+    if (hasOpenTransaction()) {
+      throw new Error(
+        'VoidService.authorise must run with no transaction open: argon2 would hold its connection',
+      );
+    }
     const { tenantId, pinHash } = await this.tenants.runTx(() =>
-      this.pinHashIn(actor),
+      this.readTenantAndPinHash(actor),
     );
     const deny = async (reason: string): Promise<HttpException> => {
       await this.auditDenial(tenantId, actor, saleId, reason);
@@ -373,9 +397,12 @@ export class VoidService {
 
     if (!mayVoid(actor.role)) throw await deny('role');
 
-    // Per-user PIN brute-force defense (#44, OWASP A07)
+    // Per-user PIN brute-force defense (#44, OWASP A07). 🔴 Counted BEFORE the verify, in one
+    // atomic step (#154 review, B1): check-then-increment was bounded only by the pool while
+    // argon2 ran inside the claim's transaction; out of it, 60 concurrent guesses all passed the
+    // check and all reached argon2. Now the sixth concurrent guess is a 429 whatever the pool.
     const pinKey = `void:pin:${tenantId}:${actor.userId}`;
-    const pinStatus = await this.rateLimit.getFailureStatus(pinKey, 5, 300);
+    const pinStatus = await this.rateLimit.consumeAttempt(pinKey, 5, 300);
     if (!pinStatus.allowed) {
       throw new HttpException(
         {
@@ -387,15 +414,19 @@ export class VoidService {
       );
     }
 
-    if (!pinHash) throw await deny('no-pin');
+    if (!pinHash) {
+      // A user with no PIN set is not guessing: give the attempt back, so they keep getting
+      // the 403 that says so rather than a lockout after five tries.
+      await this.rateLimit.refundAttempt(pinKey, 300);
+      throw await deny('no-pin');
+    }
     if (!actor.pin || !(await verifyPassword(actor.pin, pinHash))) {
-      await this.rateLimit.recordFailure(pinKey, 300);
       throw await deny('pin');
     }
 
     // Clear failed PIN counter on success
     await this.rateLimit.clearKey(pinKey, 300);
-    return new AuthorisedVoid(actor);
+    return new AuthorisedVoid(actor, saleId, tenantId);
   }
 
   /**
@@ -403,7 +434,7 @@ export class VoidService {
    * `pin_hash` — the only row it reads. A role that may not void is refused before the
    * hash matters, so none is read for one.
    */
-  private async pinHashIn(
+  private async readTenantAndPinHash(
     actor: VoidActor,
   ): Promise<{ tenantId: string; pinHash: string | null }> {
     const { tenantId, manager } = currentRequestContext();
@@ -453,9 +484,14 @@ export class VoidService {
         [tenantId, actor.userId, actor.deviceId, saleId, JSON.stringify({ reason })],
       );
       await qr.commitTransaction();
-    } catch {
+    } catch (err) {
       // The refusal itself is what matters; the log is best-effort. Failing to write
-      // it must not turn a 403 into a 500.
+      // it must not turn a 403 into a 500 — but a lost row must not be silent either
+      // (#154 review: one of 150 went missing when this 2-connection pool timed out).
+      this.logger.error(
+        { err, tenantId, saleId, reason },
+        'sale.void.denied audit row was not written',
+      );
       if (qr.isTransactionActive) await qr.rollbackTransaction().catch(() => {});
     } finally {
       if (!qr.isReleased) await qr.release().catch(() => {});

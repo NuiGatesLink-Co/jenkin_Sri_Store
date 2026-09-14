@@ -262,8 +262,13 @@ voidSale(@Param('id') id: string, @Body() body: unknown, @Req() req: Authenticat
   `idempotencyParamsOf` (a bad key is still a 400 first) → `VoidService.authorise` (a short
   `runTx` reads `pin_hash` and commits; then role, PIN rate limit and missing-PIN refusals in
   their old order; then argon2 `verifyPassword` with **no transaction and no connection held**)
-  → `runIdempotent(… VoidService.void …)`. Strictly sequential, never `Promise.all`. `void` takes
-  the `AuthorisedVoid` that only `authorise` can build, so it cannot be reached without the PIN.
+  → `runIdempotent(… VoidService.void …)`. Strictly sequential, never `Promise.all`; `authorise`
+  throws if called with a transaction open. `void` takes the `AuthorisedVoid` that only
+  `authorise` can build, bound to that bill and tenant (checked at the top of the void).
+  🔴 **The PIN lockout is `consumeAttempt`** (one atomic Redis INCR, counted before argon2), not
+  check-then-increment: with argon2 out of the transaction nothing else bounds concurrent guesses —
+  the review measured 60 of 60 concurrent wrong PINs reaching argon2 before the fix, 5 after
+  (`test/void-pin-burst.e2e-spec.ts`). A no-PIN refusal refunds its attempt, so it is never a lockout.
   The PIN is an authorisation, not an invariant: nothing about the bill is read before the claim,
   and the lock order inside the void is unchanged. `idempotency-routes.spec.ts` allows this
   whole-body shape for `SalesController.voidSale` alone. **Consequence:** a done key no longer

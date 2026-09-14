@@ -642,7 +642,9 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   `refundAttempt`s only its own IP attempt (never clears the IP bucket — that was username spraying) and clears
   the username bucket `auth:user:<tenant>:<username>` (tokenless backoffice logins share `-`). Keys are
   `rl:<sha256>:<window>` — the old character-replacing sanitiser made equal-length Thai usernames collide.
-  `AuthController` uses `clientIp(req)`. **Still check-then-increment:** the void manager-PIN path.
+  `AuthController` uses `clientIp(req)`. The void manager-PIN path uses `consumeAttempt` too since #154:
+  once tx.5 moved argon2 out of the claim's transaction, nothing bounded its old check-then-increment
+  (60 of 60 concurrent wrong PINs reached argon2); `test/void-pin-burst.e2e-spec.ts` pins 5.
 - 🔴 **The stampede lock is on `GET /products` only**, released in `finally`. `TenantGuard` and `byId` were
   measured at 0.008 / 0.026 ms and deliberately left without one — at 1–7 ms the list lock saves duplicate
   Postgres work, not latency.
