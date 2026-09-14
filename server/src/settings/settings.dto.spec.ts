@@ -41,7 +41,9 @@ describe('settings.dto', () => {
   });
 
   it('throws on invalid taxRate', () => {
-    expect(() => parseSettingsPatch({ taxRate: -5 })).toThrow("Field 'taxRate' must be a number >= 0");
+    expect(() => parseSettingsPatch({ taxRate: -5 })).toThrow("Field 'taxRate' must be a number between 0 and 100");
+    expect(() => parseSettingsPatch({ taxRate: 105 })).toThrow("Field 'taxRate' must be a number between 0 and 100");
+    expect(() => parseSettingsPatch({ taxRate: 7.123 })).toThrow("Field 'taxRate' must have at most 2 decimal places");
   });
 
   it('throws on non-integer quoteValidDays', () => {

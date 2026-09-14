@@ -108,6 +108,7 @@ describe('bootstrap and settings (e2e)', () => {
       .set(auth());
 
     expect(cold.status).toBe(200);
+    expect(cold.headers['cache-control']).toBe('private, no-cache');
     expect(cold.headers.etag).toBeDefined();
     expect(cold.body.data).toMatchObject({
       products: expect.any(Array),
@@ -127,7 +128,23 @@ describe('bootstrap and settings (e2e)', () => {
       .set('If-None-Match', etag);
 
     expect(repeat.status).toBe(304);
+    expect(repeat.headers['cache-control']).toBe('private, no-cache');
+    expect(repeat.headers.etag).toBe(etag);
     expect(repeat.text).toBe('');
+  });
+
+  it('PATCH /settings rejects taxRate > 100 or with > 2 decimal places', async () => {
+    const over100 = await request(app.getHttpServer())
+      .patch('/api/v1/settings')
+      .set(auth())
+      .send({ taxRate: 150 });
+    expect(over100.status).toBe(400);
+
+    const overDecimals = await request(app.getHttpServer())
+      .patch('/api/v1/settings')
+      .set(auth())
+      .send({ taxRate: 7.123 });
+    expect(overDecimals.status).toBe(400);
   });
 
   it('changing any entity changes the ETag of /bootstrap', async () => {
