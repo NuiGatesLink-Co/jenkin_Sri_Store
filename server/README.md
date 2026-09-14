@@ -195,6 +195,7 @@ src/documents/           document numbers: RC01-2569-08-0042, per device per mon
 src/sales/               POST /sales — the sale transaction (#20)
 src/returns/             POST /returns — the credit note (#22)
 src/shifts/              the cash drawer: shifts, entries, the shift_id stamp (#28)
+src/devices/             /devices: enrol (code), list, retire — closes the drawer (#144)
 src/db/migrations/       the schema (27 tables, indexes, pg_trgm) + RLS/grants — the only source of DDL
 src/db/data-source.ts    owner-role DataSource with the static MIGRATIONS list
 src/db/migrate.ts        up | down | status                → node dist/db/migrate.js (compose `migrate` job)
@@ -642,10 +643,10 @@ device's current drawer* until the next open archives it, exactly as
   `'เงินสด'` only (#100); a transfer or tab-deduction credit note still stamps null with
   no drawer open (`currentShiftIdFor`). `shift_id`
   stays nullable in the schema: imported rows are legitimately null.
-- `closeForRetirement()` is the operation `POST /devices/:id/retire` (#6) calls to
-  close a machine's drawer in the same transaction that stamps `retired_at`. The
-  endpoint does not exist yet, so `test/shifts.e2e-spec.ts` mounts the call on a probe
-  route rather than shipping it untested. **It archives as well as closes**: normally the
+- `closeForRetirement()` is the operation `POST /devices/:id/retire` (#144) calls to
+  close a machine's drawer in the same transaction that stamps `retired_at` — see
+  *Devices* below; `test/shifts.e2e-spec.ts` exercises it through that endpoint (the
+  probe route #28 mounted is gone). **It archives as well as closes**: normally the
   device's *next* open archives its drawer, but a retired device never opens again, so an
   active row would be stranded — `history()` (`NOT is_active`) would hide that day's
   takings forever while `current()` showed a drawer nothing could close.
@@ -659,6 +660,52 @@ device's current drawer* until the next open archives it, exactly as
   settling his tab in cash is money in the drawer that no sale accounts for. Sum
   `credit_payments WHERE shift_id = … AND payment_method = 'เงินสด'`; the transfers must
   not be counted, which is what that column exists for.
+
+## Devices (#144)
+
+ADR-0004 *"การผูกเครื่อง"*. **`owner` only** on all three routes (ADR-0004 keeps it there until the
+shop says whether a manager may move the till), from either device role or a session with no
+device token. Both writes take an `Idempotency-Key`.
+
+- **`POST /devices` `{label, role}` → `201 {device, enrolCode}`.** The server picks the id
+  (`newId('dv')`) and `device_no`; anything else in the body is ignored. `device_no` is
+  `max + 1` over every row **including retired ones**, under a per-tenant
+  `pg_advisory_xact_lock`, so a number — and its receipt series — is never handed out twice.
+  The enrolment code is 8 upper-case hex characters, stored only as its SHA-256, valid 15
+  minutes (ADR-0004's proposal; still an owner question) and single-use. The browser trades it
+  at the pre-existing `POST /auth/device` for the device token; nothing about that endpoint
+  changed. A second live `pos` is `409 POS_DEVICE_EXISTS` (pre-check, with a
+  `one_pos_per_tenant` 23505 backstop); number 100 is `409 DEVICE_NO_EXHAUSTED`. Audit
+  `device.create` — never the code. ⚠️ The idempotency layer stores the handler's response,
+  so the plaintext code sits in `idempotency_keys` / the Redis replay cache for the key's
+  lifetime; it is single-use and dead after 15 minutes, which is why that was accepted.
+- **`GET /devices`** — every device, retired included, by `device_no`. Never a hash.
+- **`POST /devices/:id/retire` `{physicalCash?}` → `200 {device, shift}`.** One transaction:
+  1. the device row **`FOR NO KEY UPDATE`** — `404 DEVICE_NOT_FOUND` (also another shop's,
+     via RLS) or `409 DEVICE_ALREADY_RETIRED`;
+  2. `ShiftsService.closeForRetirement` — the drawer row **`FOR UPDATE`**, which waits for any
+     sale / void / refund / credit payment holding it `FOR SHARE`. An open drawer with no
+     `physicalCash` is `409 PHYSICAL_CASH_REQUIRED` (`details {shiftId}`), never a defaulted 0.
+     A drawer closed but still `is_active` is archived with its own count kept;
+  3. `retired_at = now()`, outstanding enrolment code cleared;
+  4. audit `device.retire` (shift id + counted cash) on the same manager, so a failed audit
+     rolls the retirement back.
+
+  🔴 **Lock order is devices → shifts.** `ShiftsService.open` now reads the device row
+  `FOR SHARE` before it locks the drawer and refuses a retired device with
+  `403 DEVICE_ROLE_FORBIDDEN`: the retired till's access token lives up to 15 minutes
+  (ADR-0009, no denylist), and a drawer opened in that window is the stranded shift retirement
+  exists to prevent. Nothing on the money path locks `devices` (document numbers read it
+  unlocked, and no table has a foreign key to it), so the drawer's `FOR SHARE` readers still
+  cannot cycle with an exclusive locker. `NO KEY` so a future FK to `devices` (which takes
+  `FOR KEY SHARE`) is not blocked by a retirement.
+- **After the commit** the device token is refused by `POST /auth/token` (401), its refresh
+  token by `/auth/refresh` (401, ADR-0009), and the device can issue no document number and open
+  no drawer. `test/devices.e2e-spec.ts` walks enrol → `/auth/device` → login (`did`/`drole` in
+  the JWT) → retire → login and refresh refused. An already-issued access token still *reads*
+  until it expires — by ADR-0009's design.
+- **Not built:** re-issuing a code for an existing device (a lost token is a new device, per
+  ADR-0004), changing a label, or any client screen.
 
 ## Mechanic credit payments (#24)
 

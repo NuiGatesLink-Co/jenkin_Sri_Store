@@ -1,21 +1,6 @@
-import {
-  Body,
-  Controller,
-  HttpCode,
-  Module,
-  Post,
-  UseGuards,
-  type INestApplication,
-  type MiddlewareConsumer,
-  type NestModule,
-} from '@nestjs/common';
+import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
-import { TenantGuard } from '../src/common/guards/tenant.guard.js';
-import { toSatang } from '../src/common/money.js';
-import { RequestContextMiddleware } from '../src/common/request-context.middleware.js';
-import { ShiftsModule } from '../src/shifts/shifts.module.js';
-import { ShiftsService } from '../src/shifts/shifts.service.js';
 import {
   accessToken,
   createTestApp,
@@ -23,38 +8,6 @@ import {
   seedProduct,
   type TenantFixture,
 } from './support/fixture.js';
-
-/**
- * `POST /devices/:id/retire` belongs to #6 and does not exist yet, but ADR-0004 makes
- * closing that device's open shift part of the same transaction, so #28 owns the
- * operation. This mounts it on a route so the operation is exercised the way the real
- * endpoint will exercise it, rather than shipped untested against a future caller.
- */
-@Controller('test-retire')
-@UseGuards(TenantGuard)
-class RetireProbeController {
-  constructor(private readonly shifts: ShiftsService) {}
-
-  @Post()
-  @HttpCode(200)
-  retire(@Body() body: { deviceId: string; physicalCash: string }) {
-    return this.shifts.closeForRetirement(
-      body.deviceId,
-      toSatang(body.physicalCash, 'physicalCash'),
-    );
-  }
-}
-
-@Module({
-  imports: [ShiftsModule],
-  controllers: [RetireProbeController],
-  providers: [RequestContextMiddleware],
-})
-class RetireProbeModule implements NestModule {
-  configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(RequestContextMiddleware).forRoutes(RetireProbeController);
-  }
-}
 
 // #28 acceptance suite. Every case in `frontend/lib/data/repositories/shifts_repository.dart`
 // reproduced at the HTTP seam, plus the two rules the Dart version has no concept of:
@@ -94,7 +47,7 @@ describe('shifts and the cash drawer (e2e)', () => {
   };
 
   beforeAll(async () => {
-    ({ app, admin, cache } = await createTestApp([RetireProbeModule]));
+    ({ app, admin, cache } = await createTestApp());
   });
 
   beforeEach(async () => {
@@ -387,23 +340,37 @@ describe('shifts and the cash drawer (e2e)', () => {
     expect(stock[0].stock).toBe(10);
   });
 
-  it('retiring a device closes the shift it left open, and is a no-op otherwise', async () => {
-    const retire = (deviceId: string, physicalCash: string) =>
-      request(app.getHttpServer())
-        .post('/api/v1/test-retire')
-        .set('Authorization', `Bearer ${posToken}`)
-        .send({ deviceId, physicalCash });
+  // #144: through the real `POST /devices/:id/retire`, which replaced the probe controller
+  // #28 mounted here. `test/devices.e2e-spec.ts` covers the endpoint itself; these cases
+  // pin what retirement does to the drawer.
+  const ownerToken = () =>
+    accessToken({
+      tenantId: TENANT,
+      userId: fixture.userId,
+      role: 'owner',
+      deviceId: fixture.backofficeDeviceId,
+      deviceRole: 'backoffice',
+    });
 
+  const retire = (deviceId: string, body: Record<string, unknown>) =>
+    request(app.getHttpServer())
+      .post(`/api/v1/devices/${deviceId}/retire`)
+      .set('Authorization', `Bearer ${ownerToken()}`)
+      .set('Idempotency-Key', `k-retire-${++keySeq}-${Date.now()}`)
+      .send(body);
+
+  it('retiring a device closes the shift it left open, and is a no-op otherwise', async () => {
     // Nothing open on the backoffice machine: nothing to close, and not an error.
-    const nothing = await retire(fixture.backofficeDeviceId, '0.00');
+    const nothing = await retire(fixture.backofficeDeviceId, {});
     expect(nothing.status).toBe(200);
-    expect(nothing.body.data).toBeNull();
+    expect(nothing.body.data.shift).toBeNull();
+    expect(nothing.body.data.device.retiredAt).not.toBeNull();
 
     const opened = await post('/open', { startingCash: '1000.00' });
-    const closed = await retire(fixture.posDeviceId, '1750.25');
+    const closed = await retire(fixture.posDeviceId, { physicalCash: '1750.25' });
     expect(closed.status).toBe(200);
-    expect(closed.body.data.id).toBe(opened.body.data.id);
-    expect(closed.body.data.physicalCash).toBe('1750.25');
+    expect(closed.body.data.shift.id).toBe(opened.body.data.id);
+    expect(closed.body.data.shift.physicalCash).toBe('1750.25');
 
     const row = await shiftRow(opened.body.data.id);
     expect(row.closed_at).not.toBeNull();
@@ -413,7 +380,15 @@ describe('shifts and the cash drawer (e2e)', () => {
     // while `current()` showed a drawer nothing could close. That is exactly the day
     // ADR-0004 wants preserved.
     expect(row.is_active).toBe(false);
-    expect(closed.body.data.isActive).toBe(false);
+    expect(row.auto_archived).toBe(false);
+    expect(closed.body.data.shift.isActive).toBe(false);
+
+    // The device row and the drawer moved in the same transaction.
+    const device = await admin.query(
+      `SELECT retired_at FROM devices WHERE tenant_id = $1::uuid AND id = $2`,
+      [TENANT, fixture.posDeviceId],
+    );
+    expect(device[0].retired_at).not.toBeNull();
 
     const history = await get('/history');
     expect(history.body.data.map((sh: { id: string }) => sh.id)).toContain(
@@ -421,25 +396,43 @@ describe('shifts and the cash drawer (e2e)', () => {
     );
   });
 
+  it('a drawer closed but not yet archived is archived by retirement, its count kept', async () => {
+    const opened = await post('/open', { startingCash: '1000.00' });
+    await post('/close', { physicalCash: '1300.00' });
+
+    // Closed tonight, retired before tomorrow's open: nothing would ever archive it.
+    const res = await retire(fixture.posDeviceId, { physicalCash: '9999.00' });
+    expect(res.status).toBe(200);
+    expect(res.body.data.shift.id).toBe(opened.body.data.id);
+    // The counted cash is the close's, not the retirement body's.
+    expect(res.body.data.shift.physicalCash).toBe('1300.00');
+
+    const row = await shiftRow(opened.body.data.id);
+    expect(row.is_active).toBe(false);
+    expect(row.auto_archived).toBe(false);
+  });
+
   it('a replacement pos device starts clean after the old one is retired', async () => {
     const oldDrawer = await post('/open', { startingCash: '1000.00' });
     await post('/current/entries', { type: 'in', amount: '250.00', note: 'ช่างจ่ายหนี้' });
-    await request(app.getHttpServer())
-      .post('/api/v1/test-retire')
-      .set('Authorization', `Bearer ${posToken}`)
-      .send({ deviceId: fixture.posDeviceId, physicalCash: '1250.00' });
-    await admin.query(
-      `UPDATE devices SET retired_at = now() WHERE tenant_id = $1::uuid AND id = $2`,
-      [TENANT, fixture.posDeviceId],
-    );
+    const retired = await retire(fixture.posDeviceId, { physicalCash: '1250.00' });
+    expect(retired.status).toBe(200);
 
-    // The shop buys a new till. It gets a new device_no and its own drawer.
-    const replacementId = 'pos-replacement';
-    await admin.query(
-      `INSERT INTO devices (tenant_id, id, label, device_no, role)
-            VALUES ($1::uuid, $2, 'เครื่องขายใหม่', 6, 'pos')`,
-      [TENANT, replacementId],
-    );
+    // A stale access token from the retired till (ADR-0009 keeps it alive up to 15
+    // minutes) cannot open a new drawer on it — that drawer would be stranded again.
+    const stale = await post('/open', { startingCash: '0.00' });
+    expect(stale.status).toBe(403);
+    expect(stale.body.error.code).toBe('DEVICE_ROLE_FORBIDDEN');
+
+    // The shop buys a new till: the server gives it a new id and a new device_no.
+    const created = await request(app.getHttpServer())
+      .post('/api/v1/devices')
+      .set('Authorization', `Bearer ${ownerToken()}`)
+      .set('Idempotency-Key', `k-dev-${++keySeq}-${Date.now()}`)
+      .send({ label: 'เครื่องขายใหม่', role: 'pos' });
+    expect(created.status).toBe(201);
+    const replacementId: string = created.body.data.device.id;
+    expect(created.body.data.device.deviceNo).not.toBe(fixture.posDeviceNo);
     const replacementToken = accessToken({
       tenantId: TENANT,
       userId: fixture.userId,
