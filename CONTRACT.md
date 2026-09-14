@@ -384,6 +384,12 @@ through `csvSafe` before quote-escaping. ID/doc numbers come ONLY from `ids.dart
 All wrapped in a `ShellRoute` → `AppShell(child: …)`. Navigate with
 `context.go(AppRoutes.x)`.
 
+**#143 amendment (API build only).** `AppRoutes.login` = `/login` → `LoginScreen`, outside the
+`ShellRoute`, registered only when `USE_API_WRITES` is on (`buildAppRouter(auth: …)`). There, every
+route but `/login` redirects to `/login?from=<requested>` unless `AuthCubit` is `Authenticated`, and a
+signed-in session on `/login` returns to `from` (in-app paths only). With the flag off the router is
+the 11 routes above, unchanged.
+
 ---
 
 ## 10. Workflow reminder for every later agent
