@@ -1,9 +1,14 @@
 // AuthCubit — Reactive state management for authentication and device enrolment.
 
+import 'dart:async';
+
 import 'package:equatable/equatable.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:http/http.dart' as http;
 
 import '../../core/network/api_exception.dart';
+import '../../core/network/server_error_resolver.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../domain/models/auth_models.dart';
 
@@ -104,21 +109,41 @@ class AuthCubit extends Cubit<AuthState> {
         deviceRole: role,
       ));
       return true;
-    } on ApiException catch (e) {
-      emit(Unauthenticated(
-        deviceToken: prevDeviceToken,
-        deviceRole: prevDeviceRole,
-        errorMessage: e.thaiMessage,
-      ));
-      return false;
     } catch (e) {
       emit(Unauthenticated(
         deviceToken: prevDeviceToken,
         deviceRole: prevDeviceRole,
-        errorMessage: 'เข้าสู่ระบบไม่สำเร็จ: ${e.toString()}',
+        errorMessage: loginRefusalMessage(e),
       ));
       return false;
     }
+  }
+
+  /// The sentence the login form shows for a failed `POST /auth/token` (#143).
+  ///
+  /// Every string comes from [ServerErrorResolver] or was already the login
+  /// form's own — none is new:
+  /// - **401** — the server's login refusals (wrong password, unknown, inactive
+  ///   or ambiguous user, bad device token) are all English Nest messages with
+  ///   no code, so the resolver would print `Invalid credentials` at the
+  ///   counter. They get the form's generic `เข้าสู่ระบบไม่สำเร็จ`, which also
+  ///   says nothing about *which* part was wrong.
+  /// - **5xx** — a proxy's 502 body is HTML; the connection sentence instead.
+  /// - **other 4xx / 429** — coded verdicts (`TENANT_SUSPENDED`,
+  ///   `RATE_LIMITED`) resolve to their mapped Thai.
+  /// - **transport failure** — the connection sentence. The raw exception text
+  ///   used to be appended here, which put `ClientException: …` on screen.
+  @visibleForTesting
+  static String loginRefusalMessage(Object error) {
+    if (error is ApiException) {
+      if (error.statusCode == 401) return 'เข้าสู่ระบบไม่สำเร็จ';
+      if (error.statusCode >= 500) return ServerErrorResolver.resolve(null);
+      return error.thaiMessage;
+    }
+    if (error is http.ClientException || error is TimeoutException) {
+      return ServerErrorResolver.resolve(null);
+    }
+    return 'เข้าสู่ระบบไม่สำเร็จ';
   }
 
   /// Enrols the device using the code from the shop owner (ADR-0004).
