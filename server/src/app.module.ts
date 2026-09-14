@@ -48,6 +48,8 @@ import {
 } from './products/catalogue.controllers.js';
 import { PurchaseOrdersController } from './purchasing/purchase-orders.controller.js';
 import { PurchasingModule } from './purchasing/purchasing.module.js';
+import { DevicesController } from './devices/devices.controller.js';
+import { DevicesModule } from './devices/devices.module.js';
 
 import { RuntimeConfigService } from './config/runtime-config.service.js';
 
@@ -95,6 +97,7 @@ const TENANT_ROUTES = [
   SuppliersController,
   MovementsController,
   PurchaseOrdersController,
+  DevicesController,
 ];
 
 /** The HTTP application: core + health + platform. Business modules are added by later tickets. */
@@ -136,6 +139,7 @@ export class AppModule implements NestModule {
         BackupModule,
         ProductsModule,
         PurchasingModule,
+        DevicesModule,
       ],
       providers: [RequestContextMiddleware],
     };

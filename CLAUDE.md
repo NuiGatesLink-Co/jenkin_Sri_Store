@@ -274,10 +274,12 @@ The whole drawer — `src/shifts/`, the five endpoints, the `shift_id` stamp —
 the auto-archived shift is visible through `GET /shifts/history` while `GET /shifts/current` answers
 the new drawer (the raw columns were checked, the API view was not), and a credit note written with
 no drawer open carries a null `shift_id` (the sale path proved that case, the return path did not).
-🔴 **`closeForRetirement` still has no production caller** — `src/devices/` does not exist, so the
-ADR-0004 rule *"retiring a `pos` device closes its open shift in the same transaction"* is proved
-only against a test-mounted probe controller (`test/shifts.e2e-spec.ts`). Whoever builds the device
-endpoint must call it, and that wiring is the part no test covers today.
+✅ **`closeForRetirement` has its production caller since #144** — `server/src/devices/`
+(`POST /devices`, `GET /devices`, `POST /devices/:id/retire`, owner only) retires a device and closes
+and archives its drawer in one transaction, lock order **devices (`FOR NO KEY UPDATE`) → shifts**; the
+probe controller in `test/shifts.e2e-spec.ts` is gone. `ShiftsService.open` now refuses a retired
+device (`FOR SHARE` on its row first), since its access token outlives the retirement by up to 15
+minutes. See `server/README.md` *Devices*.
 🔴 **A local DB one migration behind reads as a code bug:** this round began with 14 red returns
 cases, all 500s, because the dev Postgres had never been given `1788652800004` (#22's
 `return_items.cost_at_sale`) — `pnpm db:migrate:status` said *"up to date"* because `dist/` was
@@ -643,7 +645,7 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   permission classifier ("Production Deploy") — it needs the owner's explicit go-ahead.
 - **Still open (2026-09-14 close-out, `docs/handoff_log/ops-closeout-138-deploy-tickets.md`):** #67; #140
   Redis `commandTimeout`; #141 e2e runners sharing a DB; #142 ADR-0003 `tx.*` slices; #143 Flutter login
-  screen + redirect; #144 `src/devices` + `closeForRetirement` caller; #145 Thai wording for
+  screen + redirect; #145 Thai wording for
   `SALE_NOT_IN_OPEN_SHIFT` (owner); #148 monitoring recovery gaps; branch protection on `main` (owner runs
   07 §4). The repo's only branches are `main` and `POC_sample_offline_first`.
 

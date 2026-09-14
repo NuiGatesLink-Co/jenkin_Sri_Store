@@ -509,7 +509,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | GET | `/auth/me` | ✔ | ทั้งคู่ | – | – | – |
 | GET | `/devices` 🆕 | owner | ทั้งคู่ | – | – | – |
 | POST | `/devices` `{label, role}` 🆕 | owner | ทั้งคู่ | – | – | ✔ |
-| POST | `/devices/{id}/retire` 🆕 | owner | ทั้งคู่ | – | – | ✔ |
+| POST | `/devices/{id}/retire` `{physicalCash?}` 🆕 (#144) | owner | ทั้งคู่ | – | – | ✔ |
 | **GET** | **`/bootstrap`** 🆕 (#25) | ✔ | ทั้งคู่ | `ETag`/`304`, ไม่ใช่ Redis — ดู §3.1 (#32 ไม่ทำ Redis cache ให้ bootstrap — ไม่มีใน §5) | – | – |
 | GET | `/products` (`?search=` / `?partNo=` / `?updatedSince=`) | ✔ | ทั้งคู่ | ✅ 5m | – | – |
 | GET | `/products/:id` | ✔ | ทั้งคู่ | ✅ 5m | – | – |
@@ -583,6 +583,21 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 * `POST /devices/{id}/retire` — `owner` เท่านั้น · **ปิดกะที่ค้างของเครื่องนั้นก่อน** (รับ `physicalCash`
   ใน body) แล้วตั้ง `retired_at` ใน transaction เดียว · `audit_log` · นี่คือปุ่ม "ย้ายเครื่องขาย"
 * `GET /devices` — owner ดูรายการเครื่อง + สถานะ retire
+
+> **ลงมือแล้ว #144 (2026-09-14)** — `server/src/devices/` · รายละเอียดใน `server/README.md` *Devices*
+> * `POST /devices` → `201 {device, enrolCode}` · `device = {id, label, deviceNo, role, retiredAt, enrolled,
+>   enrolExpiresAt, lastSeenAt}` (ไม่มี hash ใด ๆ) · `id` และ `deviceNo` จาก server เท่านั้น — ส่งมาใน body
+>   ก็ไม่สนใจ · `deviceNo = max+1` ของทุกแถวรวมที่ retire แล้ว (ล็อก advisory ต่อร้าน) · code 8 ตัว hex
+>   อายุ **15 นาที** (ข้อเสนอของ ADR-0004 ยังรอเจ้าของร้านเคาะ) · `pos` ซ้ำ = `409 POS_DEVICE_EXISTS`
+>   (`details {deviceId}`) · เกิน 99 = `409 DEVICE_NO_EXHAUSTED` · audit `device.create` (ไม่เก็บ code)
+> * `POST /devices/{id}/retire` → `200 {device, shift}` · lock order **devices (`FOR NO KEY UPDATE`) → shifts
+>   (`FOR UPDATE`)** · มีกะเปิดแต่ไม่ส่ง `physicalCash` = `409 PHYSICAL_CASH_REQUIRED` (`details {shiftId}`)
+>   ไม่เขียนอะไรเลย · กะที่ปิดแล้วแต่ยัง `is_active` ถูก archive ด้วย (เก็บเงินที่นับตอนปิดไว้) · ล้าง
+>   enrolment code ที่ค้าง · ไม่มีเครื่อง/ของร้านอื่น = `404 DEVICE_NOT_FOUND` · retire ซ้ำ = `409
+>   DEVICE_ALREADY_RETIRED` · audit `device.retire`
+> * หลัง retire: `POST /auth/token` ด้วย device token เดิม = 401, `/auth/refresh` = 401 (ADR-0009),
+>   ออกเลขเอกสาร = `403 DEVICE_ROLE_FORBIDDEN`, `POST /shifts/open` = `403 DEVICE_ROLE_FORBIDDEN` (#144 —
+>   access token เดิมยังอยู่ได้ถึง 15 นาที เปิดกะใหม่บนเครื่องที่ retire แล้วจะได้กะค้างแบบเดิมอีก)
 
 **`GET /doc-counters`** (ADR-0007) — คืน high-water mark ของ `(device_id, doc_type, period)` — **เฟส 2 เท่านั้น**
 
@@ -727,12 +742,17 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 404 | `PARKED_SALE_NOT_FOUND` | `Parked sale not found` (– ไม่มีข้อความไทย · บิลพักถูกเรียกคืน/ลบไปแล้ว — เพิ่มตอน #27) |
 | 409 | `QUOTE_ALREADY_CONVERTED` | – **ยังไม่มีข้อความไทย** (ใบเสนอราคาแปลงเป็นบิลแล้ว — แปลงซ้ำด้วยบิลอื่น หรือแก้ไขใบที่แปลงแล้ว — เพิ่มตอน #27 ดู §8.1) |
 | 409 | `QUOTE_EXPIRED` | – **ยังไม่มีข้อความไทย** (แปลงใบเสนอราคาที่หมดอายุ — เพิ่มตอน #27 ดู §8.1) |
+| 404 | `DEVICE_NOT_FOUND` | – (`Device not found` · retire เครื่องที่ไม่มี หรือเป็นของร้านอื่น — เพิ่มตอน #144) |
+| 409 | `POS_DEVICE_EXISTS` | – **ยังไม่มีข้อความไทย** (`POST /devices` `role='pos'` ขณะร้านมี `pos` ที่ยังไม่ retire — เพิ่มตอน #144 ดู §8.1) |
+| 409 | `DEVICE_NO_EXHAUSTED` | – **ยังไม่มีข้อความไทย** (ร้านใช้ `device_no` ครบ 99 แล้ว — เพิ่มตอน #144 ดู §8.1) |
+| 409 | `DEVICE_ALREADY_RETIRED` | – **ยังไม่มีข้อความไทย** (retire เครื่องที่ retire ไปแล้ว — เพิ่มตอน #144 ดู §8.1) |
+| 409 | `PHYSICAL_CASH_REQUIRED` | – **ยังไม่มีข้อความไทย** (retire เครื่องที่มีกะเปิดอยู่โดยไม่ส่ง `physicalCash` — เพิ่มตอน #144 ดู §8.1) |
 | 401/403 | `UNAUTHENTICATED` / `FORBIDDEN` | – |
 | 429 | `RATE_LIMITED` | `ระบบกำลังทำงานหนัก กรุณารอสักครู่` | – |
 
 ### 8.1 Error ที่เป็น **ของใหม่** (ไม่มีใน `db.js`)
 
-ทั้ง 20 ตัวนี้เป็นพฤติกรรมที่ระบบเดิม **ไม่มี** จึงไม่มีข้อความไทยให้ลอก
+ทั้ง 24 ตัวนี้เป็นพฤติกรรมที่ระบบเดิม **ไม่มี** จึงไม่มีข้อความไทยให้ลอก
 
 > **สถานะ 2026-09-04 — ข้อความชั่วคราว ผ่านเจ้าของโปรเจกต์แล้ว ยังไม่ผ่านคนหน้าร้าน**
 > ข้อความในคอลัมน์ *ข้อความไทย* ด้านล่าง **agent เป็นคนร่าง** ไม่ได้ลอกมาจาก `db.js`
@@ -763,6 +783,10 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `PO_CANCELLED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /purchase-orders/:id/receive` กับ PO ที่ `status = 'cancelled'` — ถ้าปล่อยให้รับ สต็อกและต้นทุนเฉลี่ยจะขยับจากใบที่ร้านบอกว่ายกเลิกแล้ว · ของเดิมไม่มี status guard แต่หน้าจอซ่อนปุ่มรับของของ PO ที่ไม่ใช่ `open` จึงไม่มีเคสนี้ · **#26 คืนข้อความอังกฤษไว้ก่อน** (`This purchase order is cancelled and cannot be received.`) |
 | 409 | `QUOTE_ALREADY_CONVERTED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /quotes/:id/convert` ด้วย `id` บิลที่ไม่ใช่บิลที่ใบนี้แปลงไปแล้ว หรือ `PATCH` ใบที่แปลงแล้ว — `details { convertedSaleId }` · ของเดิมแปลงโดยตั้ง status แล้วโยนตะกร้าไป Checkout ไม่มี guard จึงแปลงซ้ำเป็นบิลที่สองได้ · ข้อความหน้าจอเดิม `ใบนี้แปลงเป็นการขายแล้ว แก้ไขไม่ได้` พูดถึงการแก้ไขเท่านั้น ใช้กับการแปลงซ้ำไม่ได้ · **#27 คืนข้อความอังกฤษไว้ก่อน** |
 | 409 | `QUOTE_EXPIRED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /quotes/:id/convert` กับใบที่ `valid_until < now()` (`QuoteRowStatus.isExpired`) — `details { validUntil }` · หน้าจอเดิมซ่อนปุ่ม "→ ขาย" ของใบหมดอายุ จึงไม่มีข้อความให้ลอก · ทางออกที่หน้าจอมีอยู่แล้วคือ "ทำซ้ำ (ต่ออายุใหม่)" · **#27 คืนข้อความอังกฤษไว้ก่อน** |
+| 409 | `POS_DEVICE_EXISTS` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /devices` `role='pos'` ขณะร้านมีเครื่อง `pos` ที่ยังไม่ retire (index `one_pos_per_tenant`, ADR-0004) — `details { deviceId }` · ของเดิมมีเครื่องเดียว ไม่มีแนวคิดเพิ่มเครื่อง · ทางออกบนหน้าจอคือ "ย้ายเครื่องขาย" = retire เครื่องเดิมก่อน · **#144 คืนข้อความอังกฤษไว้ก่อน** |
+| 409 | `DEVICE_NO_EXHAUSTED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `device_no` เป็น 2 หลักในเลขเอกสาร (1..99) และห้ามใช้ซ้ำแม้เครื่องเดิม retire แล้ว (ADR-0004/0007) — เครื่องที่ 100 ของร้านสร้างไม่ได้ · ไม่น่าเกิดที่ร้านนี้ · **#144 คืนข้อความอังกฤษไว้ก่อน** |
+| 409 | `DEVICE_ALREADY_RETIRED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /devices/{id}/retire` กับเครื่องที่ retire ไปแล้ว — `details { retiredAt }` · ถ้าเงียบไว้ `retired_at` และ audit จะถูกเขียนทับ · ของเดิมไม่มีเครื่อง จึงไม่มีเคสนี้ · **#144 คืนข้อความอังกฤษไว้ก่อน** |
+| 409 | `PHYSICAL_CASH_REQUIRED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /devices/{id}/retire` ไม่ส่ง `physicalCash` ขณะเครื่องนั้นมีกะเปิดอยู่ — `details { shiftId }` · ADR-0004 สั่งปิดกะค้างใน transaction เดียวกับ retire โดยบันทึกเงินที่ owner นับ · ถ้าตั้งเป็น 0 ให้เอง ใบปิดกะจะขาดเงินเท่ายอดทั้งวัน (เหตุผลเดียวกับ `POST /shifts/close` ที่บังคับ `physicalCash`) · client ควรถามยอดนับเงินแล้วส่งซ้ำด้วย `Idempotency-Key` ใหม่ · **#144 คืนข้อความอังกฤษไว้ก่อน** |
 
 ### 8.2 ⚠️ วงเงินเครดิตช่าง — **ไม่ใช่ error**
 

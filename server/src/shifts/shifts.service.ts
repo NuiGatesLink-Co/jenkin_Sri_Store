@@ -1,5 +1,6 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
+import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { newId } from '../common/ids.js';
 import { fromSatang } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
@@ -121,6 +122,23 @@ export class ShiftsService {
   ): Promise<ShiftWithEntries> {
     const deviceId = actor.deviceId;
     const { tenantId, manager } = currentRequestContext();
+
+    // 🔴 A retired machine may not open a drawer (#144). Its access token lives up to 15
+    // minutes past the retirement (ADR-0009 — no denylist), and a drawer opened in that
+    // window is exactly the stranded shift retirement archived away: `current()` would
+    // show it above the replacement till's. `FOR SHARE` so a concurrent retirement
+    // (`FOR NO KEY UPDATE` on this row) either finishes first and is seen here, or waits
+    // for this open and then archives what it opened. Lock order: devices → shifts.
+    const device = (await manager.query(
+      `SELECT retired_at FROM devices
+        WHERE tenant_id = $1::uuid AND id = $2
+          FOR SHARE`,
+      [tenantId, deviceId],
+    )) as { retired_at: Date | null }[];
+    if (device.length === 0 || device[0].retired_at !== null) {
+      throw new DeviceRoleForbiddenException();
+    }
+
     const today = await this.today(manager, tenantId);
 
     const active = (await manager.query(
@@ -213,37 +231,75 @@ export class ShiftsService {
   }
 
   /**
-   * Closes whatever `deviceId` still has open, for retiring a `pos` machine: ADR-0004
-   * requires that to happen in the same transaction as setting `retired_at`, so the
-   * device endpoint calls this rather than reaching into `shifts` itself. A device
-   * with nothing open is not an error here — there is simply nothing to close.
+   * Closes and archives whatever drawer `deviceId` still holds, for retiring a machine:
+   * ADR-0004 requires that to happen in the same transaction as setting `retired_at`, so
+   * `DevicesService.retire` calls this rather than reaching into `shifts` itself. A device
+   * with no current drawer is not an error here — there is simply nothing to close.
+   *
+   * 🔴 **The caller must already hold the device row** (`FOR NO KEY UPDATE`, taken by
+   * `DevicesService.retire`). Lock order is **devices → shifts**, the same order `open()`
+   * takes (`FOR SHARE` on the device, then the shift), so a stale `pos` access token
+   * opening a drawer and the owner retiring that machine cannot deadlock.
+   *
+   * - An **open** drawer (`closed_at IS NULL`) needs the counted cash:
+   *   `physicalCashSatang === null` is `409 PHYSICAL_CASH_REQUIRED`, never a defaulted 0
+   *   (the same reason `POST /shifts/close` requires it).
+   * - A drawer **closed but still `is_active`** (closed tonight, retired before the next
+   *   open) is archived as it is — its counted cash is kept, and `physicalCash` is ignored.
+   *
+   * Returns the archived shift (`isActive: false`), or null when there was none.
    */
   async closeForRetirement(
     deviceId: string,
-    physicalCashSatang: number,
+    physicalCashSatang: number | null,
   ): Promise<ShiftWithEntries | null> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT ${SHIFT_COLUMNS} FROM shifts
-        WHERE tenant_id = $1::uuid AND device_id = $2 AND is_active AND closed_at IS NULL
+        WHERE tenant_id = $1::uuid AND device_id = $2 AND is_active
+        ORDER BY opened_at DESC
         LIMIT 1
           FOR UPDATE`,
       [tenantId, deviceId],
     )) as ShiftRow[];
     if (rows.length === 0) return null;
+    const shift = rows[0];
 
-    const closed = await this.close(deviceId, physicalCashSatang);
+    let result: ShiftWithEntries;
+    if (shift.closed_at === null) {
+      if (physicalCashSatang === null) {
+        throw new HttpException(
+          {
+            code: 'PHYSICAL_CASH_REQUIRED',
+            message:
+              'This device has an open shift. Count the drawer and send physicalCash to close it.',
+            details: { shiftId: shift.id },
+          },
+          HttpStatus.CONFLICT,
+        );
+      }
+      result = await this.close(deviceId, physicalCashSatang);
+    } else {
+      result = await this.withEntries(manager, tenantId, shift);
+    }
 
     // 🔴 Archive it too. Normally the device's NEXT open archives the drawer, but a
     // retired device never opens again — so the row would stay `is_active` forever,
     // and `history()` (`NOT is_active`) would hide that day's takings while
     // `current()` shows a drawer nothing can close. That is exactly the day ADR-0004
-    // wants preserved.
-    await this.archive(manager, tenantId, {
-      ...rows[0],
-      closed_at: new Date(),
-    });
-    return { ...closed, isActive: false };
+    // wants preserved. A drawer closed before the retirement is stranded the same way,
+    // which is why it is archived too (with `auto_archived` left false: it was closed).
+    const archived = returning<ShiftRow>(
+      await manager.query(
+        `UPDATE shifts
+            SET is_active = FALSE,
+                archived_at = COALESCE(archived_at, now())
+          WHERE tenant_id = $1::uuid AND id = $2
+      RETURNING ${SHIFT_COLUMNS}`,
+        [tenantId, shift.id],
+      ),
+    );
+    return { ...toShift(archived[0]), entries: result.entries };
   }
 
   /** Adds money in or out of the open drawer. */
