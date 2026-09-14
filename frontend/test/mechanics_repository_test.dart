@@ -79,7 +79,7 @@ void main() {
         const MechanicsCompanion(creditBalance: Value(1000)),
       );
 
-      final pay = await repo.addCreditPayment(mechanicId: 'm1', amount: 300);
+      final pay = await repo.addCreditPayment(mechanicId: 'm1', amount: 300, paymentMethod: 'เงินสด');
       expect(pay.id.startsWith('cp'), isTrue);
       expect(pay.receiptNo.startsWith('CP'), isTrue);
       expect(pay.amount, 300);
@@ -101,7 +101,7 @@ void main() {
       const MechanicsCompanion(creditBalance: Value(200)),
     );
 
-    await repo.addCreditPayment(mechanicId: 'm1', amount: 500);
+    await repo.addCreditPayment(mechanicId: 'm1', amount: 500, paymentMethod: 'เงินสด');
 
     final mech = await (db.select(
       db.mechanics,
@@ -110,10 +110,10 @@ void main() {
   });
 
   test('getCreditPayments returns newest-first', () async {
-    await repo.addCreditPayment(mechanicId: 'm1', amount: 100);
+    await repo.addCreditPayment(mechanicId: 'm1', amount: 100, paymentMethod: 'เงินสด');
     // Even within the same second (drift stores DateTime as epoch seconds), the
     // rowid tiebreaker must keep the later insert first.
-    final second = await repo.addCreditPayment(mechanicId: 'm2', amount: 50);
+    final second = await repo.addCreditPayment(mechanicId: 'm2', amount: 50, paymentMethod: 'เงินสด');
 
     final payments = await repo.getCreditPayments();
     expect(payments.length, 2);

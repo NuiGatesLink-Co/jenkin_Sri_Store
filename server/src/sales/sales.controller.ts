@@ -100,8 +100,9 @@ export class SalesController {
 
   /**
    * `manager` + PIN, `pos` device only. Restores stock, marks the bill void and
-   * writes an audit row. Voiding twice, or voiding a bill that already has a credit
-   * note against it, is refused.
+   * writes an audit row. Voiding twice, voiding a bill that already has a credit
+   * note against it, or voiding a bill that is not from this device's open shift
+   * (#94 — a credit note undoes that one), is refused.
    */
   @Post(':id/void')
   @HttpCode(200)

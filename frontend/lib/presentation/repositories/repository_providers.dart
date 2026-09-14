@@ -20,16 +20,37 @@ import '../../data/repositories/snapshot_repository.dart';
 import '../../data/repositories/suppliers_repository.dart';
 
 import '../../core/network/api_client.dart';
+import '../../data/repositories/api/api_returns_repository.dart';
+import '../../data/repositories/api/api_sales_repository.dart';
+import '../../data/repositories/api/api_shifts_repository.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../data/storage/token_storage.dart';
 
+import '../../data/repositories/api_customers_repository.dart';
+import '../../data/repositories/api_mechanics_repository.dart';
+import '../../data/repositories/api_products_repository.dart';
+import '../../data/repositories/api_purchase_orders_repository.dart';
+import '../../data/repositories/api_quotes_repository.dart';
+import '../../data/services/bootstrap_service.dart';
+
 /// The repository providers, mirroring providers.dart + shift_providers.dart,
-/// plus AuthRepository and ApiClient.
+/// plus AuthRepository, ApiClient, and ApiRepositories (Ticket #55 / ADR-0010).
 /// Wired via `MultiRepositoryProvider` in main.dart.
+///
+/// [useApi] switches the #56 API-backed WRITE repositories (sales, returns,
+/// shifts) in behind the same interfaces (ADR-0010) instead of the Drift-only
+/// ones. It defaults to `false` — CLAUDE.md: "the shop keeps running the Drift
+/// build, no cutover" for phase 1 — and is flipped only via
+/// `--dart-define=USE_API_WRITES=true`.
+///
+/// [useApiRepositories] is #55's separate switch for the API-backed READ
+/// repositories (products, customers, mechanics, purchase orders, quotes).
 List<RepositoryProvider> repositoryProviders(
   AppDatabase db, {
   AuthRepository? authRepository,
   ApiClient? apiClient,
+  bool useApi = const bool.fromEnvironment('USE_API_WRITES'),
+  bool useApiRepositories = true,
 }) {
   final storage = SharedPrefsTokenStorage();
   final client = apiClient ?? ApiClient(tokenStorage: storage);
@@ -39,23 +60,67 @@ List<RepositoryProvider> repositoryProviders(
         tokenStorage: storage,
       );
 
+  // The three write paths of #56. Each API implementation keeps a Drift
+  // instance of the same repository to delegate its READS to — those belong to
+  // #55 and are untouched here — so the Drift object is constructed either way.
+  final driftSales = SalesRepository(db);
+  final driftReturns = ReturnsRepository(db);
+  final driftShifts = ShiftsRepository(db);
+
+  final salesRepository = useApi
+      ? ApiSalesRepository(api: client, db: db, drift: driftSales)
+      : driftSales;
+  final returnsRepository = useApi
+      ? ApiReturnsRepository(api: client, db: db, drift: driftReturns)
+      : driftReturns;
+  // The five read paths of #55, switched by their own flag.
+  final productsRepo = useApiRepositories
+      ? ApiProductsRepository(db, client)
+      : ProductsRepository(db);
+  final customersRepo = useApiRepositories
+      ? ApiCustomersRepository(db, client)
+      : CustomersRepository(db);
+  // 🔴 A credit payment is a money WRITE, so it follows the write switch, not
+  // this read one: on the Drift build it stays a local Drift write, and only
+  // with `useApi` does it go through the outbox and require an open drawer.
+  final mechanicsRepo = useApiRepositories
+      ? ApiMechanicsRepository(db, client, writesToServer: useApi)
+      : MechanicsRepository(db);
+
+  // Built after the mechanics repository: closing a shift on the API build
+  // sends the credit-payment outbox first and refuses while cash is unsent.
+  final shiftsRepository = useApi
+      ? ApiShiftsRepository(
+          api: client,
+          db: db,
+          drift: driftShifts,
+          mechanics: mechanicsRepo,
+        )
+      : driftShifts;
+  final poRepo = useApiRepositories
+      ? ApiPurchaseOrdersRepository(db, client)
+      : PurchaseOrdersRepository(db);
+  final quotesRepo = useApiRepositories
+      ? ApiQuotesRepository(db, client)
+      : QuotesRepository(db);
+  final bootstrapService = BootstrapService(db: db, apiClient: client);
+
   return [
-    RepositoryProvider<ProductsRepository>.value(value: ProductsRepository(db)),
-    RepositoryProvider<CustomersRepository>.value(value: CustomersRepository(db)),
-    RepositoryProvider<MechanicsRepository>.value(value: MechanicsRepository(db)),
-    RepositoryProvider<SalesRepository>.value(value: SalesRepository(db)),
-    RepositoryProvider<ReturnsRepository>.value(value: ReturnsRepository(db)),
-    RepositoryProvider<PurchaseOrdersRepository>.value(
-      value: PurchaseOrdersRepository(db),
-    ),
-    RepositoryProvider<QuotesRepository>.value(value: QuotesRepository(db)),
+    RepositoryProvider<ProductsRepository>.value(value: productsRepo),
+    RepositoryProvider<CustomersRepository>.value(value: customersRepo),
+    RepositoryProvider<MechanicsRepository>.value(value: mechanicsRepo),
+    RepositoryProvider<SalesRepository>.value(value: salesRepository),
+    RepositoryProvider<ReturnsRepository>.value(value: returnsRepository),
+    RepositoryProvider<PurchaseOrdersRepository>.value(value: poRepo),
+    RepositoryProvider<QuotesRepository>.value(value: quotesRepo),
     RepositoryProvider<ParkedRepository>.value(value: ParkedRepository(db)),
     RepositoryProvider<MovementsRepository>.value(value: MovementsRepository(db)),
     RepositoryProvider<SuppliersRepository>.value(value: SuppliersRepository(db)),
     RepositoryProvider<SettingsRepository>.value(value: SettingsRepository(db)),
     RepositoryProvider<SnapshotRepository>.value(value: SnapshotRepository(db)),
-    RepositoryProvider<ShiftsRepository>.value(value: ShiftsRepository(db)),
+    RepositoryProvider<ShiftsRepository>.value(value: shiftsRepository),
     RepositoryProvider<AuthRepository>.value(value: authRepo),
     RepositoryProvider<ApiClient>.value(value: client),
+    RepositoryProvider<BootstrapService>.value(value: bootstrapService),
   ];
 }

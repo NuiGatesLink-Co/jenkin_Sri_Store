@@ -6,11 +6,18 @@ describe('AuthService', () => {
     vi.useRealTimers();
   });
 
+  const rateLimitMock = {
+    getFailureStatus: vi.fn().mockResolvedValue({ allowed: true }),
+    recordFailure: vi.fn().mockResolvedValue(1),
+    clearKey: vi.fn().mockResolvedValue(undefined),
+  };
+
   describe('calculateRefreshExpiry (ADR-0009)', () => {
     const authService = new AuthService(
       {} as any,
       {} as any,
       {} as any,
+      rateLimitMock as any,
     );
 
     it('expires at 04:00 AM the same day if issued before 03:00 AM (e.g. 02:30 AM)', () => {
@@ -65,7 +72,7 @@ describe('AuthService', () => {
 
   describe('refreshTokenPayload', () => {
     it('rejects tokens with aud != "tenant"', async () => {
-      const authService = new AuthService({} as any, {} as any, {} as any);
+      const authService = new AuthService({} as any, {} as any, {} as any, rateLimitMock as any);
       await expect(
         authService.refreshTokenPayload({
           aud: 'platform' as any,
@@ -115,7 +122,7 @@ describe('AuthService', () => {
         log: vi.fn(),
       };
 
-      const authService = new AuthService(dsMock as any, signerMock as any, auditMock as any);
+      const authService = new AuthService(dsMock as any, signerMock as any, auditMock as any, rateLimitMock as any);
 
       const res = await authService.refreshTokenPayload({
         aud: 'tenant',
@@ -157,6 +164,7 @@ describe('AuthService', () => {
         { createQueryRunner: () => qrMock } as any,
         {} as any,
         { log: vi.fn() } as any,
+        rateLimitMock as any,
       );
 
       try {
@@ -197,6 +205,7 @@ describe('AuthService', () => {
         { createQueryRunner: () => qrMock } as any,
         {} as any,
         { log: vi.fn() } as any,
+        rateLimitMock as any,
       );
 
       await expect(
@@ -240,7 +249,7 @@ describe('AuthService', () => {
         log: vi.fn(),
       };
 
-      const authService = new AuthService(dsMock as any, {} as any, auditMock as any);
+      const authService = new AuthService(dsMock as any, {} as any, auditMock as any, rateLimitMock as any);
 
       const res = await authService.enrolDevice('code-12345');
 
@@ -273,6 +282,7 @@ describe('AuthService', () => {
         { createQueryRunner: () => qrMock } as any,
         {} as any,
         { log: vi.fn() } as any,
+        rateLimitMock as any,
       );
 
       await authService.enrolDevice('  a1b2c3d4  ');
@@ -327,6 +337,7 @@ describe('AuthService', () => {
         { createQueryRunner: () => qrMock } as any,
         signerMock as any,
         auditMock as any,
+        rateLimitMock as any,
       );
 
       const res = await authService.login({
@@ -374,6 +385,7 @@ describe('AuthService', () => {
         { createQueryRunner: () => qrMock } as any,
         {} as any,
         { log: vi.fn() } as any,
+        rateLimitMock as any,
       );
 
       await expect(

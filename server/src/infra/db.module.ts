@@ -28,7 +28,12 @@ export const AUDIT_DATA_SOURCE = Symbol('AUDIT_DATA_SOURCE');
           migrationsRun: false,
           entities: [],
           poolSize: cfg.dbPoolSize,
-          extra: { connectionTimeoutMillis: 5000, idleTimeoutMillis: 30000 },
+          extra: {
+            connectionTimeoutMillis: Number(
+              process.env.DB_CONNECTION_TIMEOUT_MS ?? 10000,
+            ),
+            idleTimeoutMillis: 30000,
+          },
         });
         return ds.initialize();
       },

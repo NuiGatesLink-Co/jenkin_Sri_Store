@@ -552,18 +552,26 @@ CREATE TABLE mechanics (
 );
 
 CREATE TABLE credit_payments (
-  tenant_id   UUID NOT NULL,
-  id          TEXT NOT NULL,
-  receipt_no  TEXT NOT NULL,
-  mechanic_id TEXT NOT NULL,
-  amount      NUMERIC(14,2) NOT NULL CHECK (amount > 0),
-  note        TEXT,
-  date        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  tenant_id      UUID NOT NULL,
+  id             TEXT NOT NULL,
+  receipt_no     TEXT NOT NULL,
+  mechanic_id    TEXT NOT NULL,
+  amount         NUMERIC(14,2) NOT NULL CHECK (amount > 0),
+  payment_method TEXT,              -- 'เงินสด' | 'โอน/QR' (#24, migration …005)
+                                    -- nullable เพราะแถวที่ import มาจากแอปเก่าอาจไม่มี;
+                                    -- ห้าม DEFAULT 'เงินสด' — เท่ากับประกาศว่าทุกแถวเก่า
+                                    -- เป็นเงินสด แล้วรายงานปิดร้านจะขาดทุกวัน
+                                    -- endpoint บังคับให้ส่งเสมอ (parseCreateCreditPayment)
+  shift_id       TEXT,              -- #24: แสตมป์เดียวกับ sales/returns — รายงานปิดร้าน
+                                    -- คิดจาก shift_id ไม่ใช่ช่วงเวลา · null = ไม่ได้เปิดลิ้นชัก
+  note           TEXT,
+  date           TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, id),
   FOREIGN KEY (tenant_id, mechanic_id) REFERENCES mechanics (tenant_id, id),
   UNIQUE (tenant_id, receipt_no)
 );
-CREATE INDEX idx_creditpay_mech ON credit_payments (tenant_id, mechanic_id, date DESC);
+CREATE INDEX idx_creditpay_mech  ON credit_payments (tenant_id, mechanic_id, date DESC);
+CREATE INDEX idx_creditpay_shift ON credit_payments (tenant_id, shift_id);
 ```
 
 ### 5.4 Sales & Returns
@@ -641,6 +649,7 @@ CREATE TABLE returns (
 );
 CREATE INDEX idx_returns_sale ON returns (tenant_id, sale_id);
 CREATE INDEX idx_returns_date ON returns (tenant_id, date DESC);
+CREATE INDEX idx_returns_shift ON returns (tenant_id, shift_id); -- #30: รายงานปิดร้านรวมยอดคืนเงินสดของกะเดียว
 
 CREATE TABLE return_items (
   tenant_id    UUID NOT NULL,

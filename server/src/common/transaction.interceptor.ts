@@ -7,7 +7,7 @@ import {
 import { catchError, concatMap, from, throwError, type Observable } from 'rxjs';
 import type { QueryRunner } from 'typeorm';
 import { OWNED_BY_INTERCEPTOR } from './request-context.middleware.js';
-import { currentRequestTransaction } from './request-context.js';
+import { currentRequestTransaction, executePostCommitHooks } from './request-context.js';
 
 /**
  * Ends the transaction `RequestContextMiddleware` opened: commit on success,
@@ -34,6 +34,7 @@ export class TransactionInterceptor implements NestInterceptor {
     return next.handle().pipe(
       concatMap(async (value) => {
         await end(qr, 'commit');
+        await executePostCommitHooks();
         return value;
       }),
       catchError((err: unknown) =>

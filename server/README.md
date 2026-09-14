@@ -267,7 +267,12 @@ stock **and** issues a number must take them in that same order. `POST /returns`
 does, with the parent bill's own `FOR UPDATE` ahead of all three: **sale → mechanic →
 products → `doc_counters`**. `POST /purchase-orders/:id/receive` (#26) still has to;
 `POST /sales/:id/void` (#23) does, taking the mechanic's row before the first product
-because it now reverses the tab. Issuing the number first inverts the order and
+because it now reverses the tab. The drawer row that `POST /sales` and
+`POST /mechanics/:id/credit-payments` read first (before the mechanic on a sale, after it
+on a credit payment) is outside this order on purpose: the money path only ever takes it
+`FOR SHARE`, shared locks never wait on each other, and the drawer's own exclusive
+writers (open, close, entries, retirement) take no other money-path lock. A path that
+ever takes the shift row `FOR UPDATE` *and* a mechanic or product must fix an order first. Issuing the number first inverts the order and
 the two deadlock under concurrent load, which is the kind of failure that only shows up on
 a busy Saturday.
 
@@ -276,7 +281,11 @@ a busy Saturday.
 `POST /api/v1/sales` — `pos` device only, `Idempotency-Key` mandatory. Everything runs
 inside the request transaction, in this order, and the order is the design:
 
-1. the idempotency claim (interceptor, before the handler)
+1. the idempotency claim (interceptor, before the handler), then the client-`id` replay
+   (`existingSale`), then **the device's open drawer, read `FOR SHARE`** — none open is
+   `409 NO_OPEN_SHIFT` on every payment method (see *The cash drawer* below). After both
+   replay paths, so a bill committed while the drawer was open still answers once it has
+   closed; before every other lock, so a refused bill holds no mechanic or product row
 2. lock the mechanic's row if the bill names one; for `'เครดิตช่าง'`, refuse
    `credit_balance + total > credit_limit` with `409 CREDIT_LIMIT_EXCEEDED` unless the
    body carries `overrideCreditLimit: true` (#21). Before the products on purpose: a
@@ -327,12 +336,26 @@ ring the bill up a second time. A repeat carrying a *different* total is
 `409 SALE_ID_REUSED`, because silently answering with the old bill would lose the new
 one's money.
 
-**The 201 carries the ledger back** — `customerAfter { id, points, totalSpend }` and
-`mechanicCreditBalanceAfter`, null when the bill names none (§3.1, ADR-0010 §3) — so the
-client patches its cache without waiting for the next `/bootstrap`. A replayed bill
-answers the rows as they stand now and moves nothing. `shift_id` is stamped by #28. The
-response carries no `offlineOk` — it has no storage in phase 1. Reversing the ledger on a
-void is #23's.
+**The 201 carries back everything the client cannot compute** (§3.1, ADR-0010 §3), so it
+patches its cache without waiting for the next `/bootstrap`: `customerAfter
+{ id, points, totalSpend }`, `mechanicCreditBalanceAfter`, and — added by #82 — `shiftId`,
+`items[] { lineNo, productId, costAtSale }`, `movements[]`, and `mechanicAfter` with all
+four running totals. The response carries no `offlineOk`: it has no storage in phase 1.
+
+🔴 **`mechanicAfter` has no `totalCredit`, on either endpoint.** `mechanics.total_credit`
+is the JS app's legacy alias of `total_discount` (decision #11); the server never writes
+it, and a field on the wire is a field the client will eventually patch.
+
+🔴 **A widened response is a widened *replay*.** Both replay paths have to answer the same
+body, field for field and in the same array order: the `Idempotency-Key` path does it for
+free (the stored `response_body`), but `existingSale` rebuilds the answer from the rows,
+so every new field needs a matching `SELECT` there — `shiftId` came back null for a bill
+that really had a shift until that read learned about `shift_id`. `items[]` is ordered by
+`line_no` on both paths, and `products[]` / `movements[]` by the order the products appear
+on the bill; a replay that agrees on the values but not on their order is still a different
+body. `test/sales.e2e-spec.ts` *the write-through fields (#82)* compares the two bodies
+whole rather than field by field, which is the only assertion that stays true as the shape
+grows. A replayed bill reports the rows as they stand now and moves nothing.
 
 🔴 **`returning()` (`src/common/sql.ts`) is not optional.** TypeORM's Postgres driver
 returns rows directly for `SELECT`/`INSERT` but `[rows, affected]` for `UPDATE`/`DELETE`,
@@ -357,20 +380,26 @@ in this order:
    at once instead of one resubmission at a time
 4. the money, in integer satang: `refundDiscount = round2(refundSubtotal × discount /
    subtotal)`, `refundTotal = refundSubtotal − refundDiscount`
-5. lock the mechanic's row, if the bill named one
-6. `SELECT … FROM products … ORDER BY id FOR UPDATE`
-7. issue the CN number (`CN07-2569-09-0001`)
-8. insert the header and the lines — `cost_at_sale` copied from the **parent sale line**,
+5. the drawer (#100), read `FOR SHARE` either way: a `'เงินสด'` refund takes
+   `ShiftsService.requireOpenShiftIdFor` — `409 NO_OPEN_SHIFT` with no open drawer;
+   `'โอน'` and `'หักจากเครดิต'` take `currentShiftIdFor`, null with no drawer
+6. lock the mechanic's row, if the bill named one
+7. `SELECT … FROM products … ORDER BY id FOR UPDATE`
+8. issue the CN number (`CN07-2569-09-0001`)
+9. insert the header and the lines — `cost_at_sale` copied from the **parent sale line**,
    never re-read from `products.cost`, which a weighted-average PO receive rewrites
-9. stock back, one `movements` row per product, `type='return'`, `ref_id` = the **return**
+10. stock back, one `movements` row per product, `type='return'`, `ref_id` = the **return**
    id (`uq_movements_ref` is `(tenant_id, type, ref_id, product_id)`, so keying on the bill
-   would make the second credit note against it a 500)
-10. the ledger, in proportion to `refundTotal / sale.total`: customer `points` and
+   would make the second credit note against it a 500). #82 answers those rows in
+   `movements[]`; a **void** writes `type='void'` (migration `1788652800003`) against the
+   same goods and the two must never be collapsed — every report groups by that column
+11. the ledger, in proportion to `refundTotal / sale.total`: customer `points` and
    `total_spend`; mechanic `total_sales`, `total_discount`, `total_markup`, and
    `credit_balance` **only** for `refundMethod === 'หักจากเครดิต'`. Every accumulator
    clamps with `GREATEST(0, …)` — `total_spend`, `total_sales`, `total_discount` and
-   `total_markup` have no CHECK at all, so a missing clamp there fails silently
-11. auto-void the parent bill once the cumulative returned quantity reaches what it sold
+   `total_markup` have no CHECK at all, so a missing clamp there fails silently. All four
+   come back as `mechanicAfter` (#82), alongside the unchanged `mechanicCreditBalanceAfter`
+12. auto-void the parent bill once the cumulative returned quantity reaches what it sold
 
 🔴 **The `FOR UPDATE` on the sale in step 2 is the whole endpoint's serialisation point.**
 Without it two concurrent partial returns of one bill both read the same already-refunded
@@ -413,8 +442,25 @@ A cash refund on a credit sale deliberately leaves `credit_balance` alone — th
 over cash and the mechanic still owes what he owed. That is why the Returns screen warns
 before it lets staff choose cash on a credit bill.
 
-`returns.shift_id` is stamped from the device's own open drawer, never from the body, and
-is null when none was opened. `GET /returns?saleId=&from=&to=&page=&limit=` is
+`returns.shift_id` is stamped from the device's own open drawer, never from the body.
+🔴 **A cash refund needs an open drawer** (owner's decision on #100, 2026-09-13): with no
+shift `closed_at IS NULL` on the calling device, `refundMethod = 'เงินสด'` is `409
+NO_OPEN_SHIFT` and nothing is written — no stock, no CN number, no auto-void, no
+idempotency claim. ⚠️ `POST /shifts/open` on the same day hands back today's closed
+row, so **after today's close a cash refund waits for tomorrow's open** (the owner accepted
+this with option A); a transfer refund is still possible. Until #100 it was
+stamped null and the cash that left the drawer appeared in no closing report — the route
+#94's `SALE_NOT_IN_OPEN_SHIFT` sends the counter down after today's close. The check
+follows the bill's guards (a bad body is told so, drawer or not) and a key replay never
+reaches it. It reads `FOR SHARE`, so the lock order is **sale → shift (shared) → mechanic
+→ products → `doc_counters` → customer**, as on the void; the drawer's exclusive holders
+(open, close, entries, retirement) take no other money-path lock, so no cycle. `'โอน'` and
+`'หักจากเครดิต'` do not move expected cash, so they are still taken with no drawer and
+stamped null — but they net into that shift's `grossProfit`, so they read the drawer
+`FOR SHARE` too (`currentShiftIdFor`): a close cannot commit under a refund in flight and
+leave it stamped onto an already-counted shift.
+
+`GET /returns?saleId=&from=&to=&page=&limit=` is
 newest-first and readable from both device roles; `from`/`to` are the filters
 `02_API_SCREENS.md §3.7` defines for the refund history and behave exactly as
 `GET /sales` does, with `saleId` the extra one a single bill's notes need.
@@ -437,7 +483,14 @@ idempotent. Restores stock, writes a `movements` row per product (`type='void'`,
 writes a Thai note on this path), reverses the customer and mechanic ledger in full,
 marks the bill void and writes an `audit_log` row. Refused when the bill is already void
 (`409 SALE_VOIDED`) or already has a credit note against it (`409 SALE_HAS_RETURNS` —
-voiding then would restore that stock twice).
+voiding then would restore that stock twice). **#94:** also refused unless the bill's
+`shift_id` is the calling device's open drawer — `409 NO_OPEN_SHIFT` with no drawer,
+`409 SALE_NOT_IN_OPEN_SHIFT` for a bill from a closed shift, another device's shift, or
+with a null `shift_id` — so a closed shift's report never changes afterwards; an older
+bill is undone by a credit note. The check runs after `SALE_VOIDED`/`SALE_HAS_RETURNS`
+(a key replay is answered by the interceptor first) and reads the drawer `FOR SHARE`
+between the sale lock and the mechanic lock, so a close waits for a void in flight.
+Not audited: the PIN is already proven, like the other business-rule refusals.
 
 Refusals are audited too (`sale.void.denied`, with the reason). This is a four-digit PIN
 with no per-user rate limit until #44; brute-forcing it must not be invisible. That row is
@@ -482,9 +535,22 @@ device's current drawer* until the next open archives it, exactly as
   (`one_pos_per_tenant`), but a read filtered by the caller's device would show a
   `backoffice` machine nothing, which is not what "readable from both" means.
 - **`shift_id` is stamped on a sale at write time**, from the device's own *open*
-  drawer — never from the request body, and null when no drawer is open (the old app
-  lets staff sell without one). The closing report is computed by `shift_id`, never by
-  a timestamp window: a window breaks across midnight and cannot separate two machines.
+  drawer — never from the request body. The closing report is computed by `shift_id`,
+  never by a timestamp window: a window breaks across midnight and cannot separate two
+  machines.
+- 🔴 **No open drawer, no money** (owner's decision, 2026-09-13: "ต้องเปิดกะก่อนรับเงิน
+  ทุกกรณี"). `POST /sales` and `POST /mechanics/:id/credit-payments` answer
+  `409 NO_OPEN_SHIFT` when the calling device has no shift with `closed_at IS NULL` —
+  never opened, or already closed — for every payment method, and write nothing (no
+  stock, no ledger, no RC/CP number, no idempotency claim). Until then both stamped null
+  and took the money, ported from the old app; that cash appeared in no closing report.
+  Replays are not refused: the check runs after both replay paths. The helper is
+  `ShiftsService.requireOpenShiftIdFor`, and it reads the row **`FOR SHARE`** so a close
+  waits for bills in flight and a bill behind a committed close is refused, rather than
+  landing on a shift whose cash was already counted. `POST /returns` is covered for
+  `'เงินสด'` only (#100); a transfer or tab-deduction credit note still stamps null with
+  no drawer open (`currentShiftIdFor`). `shift_id`
+  stays nullable in the schema: imported rows are legitimately null.
 - `closeForRetirement()` is the operation `POST /devices/:id/retire` (#6) calls to
   close a machine's drawer in the same transaction that stamps `retired_at`. The
   endpoint does not exist yet, so `test/shifts.e2e-spec.ts` mounts the call on a probe
@@ -492,14 +558,72 @@ device's current drawer* until the next open archives it, exactly as
   device's *next* open archives its drawer, but a retired device never opens again, so an
   active row would be stranded — `history()` (`NOT is_active`) would hide that day's
   takings forever while `current()` showed a drawer nothing could close.
-- 🔴 **A bill rung up while no drawer is open carries no `shift_id`,** and neither does
-  one rung up after the drawer is closed. The shipped app's closing report counts by date
-  key (`closing_report.dart`), not by shift, so it *does* include those bills — a report
-  built purely on `shift_id` will be short by exactly the after-close takings. Whoever
-  builds `GET /reports/closing` (#30) has to decide that explicitly: either fold
-  `shift_id IS NULL AND date = <the shift's day>` into the query, or stamp the day's
-  drawer regardless of close. It is a `db.js` behaviour change either way, so it is not a
-  decision to make inside a test.
+- 🔴 **Rows written before 2026-09-13 (and imported ones) can still carry no
+  `shift_id`.** The shipped app's closing report counts by date key
+  (`closing_report.dart`), not by shift. New sales and credit payments can no longer be
+  taken without a drawer, so #30 only has to decide what to do with those older rows and
+  with non-cash credit notes (`POST /returns` still stamps those null with no drawer open;
+  cash refunds need one since #100).
+- 🔴 **Expected cash also has a credit-payment term** (#24, #30's first AC): a mechanic
+  settling his tab in cash is money in the drawer that no sale accounts for. Sum
+  `credit_payments WHERE shift_id = … AND payment_method = 'เงินสด'`; the transfers must
+  not be counted, which is what that column exists for.
+
+## Mechanic credit payments (#24)
+
+`POST /mechanics/:id/credit-payments` — the mechanic comes in and pays down his tab.
+`pos` only (it takes cash over the counter and prints a receipt), idempotent, and one
+transaction: `mechanics FOR UPDATE` → the open drawer (`409 NO_OPEN_SHIFT` without one) →
+the CP number → the row → the reduced balance.
+
+- **Lock order is mechanic → `doc_counters`,** the money path's relative order. It
+  cannot deadlock against a sale or a credit note today — `doc_counters` is keyed by
+  `doc_type`, so the CP row is never the RC or CN row and the mechanic is the only
+  resource they share — but the order costs nothing and stays right if that changes.
+- 🔴 **An overpayment is refused, not clamped.** `credit_balance` is written with
+  `GREATEST(0, …)` as the ticket asks, but a clamp on an amount nobody checked turns
+  100,000 keyed for 1,000 into a wiped debt and a receipt for cash never handed over —
+  the same shape as the #22 money bug. More than the tab without
+  `allowOverpayment: true` is `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` (English message; the
+  client owns the Thai dialog, which the shipped app already shows —
+  `mechanics_screen.dart:1331`). With the flag it goes through and writes one
+  `audit_log` row, exactly as #21's credit-limit override does.
+- **`paymentMethod` is required and whitelisted** to the two the intake dialog offers,
+  `'เงินสด'` and `'โอน/QR'`. A method the server guessed is a closing report that is
+  wrong in one direction or the other: count a transfer as cash and the drawer shows a
+  shortfall the size of the transfer every single day, which is how staff stop believing
+  the report at all. The column is new (`payment_method`, migration `…005`) because the
+  Drift port dropped the JS app's `p.method`; `cash_drawer_screen.dart:121` says so.
+- **`shift_id` is stamped like a sale's** — the device's own open drawer, never the body.
+  That column is what #30 sums cash settlements by.
+- 🔴 **No open drawer is `409 NO_OPEN_SHIFT`, cash and transfer alike** (owner's
+  decision, 2026-09-13 — this replaces the old "null when none is open; refusing it here
+  would be a new rule" behaviour). Order: mechanic `FOR UPDATE` → client-`id` replay →
+  drawer `FOR SHARE` → overpayment check → CP number. After the replay, so a payment
+  committed while the drawer was open still answers once it has closed; before the
+  overpayment check and the counter, so a refusal leaves no hole in the CP series.
+- **Two defences against a duplicate, as on `POST /sales`:** the `Idempotency-Key`, and
+  an optional client `id`. The same id with a different mechanic, amount or method is
+  `409 CREDIT_PAYMENT_ID_REUSED`. The id matters because the client's outbox
+  (`pending_credit_payments`, Drift schema v5) can resend a payment long after the key's
+  24 h have run out — a device offline over a weekend — or under a fresh key after a
+  person confirms a refused overpayment; both replay the stored payment by id alone.
+  The replay is checked **before** the overpayment check, or a replayed full settlement
+  would meet the zero tab it created and be refused.
+- ⚠️ **`shift_id` is the shift open when the server receives the payment,** not when the
+  cash was taken. A payment queued offline and sent after the drawer closed is now
+  refused with `409 NO_OPEN_SHIFT` (the outbox keeps it for a person) unless a drawer is
+  open by then, in which case it lands in that shift — #30 has to know that.
+- The mechanic's `deleted_at` is **not** filtered, exactly as `POST /sales` does not
+  filter it: he owes the money either way, and refusing it loses the shop both the cash
+  and the record of it. An id that never existed is `404 MECHANIC_NOT_FOUND`, thrown off
+  the locked read rather than left to the insert's foreign key (a `23503` surfaces as a
+  500).
+- The response carries the payment plus `mechanicCreditBalanceAfter` — every *value*
+  the transaction moved (#82) and nothing it did not. There is no `mechanicAfter` here:
+  the three running totals are untouched, and handing them back invites the client to
+  patch them from a stale read. `mechanics.updated_at` also moves and is not returned;
+  the client stamps its own, as it does after every write.
 
 ## Conventions these slices set
 

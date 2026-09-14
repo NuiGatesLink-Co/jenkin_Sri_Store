@@ -318,12 +318,17 @@ export class TenantImportService {
         const amount = round2(cp.amount);
         const note = cp.note ? String(cp.note) : null;
         const date = parseDate(cp.date);
+        // The JS app stored the method on the payment and its drawer summed
+        // `p.method === 'เงินสด'`; the Drift port has no such column, so a snapshot
+        // from either one may or may not carry it. Left NULL when it does not —
+        // #24's migration explains why that is not defaulted to cash.
+        const paymentMethod = cp.method ? String(cp.method) : null;
 
         await manager.query(
-          `INSERT INTO credit_payments (tenant_id, id, receipt_no, mechanic_id, amount, note, date)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `INSERT INTO credit_payments (tenant_id, id, receipt_no, mechanic_id, amount, payment_method, note, date)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (tenant_id, id) DO NOTHING`,
-          [tenantId, id, receiptNo, mechanicId, amount, note, date],
+          [tenantId, id, receiptNo, mechanicId, amount, paymentMethod, note, date],
         );
       }
 

@@ -22,7 +22,16 @@ class ApiClient {
   final String baseUrl;
   final http.Client _client;
   final TokenStorage? tokenStorage;
-  final void Function()? onSessionExpired;
+
+  /// Called when the refresh token is gone or the server refuses it — the
+  /// session is over and only a fresh login can continue.
+  ///
+  /// 🔴 Mutable because the thing that must react to it, `AuthCubit`, is built
+  /// from the `AuthRepository` this client already backs, so it cannot be passed
+  /// to the constructor. Before this was wired, `_executeRefresh` called a hook
+  /// nobody had set: the tokens were cleared and every later request 401'd, but
+  /// no state anywhere said the session had ended.
+  void Function()? onSessionExpired;
 
   Future<bool>? _refreshFuture;
 
@@ -106,6 +115,24 @@ class ApiClient {
         final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
         final encodedBody = body != null ? (body is String ? body : jsonEncode(body)) : null;
         return _client.put(uri, headers: h, body: encodedBody);
+      },
+      path: path,
+      skipAuth: skipAuth,
+    );
+  }
+
+  Future<dynamic> patch(
+    String path, {
+    dynamic body,
+    Map<String, String>? headers,
+    bool skipAuth = false,
+  }) async {
+    return _sendWithRetry(
+      () async {
+        final uri = _buildUri(path);
+        final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
+        final encodedBody = body != null ? (body is String ? body : jsonEncode(body)) : null;
+        return _client.patch(uri, headers: h, body: encodedBody);
       },
       path: path,
       skipAuth: skipAuth,

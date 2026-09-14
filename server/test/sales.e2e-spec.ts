@@ -6,6 +6,8 @@ import {
   clearTenantCache,
   createTestApp,
   resetTenant,
+  seedMechanic,
+  seedOpenShift,
   seedProduct,
   type TenantFixture,
 } from './support/fixture.js';
@@ -110,7 +112,19 @@ describe('POST /sales (e2e)', () => {
       cost: 2400,
       stock: 5,
     });
+    // No open drawer, no sale (owner's decision, 2026-09-13). The cases that are
+    // about the refusal remove it again.
+    await seedOpenShift(admin, TENANT, fixture.posDeviceId, { userId: fixture.userId });
   });
+
+  const closeShift = async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/shifts/close')
+      .set('Authorization', `Bearer ${posToken}`)
+      .set('Idempotency-Key', `k-close-${Math.random()}`)
+      .send({ physicalCash: '0.00' });
+    expect(res.status).toBe(200);
+  };
 
   afterAll(async () => {
     await resetTenant(admin, TENANT);
@@ -163,6 +177,273 @@ describe('POST /sales (e2e)', () => {
         ref_id: res.body.data.id,
       },
     ]);
+  });
+
+  // #82. Four things `POST /sales` writes and did not answer with, so the client's
+  // cache had nowhere honest to get them and ADR-0010 §3 left the rows stale. The
+  // mechanic's totals are the fourth and live in `sales-ledger.e2e-spec.ts`, next to
+  // the ledger rules they belong to.
+  describe('the write-through fields (#82)', () => {
+    const openShift = async (startingCash = '1000.00'): Promise<string> => {
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/shifts/open')
+        .set('Authorization', `Bearer ${posToken}`)
+        .set('Idempotency-Key', `k-shift-${Math.random()}`)
+        .send({ startingCash });
+      expect(res.status).toBe(200);
+      return res.body.data.id as string;
+    };
+
+    const twoLines = () => [
+      { productId: 'p1', name: 'Oil Filter', qty: 3, price: '85.00' },
+      { productId: 'p8', name: 'Piston Kit STD', qty: 1, price: '3200.00' },
+    ];
+
+    it('answers the shift it stamped on the bill', async () => {
+      const shiftId = await openShift();
+      const res = await post(bill(twoLines()));
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.shiftId).toBe(shiftId);
+      const rows = await admin.query(
+        `SELECT shift_id FROM sales WHERE tenant_id = $1::uuid AND id = $2`,
+        [TENANT, res.body.data.id],
+      );
+      expect(rows[0].shift_id).toBe(shiftId);
+    });
+
+    it('a replay still answers once the drawer the bill went into has closed', async () => {
+      // The refusal is for NEW money only. A retry of a bill committed while the
+      // drawer was open — by either replay path — must answer the original, or the
+      // counter reads the 409 as "it didn't go through" and rings the bill up again.
+      const shiftId = await openShift();
+      const body = bill(twoLines());
+      const key = `k-replay-closed-${Date.now()}`;
+      const first = await post(body, { key });
+      expect(first.status).toBe(201);
+      await closeShift();
+
+      const sameKey = await post(body, { key });
+      expect(sameKey.status).toBe(201);
+      expect(sameKey.body).toEqual(first.body);
+
+      const sameId = await post(body, { key: `k-fresh-${Date.now()}` });
+      expect(sameId.status).toBe(201);
+      expect(sameId.body).toEqual(first.body);
+      expect(sameId.body.data.shiftId).toBe(shiftId);
+
+      expect(await saleCount()).toBe(1);
+      expect(await stockOf('p1')).toBe(45);
+    });
+
+    it('answers `cost_at_sale` per line, from the locked read (ADR-0008)', async () => {
+      const res = await post(bill(twoLines()));
+
+      expect(res.status).toBe(201);
+      expect(res.body.data.items).toEqual([
+        { lineNo: 1, productId: 'p1', costAtSale: '50.00' },
+        { lineNo: 2, productId: 'p8', costAtSale: '2400.00' },
+      ]);
+
+      // The answer is the row, not today's catalogue cost: move `products.cost` the
+      // way a weighted-average PO receive would and the stored line must not follow.
+      await admin.query(
+        `UPDATE products SET cost = 999 WHERE tenant_id = $1::uuid AND id = 'p1'`,
+        [TENANT],
+      );
+      const stored = await admin.query(
+        `SELECT cost_at_sale FROM sale_items
+          WHERE tenant_id = $1::uuid AND sale_id = $2 AND line_no = 1`,
+        [TENANT, res.body.data.id],
+      );
+      expect(Number(stored[0].cost_at_sale)).toBe(50);
+    });
+
+    it('answers the movement rows it wrote, matching the ledger', async () => {
+      const res = await post(bill(twoLines()));
+      expect(res.status).toBe(201);
+
+      const movements = res.body.data.movements as Record<string, unknown>[];
+      expect(movements).toHaveLength(2);
+      expect(movements[0]).toEqual({
+        id: expect.stringMatching(/^mv/) as unknown,
+        productId: 'p1',
+        partNo: 'HN-15412-KVB',
+        name: 'Oil Filter',
+        delta: -3,
+        // 🔴 A sale is `'sale'`; a credit note is `'return'` and a void `'void'`
+        // (migration `1788652800003`). Reports group by this column.
+        type: 'sale',
+        note: null,
+        stockAfter: 45,
+        date: expect.any(String) as unknown,
+      });
+      expect(movements[1]).toMatchObject({
+        productId: 'p8',
+        delta: -1,
+        type: 'sale',
+        stockAfter: 4,
+      });
+
+      const rows = await admin.query(
+        `SELECT id, product_id, delta, type, note, stock_after, date
+           FROM movements WHERE tenant_id = $1::uuid AND ref_id = $2`,
+        [TENANT, res.body.data.id],
+      );
+      expect(new Set(rows.map((r: { id: string }) => r.id))).toEqual(
+        new Set(movements.map((m) => m.id)),
+      );
+      const p1 = rows.find(
+        (r: { product_id: string }) => r.product_id === 'p1',
+      ) as { date: Date };
+      expect(p1.date.toISOString()).toBe(movements[0].date);
+    });
+
+    it('a replayed bill answers the identical body, new fields included', async () => {
+      await openShift();
+      const body = bill(twoLines());
+      const first = await post(body);
+      expect(first.status).toBe(201);
+      expect(first.body.data.shiftId).not.toBeNull();
+
+      // The `existingSale` path: a retry that lost its `Idempotency-Key`. Every field
+      // widened above has to come back off the stored rows, in the same order — the
+      // replay is where a widened response silently diverges, and `shiftId` in
+      // particular was null here until the SELECT learned to read it.
+      const replay = await post(body, { key: `k-fresh-${Date.now()}` });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+
+      expect(await saleCount()).toBe(1);
+      expect(await stockOf('p1')).toBe(45);
+      expect(await stockOf('p8')).toBe(4);
+    });
+
+    it('an idempotency-key replay answers the identical body, new fields included', async () => {
+      await openShift();
+      const body = bill(twoLines());
+      const key = `k-same-${Date.now()}`;
+      const first = await post(body, { key });
+      expect(first.status).toBe(201);
+
+      // The other replay path: the stored `response_body` round-trips through `jsonb`,
+      // which is where a `null` note or a date string would quietly change shape.
+      const replay = await post(body, { key });
+      expect(replay.status).toBe(201);
+      expect(replay.body).toEqual(first.body);
+      expect(await saleCount()).toBe(1);
+    });
+  });
+
+  it('refuses a bill on any payment method when no drawer is open, and writes nothing', async () => {
+    // Owner's decision, 2026-09-13: money is only taken while this device's drawer is
+    // open. Uniform across methods — a transfer or a tab is still takings the closing
+    // report has to see.
+    await admin.query(`DELETE FROM shifts WHERE tenant_id = $1::uuid`, [TENANT]);
+    await seedMechanic(admin, TENANT, {
+      id: 'm1',
+      code: 'M001',
+      name: 'ช่างสมชาย',
+      creditLimit: 100000,
+      creditBalance: 100,
+    });
+    const line = [{ productId: 'p1', name: 'Oil Filter', qty: 2, price: '85.00' }];
+    const attempts: { body: object; key: string }[] = [];
+    for (const paymentMethod of ['เงินสด', 'โอน/QR', 'เครดิตช่าง']) {
+      const attempt = {
+        body: bill(line, { paymentMethod, mechanicId: 'm1' }),
+        key: `k-noshift-${saleSeq}-${Date.now()}`,
+      };
+      attempts.push(attempt);
+      const res = await post(attempt.body, { key: attempt.key });
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
+      expect(res.body.error.message).toBe('No open shift');
+    }
+
+    expect(await saleCount()).toBe(0);
+    expect(await stockOf('p1')).toBe(48);
+    const written = await admin.query(
+      `SELECT (SELECT count(*)::int FROM sale_items WHERE tenant_id = $1::uuid) AS items,
+              (SELECT count(*)::int FROM movements WHERE tenant_id = $1::uuid) AS movements,
+              (SELECT count(*)::int FROM doc_counters WHERE tenant_id = $1::uuid) AS counters,
+              (SELECT count(*)::int FROM idempotency_keys WHERE tenant_id = $1::uuid) AS claims`,
+      [TENANT],
+    );
+    // No RC number consumed, and the key's claim rolled back with the bill.
+    expect(written[0]).toEqual({ items: 0, movements: 0, counters: 0, claims: 0 });
+    const mechanic = await admin.query(
+      `SELECT credit_balance, total_sales FROM mechanics WHERE tenant_id = $1::uuid AND id = 'm1'`,
+      [TENANT],
+    );
+    expect(mechanic[0]).toEqual({ credit_balance: '100.00', total_sales: '0.00' });
+
+    // Open the drawer and the same key goes through: the refusal left nothing behind
+    // that would turn the counter's retry into IDEMPOTENCY_KEY_REUSED.
+    await seedOpenShift(admin, TENANT, fixture.posDeviceId);
+    const retry = await post(attempts[0].body, { key: attempts[0].key });
+    expect(retry.status).toBe(201);
+    expect(retry.body.data.receiptNo).toMatch(/-0001$/);
+  });
+
+  it('refuses a bill once the drawer is closed', async () => {
+    await closeShift();
+    const res = await post(
+      bill([{ productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' }]),
+    );
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
+    expect(await saleCount()).toBe(0);
+    expect(await stockOf('p1')).toBe(48);
+  });
+
+  it('a bill in flight when the drawer closes is refused, not stamped onto the counted shift', async () => {
+    // `requireOpenShiftIdFor` reads the drawer `FOR SHARE`. A close in progress holds
+    // `FOR UPDATE` on it, so the bill waits; once the close commits, the bill re-reads
+    // the row, finds `closed_at` set, and is refused. A plain read would have seen the
+    // drawer open and committed the bill into a shift whose cash was already counted.
+    const closer = admin.createQueryRunner();
+    await closer.connect();
+    try {
+      await closer.startTransaction();
+      await closer.query(
+        `SELECT id FROM shifts WHERE tenant_id = $1::uuid AND is_active FOR UPDATE`,
+        [TENANT],
+      );
+
+      const inFlight = post(
+        bill([{ productId: 'p1', name: 'Oil Filter', qty: 1, price: '85.00' }]),
+      ).then((r) => r);
+
+      // Wait until the bill is actually blocked on the drawer row, not merely sent.
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const waiting = await admin.query(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE usename = 'pos_app' AND wait_event_type = 'Lock'
+              AND query ILIKE '%FROM shifts%FOR SHARE%'`,
+        );
+        if (waiting[0].n > 0) break;
+        if (Date.now() > deadline) throw new Error('the bill never blocked on the drawer');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+
+      await closer.query(
+        `UPDATE shifts SET closed_at = now(), physical_cash = 0
+          WHERE tenant_id = $1::uuid AND is_active`,
+        [TENANT],
+      );
+      await closer.commitTransaction();
+
+      const res = await inFlight;
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('NO_OPEN_SHIFT');
+      expect(await saleCount()).toBe(0);
+      expect(await stockOf('p1')).toBe(48);
+    } finally {
+      if (closer.isTransactionActive) await closer.rollbackTransaction();
+      await closer.release();
+    }
   });
 
   it('insufficient stock: the verbatim Thai message, and nothing is written', async () => {

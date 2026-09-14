@@ -1,13 +1,25 @@
-import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
+import { HttpException, HttpStatus, Injectable, Optional } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
 import type { EntityManager } from 'typeorm';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
-import { currentRequestContext } from '../common/request-context.js';
+import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
+import { JOB_RETURN_CREATED, QUEUE_SALE_POST } from '../queue/queue.constants.js';
 import { saleNotFound } from '../sales/sale-reads.service.js';
-import type { CustomerAfter } from '../sales/sales.service.js';
+import {
+  MOVEMENT_COLUMNS,
+  mechanicAfter as toMechanicAfter,
+  movementOut,
+  type CustomerAfter,
+  type MechanicAfter,
+  type MechanicRow,
+  type MovementOut,
+  type MovementRow,
+} from '../sales/sales.service.js';
 import type { CreateReturn, ReturnLine } from './returns.dto.js';
 
 /** Who is taking the goods back — read from the token, never from the body. */
@@ -52,8 +64,20 @@ export interface CreateReturnResult extends ReturnWithItems {
   saleVoided: boolean;
   /** Every product this credit note put back, with its new stock. */
   products: { id: string; stock: number }[];
+  /**
+   * The ledger rows this credit note wrote, `type: 'return'` (#82) — so the stock log
+   * on the client is not blind to refunds. A **void** writes `'void'` against the
+   * same goods and is a different row; the two must never be collapsed.
+   */
+  movements: MovementOut[];
   customerAfter: CustomerAfter | null;
+  /**
+   * The mechanic's balance after the reversal; null when the bill named none. Kept
+   * alongside `mechanicAfter` — it is what every existing reader looks at.
+   */
   mechanicCreditBalanceAfter: string | null;
+  /** All four running totals `reverseMechanic` moved; null when the bill names none. */
+  mechanicAfter: MechanicAfter | null;
 }
 
 /** The parent bill, locked, with everything the reversal needs off it. */
@@ -123,6 +147,9 @@ interface Demand {
 /** The one refund method that comes off the mechanic's tab instead of out of the drawer. */
 const DEDUCT_FROM_CREDIT = 'หักจากเครดิต';
 
+/** The one refund method that takes money out of the drawer (#100). */
+const CASH = 'เงินสด';
+
 /**
  * The credit-note transaction — a faithful port of `returns_repository.dart`, which
  * is itself the port of `db.js` `createReturn`.
@@ -134,6 +161,8 @@ const DEDUCT_FROM_CREDIT = 'หักจากเครดิต';
  *   2. `SELECT … FROM sales … FOR UPDATE` — 404 / `SALE_VOIDED` come off this row
  *   3. the over-refund guard, from the locked bill and every prior credit note
  *   4. the money, in integer satang
+ *   4½. the drawer, `FOR SHARE`: a cash refund needs this device's open shift (#100);
+ *      any other method takes the open shift's id if there is one
  *   5. lock the mechanic's row, if the bill named one
  *   6. `SELECT … FROM products … ORDER BY id FOR UPDATE`
  *   7. issue the CN number
@@ -147,16 +176,18 @@ const DEDUCT_FROM_CREDIT = 'หักจากเครดิต';
  * same "already refunded" total, both pass, and the shop refunds more than it sold.
  * The Dart reference is single-process and structurally cannot expose that race.
  *
- * 🔴 **Lock order: sale → mechanic → products → `doc_counters`.** `POST /sales` locks
- * the mechanic before the products (README, *Lock order*) so a cash bill and a credit
- * bill for the same mechanic cannot deadlock over a shared part; a return that took
- * the products first would deadlock against any such bill.
+ * 🔴 **Lock order: sale → shift (shared) → mechanic → products → `doc_counters`.**
+ * `POST /sales` locks the mechanic before the products (README, *Lock order*) so a
+ * cash bill and a credit bill for the same mechanic cannot deadlock over a shared
+ * part; a return that took the products first would deadlock against any such bill.
+ * The shift is where `POST /sales/:id/void` takes it too, after the bill's own row.
  */
 @Injectable()
 export class ReturnsService {
   constructor(
     private readonly docNumbers: DocNumberService,
     private readonly shifts: ShiftsService,
+    @Optional() @InjectQueue(QUEUE_SALE_POST) private readonly salePostQueue?: Queue,
   ) {}
 
   async create(
@@ -188,6 +219,28 @@ export class ReturnsService {
 
     const money = refundAmounts(demands, sale);
 
+    // Stamped from the device's own open drawer, never from the body (#28): the
+    // closing report is computed by `shift_id`. A cash refund is money leaving the
+    // drawer, so with no open drawer it is `409 NO_OPEN_SHIFT` (owner's decision on
+    // #100, 2026-09-13) — otherwise it lands in no closing report. After the guards,
+    // so a bad body is told what is wrong with it whether or not the drawer is open;
+    // an `Idempotency-Key` replay never reaches this method. A transfer or a deduction
+    // from the tab moves no expected cash, so it is still taken with no drawer and
+    // stamped null — but it does net into that shift's `grossProfit`, so both paths
+    // read the drawer `FOR SHARE` and a close waits for any refund in flight.
+    const shiftId =
+      dto.refundMethod === CASH
+        ? await this.shifts.requireOpenShiftIdFor(
+            manager,
+            tenantId,
+            actor.deviceId,
+          )
+        : await this.shifts.currentShiftIdFor(
+            manager,
+            tenantId,
+            actor.deviceId,
+          );
+
     // Mechanic before products, always — see the class comment.
     const mechanic = await this.lockMechanic(manager, tenantId, sale.mechanic_id);
     const locked = await this.lockProducts(manager, tenantId, demands);
@@ -198,14 +251,6 @@ export class ReturnsService {
       docType: 'cn',
     });
     const returnId = newId('r');
-    // Stamped from the device's own open drawer, never from the body (#28): the
-    // closing report is computed by `shift_id`, and null when the drawer was never
-    // opened — the old app lets staff take goods back without one.
-    const shiftId = await this.shifts.currentShiftIdFor(
-      manager,
-      tenantId,
-      actor.deviceId,
-    );
 
     const date = await this.insertReturn(
       manager,
@@ -225,7 +270,7 @@ export class ReturnsService {
       sold,
     );
 
-    const stockAfter = await this.restoreStock(
+    const { stockAfter, movements } = await this.restoreStock(
       manager,
       tenantId,
       returnId,
@@ -239,7 +284,7 @@ export class ReturnsService {
       sale,
       money,
     );
-    const mechanicCreditBalanceAfter = await this.reverseMechanic(
+    const mechanicAfter = await this.reverseMechanic(
       manager,
       tenantId,
       sale,
@@ -247,8 +292,33 @@ export class ReturnsService {
       dto.refundMethod,
       money,
     );
+    const mechanicCreditBalanceAfter = mechanicAfter?.creditBalance ?? null;
 
     const saleVoided = await this.autoVoid(manager, tenantId, dto.saleId, sold);
+
+    if (this.salePostQueue) {
+      const queue = this.salePostQueue;
+      const productIds = demands.map((d) => d.productId);
+      onTransactionCommit(async () => {
+        try {
+          await queue.add(
+            JOB_RETURN_CREATED,
+            {
+              tenantId,
+              correlationId: returnId,
+              returnId,
+              cnNo,
+              productIds,
+            },
+            {
+              jobId: `return-created:${tenantId}:${returnId}`,
+            },
+          );
+        } catch {
+          // Worker/queue failure must not fail an already committed transaction
+        }
+      });
+    }
 
     return {
       id: returnId,
@@ -268,8 +338,10 @@ export class ReturnsService {
       items,
       saleVoided,
       products: [...stockAfter].map(([id, stock]) => ({ id, stock })),
+      movements,
       customerAfter,
       mechanicCreditBalanceAfter,
+      mechanicAfter,
     };
   }
 
@@ -691,7 +763,7 @@ export class ReturnsService {
     returnId: string,
     demands: Demand[],
     locked: { id: string }[],
-  ): Promise<Map<string, number>> {
+  ): Promise<{ stockAfter: Map<string, number>; movements: MovementOut[] }> {
     const alive = new Set(locked.map((p) => p.id));
     const byProduct = new Map<string, number>();
     for (const d of demands) {
@@ -699,6 +771,7 @@ export class ReturnsService {
     }
 
     const stockAfter = new Map<string, number>();
+    const movements: MovementOut[] = [];
     for (const [productId, qty] of byProduct) {
       // Only a product with no row at all, which a sold one cannot be: `movements`
       // has a foreign key to `products` with no cascade and every sale writes a row
@@ -720,23 +793,29 @@ export class ReturnsService {
       );
       stockAfter.set(productId, updated[0].stock);
 
-      await manager.query(
-        `INSERT INTO movements (
+      // `RETURNING` rather than a second read (#82): the row's `id` and `date` are
+      // the database's, and the client has nowhere else to get them.
+      const written = returning<MovementRow>(
+        await manager.query(
+          `INSERT INTO movements (
            tenant_id, id, product_id, part_no, name, delta, type, stock_after, ref_id)
-         VALUES ($1::uuid, $2, $3, $4, $5, $6, 'return', $7, $8)`,
-        [
-          tenantId,
-          newId('mv'),
-          productId,
-          updated[0].part_no,
-          updated[0].name,
-          qty,
-          updated[0].stock,
-          returnId,
-        ],
+         VALUES ($1::uuid, $2, $3, $4, $5, $6, 'return', $7, $8)
+       RETURNING ${MOVEMENT_COLUMNS}`,
+          [
+            tenantId,
+            newId('mv'),
+            productId,
+            updated[0].part_no,
+            updated[0].name,
+            qty,
+            updated[0].stock,
+            returnId,
+          ],
+        ),
       );
+      movements.push(movementOut(written[0]));
     }
-    return stockAfter;
+    return { stockAfter, movements };
   }
 
   /**
@@ -810,7 +889,7 @@ export class ReturnsService {
     mechanic: { total_discount: string; total_credit: string } | null,
     refundMethod: string,
     money: RefundAmounts,
-  ): Promise<string | null> {
+  ): Promise<MechanicAfter | null> {
     if (sale.mechanic_id === null || mechanic === null) return null;
 
     const origDelta =
@@ -830,7 +909,7 @@ export class ReturnsService {
     const discountBaseSatang =
       totalDiscount !== 0 ? totalDiscount : satangOf(mechanic.total_credit);
 
-    const rows = returning<{ credit_balance: string }>(
+    const rows = returning<MechanicRow>(
       await manager.query(
         `UPDATE mechanics
             SET total_sales = GREATEST(0, total_sales - $3),
@@ -839,7 +918,7 @@ export class ReturnsService {
                 credit_balance = GREATEST(0, credit_balance - $6),
                 updated_at = now()
           WHERE tenant_id = $1::uuid AND id = $2
-      RETURNING credit_balance`,
+      RETURNING id, total_sales, total_discount, total_markup, credit_balance`,
         [
           tenantId,
           sale.mechanic_id,
@@ -856,9 +935,9 @@ export class ReturnsService {
         ],
       ),
     );
-    return rows.length === 0
-      ? null
-      : fromSatang(satangOf(rows[0].credit_balance));
+    // 🔴 `total_credit` is not in the answer, only in the read above: it is the legacy
+    // alias this method reverses *against*, never a figure the client may patch (#11).
+    return rows.length === 0 ? null : toMechanicAfter(rows[0]);
   }
 
   /**

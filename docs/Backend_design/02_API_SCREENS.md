@@ -194,15 +194,26 @@ sequenceDiagram
 { "status": "success",
   "data": { "id": "s1a2b3c4", "receiptNo": "RC01-2569-08-0042", "total": "1400.00",
             "pointsGranted": 140, "date": "2026-08-25T03:12:00Z",
+            "shiftId": "sh_20260825_01",          // ⭐ #82 — กะที่ server ประทับให้ client คำนวณเองไม่ได้ · บิลใหม่มีค่าเสมอ (ไม่มีกะเปิด = 409 NO_OPEN_SHIFT) null ได้เฉพาะบิลเก่า/นำเข้าที่ replay
             "mechanicCreditBalanceAfter": "5400.00",
+            "mechanicAfter": { "id": "m2", "totalSales": "182000.00", "totalDiscount": "3100.00",   // ⭐ #82 — ครบทั้งสี่ยอดสะสม
+                               "totalMarkup": "0.00", "creditBalance": "5400.00" },                 // 🔴 ไม่มี total_credit (ข้อตัดสิน #11)
             "customerAfter": { "id": "c3", "points": 1340, "totalSpend": "58200.00" },   // ⭐ เพิ่ม (ADR-0010 ข้อ 3) — ไม่งั้น Drift ฝั่ง client ค้างค่าเก่าจนกว่า /bootstrap รอบถัดไป
-            "products": [ { "id": "p12", "stock": 8, "offlineOk": true } ] } }
+            "products": [ { "id": "p12", "stock": 8 } ],   // ไม่มี offlineOk — เฟส 1 ยังไม่มีที่เก็บ (`sales.service.ts`), ADR-0010 ข้อ 4
+            "items": [ { "lineNo": 1, "productId": "p12", "costAtSale": "480.00" } ],    // ⭐ #82 — ต้นทุน ณ วันที่ขาย (ADR-0008) กู้คืนทีหลังไม่ได้
+            "movements": [ { "id": "mv…", "productId": "p12", "partNo": "BP-1234", "name": "Front Brake Pad",   // ⭐ #82 — แถว ledger ที่บิลนี้เขียน
+                             "delta": -2, "type": "sale", "note": null, "stockAfter": 8,
+                             "date": "2026-08-25T03:12:00Z" } ] } }
 
 // 409 — ของไม่พอ
 { "status": "error",
   "error": { "code": "INSUFFICIENT_STOCK",
              "message": "สต็อกไม่พอ:\nผ้าเบรกหน้า: สต็อก 1 แต่ต้องการ 2",
              "details": [ { "productId": "p12", "stock": 1, "requested": 2 } ] } }
+
+// 409 — เครื่องนี้ไม่มีกะเปิดอยู่ (ทุกวิธีจ่าย: เงินสด / โอน/QR / เครดิตช่าง) — ข้อตัดสินเจ้าของร้าน 2026-09-13
+{ "status": "error",
+  "error": { "code": "NO_OPEN_SHIFT", "message": "No open shift" } }
 ```
 
 > **หมายเหตุสำคัญ 4 ข้อ:**
@@ -214,10 +225,19 @@ sequenceDiagram
 >    reconciliation (ADR-0007)
 >    ✅ รูปแบบ `RC01-2569-08-0042` **อนุมัติแล้ว** (ADR-0007, grill รอบ 2) — ยังต้องให้เจ้าของร้านเห็นใบเสร็จ
 >    ตัวอย่างจริงก่อนพิมพ์ใบแรก แต่ไม่ใช่ "รูปแบบที่เสนอ" อีกต่อไป
-> 3. **`shiftId` ไม่อยู่ใน body** — server ประทับให้เองจากลิ้นชักที่เปิดอยู่ของเครื่องนั้น (#28)
+> 3. **`shiftId` ไม่อยู่ใน request body** — server ประทับให้เองจากลิ้นชักที่เปิดอยู่ของเครื่องนั้น (#28)
 >    ส่งมาก็ไม่อ่าน · รายงานปิดร้านคิดจาก `shift_id` ถ้ารับจาก body เครื่องหนึ่งเขียนเข้ากะของอีกเครื่องได้
+>    **แต่อยู่ใน response** (#82) เพราะ client ไม่มีทางรู้ค่าที่ server ประทับ
+>    🔴 **ไม่มีกะเปิด = ไม่ขาย** (ข้อตัดสินเจ้าของร้าน 2026-09-13 "ต้องเปิดกะก่อนรับเงินทุกกรณี"):
+>    เครื่องที่ไม่มีกะเปิดอยู่ (ไม่เคยเปิด หรือปิดกะไปแล้ว) ได้ `409 NO_OPEN_SHIFT` ทุกวิธีจ่าย ไม่มีอะไรถูกเขียน
+>    (ไม่ตัดสต็อก ไม่กินเลข RC) · **replay ไม่โดนปฏิเสธ** — บิลที่ commit ตอนกะยังเปิด ยิงซ้ำหลังปิดกะก็ยังได้ body เดิม
+>    (เดิมพอร์ตจากแอปเก่าที่ขายได้โดยไม่เปิดลิ้นชักแล้วเก็บ `shift_id` เป็น null — เงินก้อนนั้นไม่เข้ารายงานปิดกะใดเลย)
 > 4. **ต้องคืน `products[]` ที่สต็อกเปลี่ยนกลับมาใน response** เพื่อให้หน้า Checkout อัปเดตค่าในเครื่องได้ทันที
 >    ไม่ต้องยิง `GET /products` ซ้ำ — แก้ปัญหา read-your-writes ที่ cache 5 นาที + replica lag ทำให้เห็นสต็อกเก่า
+> 5. 🔴 **replay ต้องตอบ body เดิมทุก field** (#82) — ทั้งทาง `Idempotency-Key` และทาง `existingSale`
+>    (ยิงซ้ำด้วย `id` เดิมแต่ key ใหม่) `existingSale` ต้อง `SELECT` `shift_id` / `sale_items` /
+>    `movements` / ยอดช่าง กลับมาให้ครบ ไม่งั้นบิลที่ replay จะตอบ null ให้กับกะที่มันมีจริง
+>    ทุก array เรียงลำดับแบบเดียวกับตอนเขียน (`items` ตาม `line_no`, `products`/`movements` ตามลำดับสินค้าบนบิล)
 
 ### 3.2 Products (จัดการอะไหล่)
 
@@ -230,7 +250,7 @@ sequenceDiagram
 | ประวัติสต็อก | `GET /movements?productId=&from=&to=&page=` |
 | ซัพพลายเออร์ | `GET /products/:id/suppliers` · `POST /suppliers` · `PATCH /suppliers/:id` · `DELETE /suppliers/:id` |
 | รายงานสต็อก | `GET /reports/stock-value` |
-| ยอดขายรายชิ้น | `GET /reports/product-sales?productId=&from=&to=` |
+| ยอดขายรายชิ้น | `GET /reports/product-sales?productId=&from=&to=` — #97: บิลชุดเดียวกับ summary (void เองไม่นับ, void อัตโนมัติจากคืนครบยังนับแล้วหักใบลดหนี้) |
 | พิมพ์ป้าย | `GET /settings` (เอาชื่อร้านไปขึ้นบนป้าย) |
 
 > ⚠️ **จุดที่ต้องแก้จากของเดิม:** ตอนนี้หน้า Products เรียก `salesRepo.getSales()` **โหลดบิลทั้งหมด**
@@ -281,7 +301,7 @@ sequenceDiagram
 |---|---|
 | `GET /mechanics?search=` | ส่ง `creditBalance` / `creditLimit` มาด้วยเสมอ |
 | `POST /mechanics` (`code` = `M###`) · `PATCH` · `DELETE` | |
-| **`POST /mechanics/:id/credit-payments`** | ช่างมาจ่ายหนี้ — ลด `credit_balance` (clamp ที่ 0), ออกเลขใบเสร็จรับเงิน, ต้อง idempotent |
+| **`POST /mechanics/:id/credit-payments`** | ช่างมาจ่ายหนี้ — ลด `credit_balance` (clamp ที่ 0), ออกเลขใบเสร็จรับเงิน (series **CP**), ต้อง idempotent · **pos เท่านั้น** · body `{ id?, amount, paymentMethod, note?, allowOverpayment? }` — `paymentMethod` เป็น `'เงินสด'` \| `'โอน/QR'` **บังคับ** (รายงานปิดร้านต้องแยกเงินสดออกจากเงินโอน) · จ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` = `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` (§8.1) · ตอบ payment + `mechanicCreditBalanceAfter` · server แสตมป์ `shift_id` จากลิ้นชักที่เปิดอยู่ของเครื่องนั้นเอง (#24) · 🔴 เครื่องไม่มีกะเปิด = `409 NO_OPEN_SHIFT` ทั้งเงินสดและโอน ไม่มีอะไรถูกเขียน ไม่กินเลข CP (ข้อตัดสินเจ้าของร้าน 2026-09-13) — ตรวจ**หลัง** replay ด้วย `id` เดิม จึงยิงซ้ำหลังปิดกะยังได้รายการเดิม |
 | `GET /credit-payments?mechanicId=&from=&to=` | |
 | **`GET /mechanics/:id/sales?page=`** | ⚠️ เหมือนข้อ 3.5 — เดิม filter ใน client |
 | `GET /mechanics/:id/statement?from=&to=` | ใบแจ้งหนี้: ยอดยกมา + ซื้อ + จ่าย + คงเหลือ |
@@ -310,8 +330,25 @@ sequenceDiagram
 |---|---|
 | `GET /sales?search=<receiptNo>&page=` | ค้นบิลที่จะคืน |
 | **`GET /sales/:id/refunded-qty`** | ตรงกับ `getRefundedQty()` เดิม — คืน map `productId → qty ที่**คืนไปแล้ว**` |
-| `POST /returns` | ⭐ transaction + idempotent |
+| `POST /returns` | ⭐ transaction + idempotent · 🔴 **#100 (ข้อตัดสินเจ้าของร้าน 2026-09-13): คืนเป็น `'เงินสด'` ต้องมีกะเปิดอยู่** — ไม่มี = `409 NO_OPEN_SHIFT` ไม่มีอะไรถูกเขียน (ไม่คืนสต็อก ไม่กินเลข CN ไม่ auto-void) · `'โอน'`/`'หักจากเครดิต'` ไม่แตะเงินในลิ้นชัก จึงรับได้แม้ไม่มีกะ (`shift_id` null) |
 | `GET /returns?saleId=&from=&to=&page=` | ประวัติการคืน · `saleId` เป็นตัวกรองเพิ่ม (#22) สำหรับดูใบลดหนี้ของบิลเดียว |
+
+**`POST /returns` — 201 body** = ใบลดหนี้ (`id, cnNo, saleId, receiptNo, refundSubtotal, refundDiscount,
+refundTotal, refundMethod, reason, customerId, mechanicId, mechanicName, date, shiftId, items[]`)
+บวกผลที่ client ต้อง patch: `saleVoided`, `products[] {id, stock}`, `customerAfter`,
+`mechanicCreditBalanceAfter` และ **#82 เพิ่มอีกสอง field**
+
+```jsonc
+  "movements": [ { "id": "mv…", "productId": "p12", "partNo": "BP-1234", "name": "Front Brake Pad",
+                   "delta": 2, "type": "return", "note": null, "stockAfter": 10,
+                   "date": "2026-08-25T04:00:00Z" } ],   // 🔴 'return' เท่านั้น — void เขียน 'void' (migration 1788652800003)
+  "mechanicAfter": { "id": "m2", "totalSales": "…", "totalDiscount": "…",
+                     "totalMarkup": "…", "creditBalance": "…" }   // 🔴 ไม่มี total_credit (#11)
+```
+
+> หนึ่งแถว `movements` ต่อ **หนึ่งสินค้า** ไม่ใช่ต่อบรรทัด — `uq_movements_ref` unique บน
+> `(tenant_id, type, ref_id, product_id)` ใบลดหนี้ที่คืนของชิ้นเดียวกันสองราคาจึงได้แถวเดียว
+> ส่วน `items[]` ได้สองบรรทัด · `items[].costAtSale` มีอยู่แล้วตั้งแต่ #22 (คัดจากบรรทัดบิลแม่)
 
 ### 3.8 Quotes (ใบเสนอราคา)
 
@@ -335,9 +372,9 @@ sequenceDiagram
 
 | Endpoint ใหม่ | คืนอะไร | SQL |
 |---|---|---|
-| `GET /reports/summary?from=&to=` | ยอดขาย, จำนวนบิล, บิลเฉลี่ย, ยอดคืน, ยอดสุทธิ, กำไรขั้นต้น | `SUM/COUNT/AVG` บน `sales` + `returns` |
-| `GET /reports/top-products?from=&to=&limit=10` | สินค้าขายดี | `GROUP BY product_id` บน `sale_items` |
-| `GET /reports/by-category?from=&to=` | ยอดขายแยกหมวด | join `sale_items → products` |
+| `GET /reports/summary?from=&to=` | ยอดขาย, จำนวนบิล, บิลเฉลี่ย, ยอดคืน, ยอดสุทธิ, กำไรขั้นต้น (+ `estimatedCostRows`/`unknownCostRows`) | `SUM/COUNT/AVG` บน `sales` + `returns` — #95: ทุกตัวเลขใช้บิลชุดเดียวกับรายงานปิดร้าน (void เองไม่นับ, void อัตโนมัติจากคืนครบยังนับแล้วหักใบลดหนี้), สูตรกำไรเดียวกับ §3.11, คืนสินค้าลงวันตาม `returns.date` |
+| `GET /reports/top-products?from=&to=&limit=10` | สินค้าขายดี | `GROUP BY product_id` บน `sale_items` — #97: บิลชุดเดียวกับ summary (void เองไม่นับ, void อัตโนมัติจากคืนครบยังนับแล้วหักใบลดหนี้) |
+| `GET /reports/by-category?from=&to=` | ยอดขายแยกหมวด | join `sale_items → products` — #97: บิลชุดเดียวกับ summary (void เองไม่นับ, void อัตโนมัติจากคืนครบยังนับแล้วหักใบลดหนี้) |
 | `GET /reports/by-payment?from=&to=` | แยกตามวิธีชำระ (เงินสด/โอน/เครดิต) | |
 | `GET /reports/daily?from=&to=` | ยอดรายวัน (กราฟ) | `GROUP BY date_trunc('day', date)` |
 | `GET /reports/stock-value` | มูลค่าสต็อกรวม = `SUM(stock × cost)` | |
@@ -393,6 +430,17 @@ sequenceDiagram
 
 > **ถ้าลืมพจน์ "ช่างจ่ายหนี้เงินสด" ลิ้นชักจะแสดงว่า "ขาด" ทุกวัน** เท่ากับยอดที่ช่างมาจ่าย
 > ซึ่งจะทำให้พนักงานเลิกเชื่อรายงานปิดร้านไปเลย (โค้ดปัจจุบันบวกไว้ถูกแล้ว)
+
+> **#30 — สิ่งที่ `GET /reports/closing?shiftId=` ตอบ:** `startingCash, cashSales, cashCreditPayments, cashRefunds,
+> drawerIn, drawerOut, expectedCash, physicalCash, variance` + `grossProfit, estimatedCostRows, unknownCostRows`
+> (`physicalCash`/`variance` เป็น `null` จนกว่าจะปิดกะ) · ทุกพจน์กรองด้วย `shift_id` + วิธีจ่าย `'เงินสด'` ของเอกสารนั้น ๆ ·
+> บิลที่ **void เอง** ไม่นับ ส่วนบิลที่ void อัตโนมัติจากการคืนครบยังนับ แล้วใบลดหนี้หักออก (ไม่หักซ้ำ) ·
+> กำไรขั้นต้น = `(Σ sales.total − Σ refund_total) ÷ (1 + tax_rate/100) − ต้นทุน` ใช้ `cost_at_sale` ก่อน
+> fallback `products.cost` เฉพาะแถว NULL (ADR-0008)
+>
+> **ข้อจำกัดที่รู้แล้ว (#30):**
+> (ก) ~~void เอง (`POST /sales/:id/void`) บิลของกะที่ปิดไปแล้ว ทำให้รายงานของกะที่ปิดแล้วนั้นเปลี่ยน และลิ้นชักปัจจุบันไม่แสดงเงินออก~~ — **ปิดแล้วโดย #94** (ข้อตัดสินเจ้าของร้าน 2026-09-13, ทางเลือก A): void ได้เฉพาะบิลของกะที่เปิดอยู่ของเครื่องนั้น นอกนั้น `409 SALE_NOT_IN_OPEN_SHIFT` แล้วออกใบลดหนี้แทน ซึ่งลงกะปัจจุบัน รายงานกะที่ปิดแล้วจึงไม่เปลี่ยนย้อนหลัง · ⚠️ ใบลดหนี้เงินสดออกได้**เฉพาะตอนมีกะเปิดอยู่** — ถ้าปิดลิ้นชักวันนี้ไปแล้วจะได้ `409 NO_OPEN_SHIFT` และกดเปิดกะซ้ำวันเดียวกันไม่ช่วย (`POST /shifts/open` คืนกะที่ปิดแล้วของวันนี้) **คืนเงินสดได้อีกทีเมื่อเปิดกะวันถัดไป** (เจ้าของร้านรับผลนี้ตอนเลือกทางเลือก A) ส่วนคืนแบบ `'โอน'` ยังทำได้ (ข้อ (ข) ข้างล่าง, #100) · ⚠️ กะที่ไม่เคยปิดและไม่เคย archive (ไม่มีใครกดเปิดกะวันถัดไป) ยังนับว่าเปิดอยู่ บิลเก่าหลายวันในกะนั้นจึงยัง void ได้
+> (ข) ~~`POST /returns` ตอนไม่มีกะเปิด แสตมป์ `shift_id` เป็น null ยอดคืนเงินนั้นจึงไม่อยู่ในรายงานปิดร้านใดเลย~~ — **ปิดแล้วสำหรับเงินสดโดย #100** (ข้อตัดสินเจ้าของร้าน 2026-09-13, ทางเลือก A เฉพาะเงินสด): คืนเป็น `'เงินสด'` โดยไม่มีกะเปิด = `409 NO_OPEN_SHIFT` ไม่มีอะไรถูกเขียน — ตรวจหลัง guard ของบิล (`SALE_VOIDED`, `REFUND_METHOD_NOT_ALLOWED`, `RETURN_PRICE_MISMATCH`, `OVER_REFUND`) และอ่านลิ้นชัก `FOR SHARE` (ปิดกะรอใบลดหนี้เงินสดที่กำลังทำ) · replay ด้วย `Idempotency-Key` เดิมหลังปิดกะยังได้ผลเดิม · ⚠️ `'โอน'`/`'หักจากเครดิต'` ยังรับได้โดยไม่มีกะ และแสตมป์ `shift_id` null — ไม่กระทบเงินสดที่ควรมี แต่หักเข้า `grossProfit` ของกะนั้น จึงอ่านลิ้นชัก `FOR SHARE` เช่นกัน (ปิดกะรอใบลดหนี้ทุกวิธีที่กำลังทำ รายงานกะที่ปิดแล้วไม่เปลี่ยนย้อนหลัง)
 
 > ⚠️ **บั๊กที่จะโผล่ทันทีตอนมี 2 เครื่อง:** ตอนนี้รายงานปิดกะคำนวณจาก "บิลทั้งหมดที่เวลาอยู่ในช่วงกะ"
 > ซึ่งข้ามเครื่องกันไม่ได้และข้ามเที่ยงคืนไม่ได้
@@ -460,8 +508,8 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | **POST** | **`/sales`** | ✔ | **pos เท่านั้น** | invalidate | ✅ post-process | **✔ บังคับ** |
 | GET | `/sales` | ✔ | ทั้งคู่ | – | – | – |
 | GET | `/sales/:id` · `/sales/:id/refunded-qty` | ✔ | ทั้งคู่ | – | – | – |
-| POST | `/sales/:id/void` 🆕 | manager+PIN *(รวม `owner` — #23 ตีความว่าเจ้าของร้านไม่ได้ต่ำกว่า manager `users.role` เป็น flat list ไม่ได้บอกลำดับ ถ้าไม่ใช่แบบนี้ต้องแก้ที่นี่)* | **pos เท่านั้น** | invalidate | – | ✔ |
-| **POST** | **`/returns`** | ✔ | **pos เท่านั้น** | invalidate | ✅ post-process | **✔ บังคับ** |
+| POST | `/sales/:id/void` 🆕 | manager+PIN *(รวม `owner` — #23 ตีความว่าเจ้าของร้านไม่ได้ต่ำกว่า manager `users.role` เป็น flat list ไม่ได้บอกลำดับ ถ้าไม่ใช่แบบนี้ต้องแก้ที่นี่)* · 🔴 **#94 (ข้อตัดสินเจ้าของร้าน 2026-09-13): void ได้เฉพาะบิลที่ `shift_id` ตรงกับกะที่เปิดอยู่ของเครื่องที่เรียก** — ไม่มีกะเปิด = `409 NO_OPEN_SHIFT` · บิลของกะอื่น (ปิดแล้ว, ของเครื่องอื่น, หรือ `shift_id` null จากบิลนำเข้า) = `409 SALE_NOT_IN_OPEN_SHIFT` → ให้ออกใบลดหนี้ (`POST /returns`) แทน ซึ่งลงกะปัจจุบัน · ตรวจหลัง `SALE_VOIDED`/`SALE_HAS_RETURNS` และอ่านลิ้นชัก `FOR SHARE` (ปิดกะรอ void ที่กำลังทำ) · replay ด้วย `Idempotency-Key` เดิมหลังปิดกะยังได้ผลเดิม | **pos เท่านั้น** | invalidate | – | ✔ |
+| **POST** | **`/returns`** · 🔴 #100: `refundMethod = 'เงินสด'` ไม่มีกะเปิด = `409 NO_OPEN_SHIFT` (วิธีอื่นรับได้ `shift_id` null) | ✔ | **pos เท่านั้น** | invalidate | ✅ post-process | **✔ บังคับ** |
 | GET | `/returns` | ✔ | ทั้งคู่ | – | – | – |
 | GET | `/purchase-orders` | ✔ | ทั้งคู่ | – | – | – |
 | POST | `/purchase-orders` | manager | ทั้งคู่ | – | – | ✔ |
@@ -619,26 +667,30 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `INSUFFICIENT_STOCK` | `สต็อกไม่พอ:\n<name>: สต็อก <n> แต่ต้องการ <m>` |
 | 409 | `OVER_REFUND` | `คืนเกินจำนวนที่ขาย:\n<name>: คืนได้อีก <n> แต่ขอคืน <m>` |
 | 404 | `SALE_NOT_FOUND` | `Sale not found` |
+| 404 | `SHIFT_NOT_FOUND` | – (ไม่แสดงให้ผู้ใช้เห็น · `GET /reports/closing?shiftId=` กับกะที่ไม่มี หรือเป็นของร้านอื่น — เพิ่มตอน #30) |
 | 409 | `SALE_VOIDED` | `Bill already voided` |
 | 409 | `DRAWER_CLOSED` | `ลิ้นชักปิดแล้ว ไม่สามารถบันทึกรายการเงินเพิ่มได้` |
 | 400 | `INVALID_BACKUP` | `ไฟล์สำรองไม่ถูกต้อง — ไม่พบข้อมูล __meta` |
-| 409 | `NO_OPEN_SHIFT` | `No open shift` |
+| 409 | `NO_OPEN_SHIFT` | `No open shift` (ลิ้นชัก/ปิดกะ และตั้งแต่ 2026-09-13 `POST /sales` + `POST /mechanics/:id/credit-payments` ด้วย — ไม่มีกะเปิด = ไม่รับเงิน · #94: `POST /sales/:id/void` ด้วย · #100: `POST /returns` ที่คืนเป็น `'เงินสด'` ด้วย) |
 | 409 | `IDEMPOTENCY_KEY_REUSED` | – (ไม่แสดงให้ผู้ใช้เห็น) |
 | 400 | `IDEMPOTENCY_KEY_INVALID` | – (ไม่แสดงให้ผู้ใช้เห็น · header หาย หรือยาวเกิน 200 ตัวอักษร — เพิ่มตอน #18) |
 | 503 | `IDEMPOTENCY_KEY_IN_FLIGHT` | – (ไม่แสดงให้ผู้ใช้เห็น · คำขอเดิมยังทำงานอยู่ ให้ client retry — เพิ่มตอน #18) |
 | 409 | `RECEIPT_NO_CONFLICT` | – (client ออกเลขใหม่เองก่อนพิมพ์ · ตอน sync เข้าคิว reconciliation — ADR-0007; เดิมโผล่แค่ใน §3.1) |
 | 409 | `DOC_NUMBER_EXHAUSTED` | – **ยังไม่มีข้อความไทย** (เลขเอกสารของเครื่องนี้เต็มเดือน = 9,999 ใบ — เพิ่มตอน #19 ดู §8.1) |
 | 409 | `SALE_HAS_RETURNS` | – **ยังไม่มีข้อความไทย** (บิลนี้มีใบลดหนี้แล้ว void ไม่ได้ — เพิ่มตอน #23 ดู §8.1) |
+| 409 | `SALE_NOT_IN_OPEN_SHIFT` | – **ยังไม่มีข้อความไทย** (`This bill is not from the open shift and cannot be voided. Issue a credit note instead.` — void บิลที่ไม่ใช่ของกะที่เปิดอยู่ของเครื่องนี้ ให้ออกใบลดหนี้แทน — เพิ่มตอน #94 ดู §8.1) |
 | 409 | `SALE_ID_REUSED` | – **ยังไม่มีข้อความไทย** (`id` ของบิลถูกใช้ไปแล้วกับบิลที่ยอดไม่ตรงกัน — เพิ่มตอน #20 ดู §8.1) |
 | 409 | `CREDIT_LIMIT_EXCEEDED` | – **ยังไม่มีข้อความไทย** (ขายเครดิตเกินวงเงินโดยไม่มี `overrideCreditLimit: true` — client แสดง dialog เดิมแล้วส่งซ้ำ เพิ่มตอน #21 ดู §8.1 / §8.2) |
 | 409 | `RETURN_PRICE_MISMATCH` | – **ยังไม่มีข้อความไทย** (บรรทัดใบลดหนี้ราคาไม่ตรงกับที่บิลแม่ขายจริง — เพิ่มตอน #22 ดู §8.1) |
 | 409 | `REFUND_METHOD_NOT_ALLOWED` | – **ยังไม่มีข้อความไทย** (เลือก `หักจากเครดิต` กับบิลที่ไม่มีช่าง — เพิ่มตอน #22 ดู §8.1) |
+| 409 | `CREDIT_PAYMENT_EXCEEDS_BALANCE` | – **ยังไม่มีข้อความไทย** (ช่างจ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` — client แสดง dialog เดิมแล้วส่งซ้ำ เพิ่มตอน #24 ดู §8.1) |
+| 409 | `CREDIT_PAYMENT_ID_REUSED` | – **ยังไม่มีข้อความไทย** (`id` ของการชำระถูกใช้ไปแล้วกับรายการที่ช่าง/ยอด/วิธีจ่ายไม่ตรงกัน — เพิ่มตอน #24 ดู §8.1) |
 | 401/403 | `UNAUTHENTICATED` / `FORBIDDEN` | – |
 | 429 | `RATE_LIMITED` | `ระบบกำลังทำงานหนัก กรุณารอสักครู่` | – |
 
 ### 8.1 Error ที่เป็น **ของใหม่** (ไม่มีใน `db.js`)
 
-ทั้ง 14 ตัวนี้เป็นพฤติกรรมที่ระบบเดิม **ไม่มี** จึงไม่มีข้อความไทยให้ลอก
+ทั้ง 17 ตัวนี้เป็นพฤติกรรมที่ระบบเดิม **ไม่มี** จึงไม่มีข้อความไทยให้ลอก
 
 > **สถานะ 2026-09-04 — ข้อความชั่วคราว ผ่านเจ้าของโปรเจกต์แล้ว ยังไม่ผ่านคนหน้าร้าน**
 > ข้อความในคอลัมน์ *ข้อความไทย* ด้านล่าง **agent เป็นคนร่าง** ไม่ได้ลอกมาจาก `db.js`
@@ -658,9 +710,12 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 429 | `RATE_LIMITED` | `ระบบกำลังทำงานหนัก กรุณารอสักครู่` | เกินโควตาต่อ tenant (ADR-0006) — ต้องมี header `Retry-After` ด้วยเสมอ |
 | 409 | `DOC_NUMBER_EXHAUSTED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | เลขเอกสาร 4 หลักของเครื่องหนึ่งเต็มภายในเดือนเดียว (ADR-0007 สั่งให้ error ชัด ๆ ห้ามวนกลับ `0001` เพราะจะชนใบที่พิมพ์ไปแล้ว) — ของเดิมออกเลขสุ่ม ไม่มีเพดาน · **#19 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง เพราะ `CLAUDE.md` ห้ามคิดข้อความไทยใหม่ · 9,999 ใบ/เดือน/เครื่อง ไม่น่าเกิดที่ร้านนี้ แต่ถ้าเกิดคือขายไม่ได้จนกว่าจะขึ้นเดือนใหม่ |
 | 409 | `SALE_HAS_RETURNS` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /sales/:id/void` กับบิลที่มีใบลดหนี้แล้ว — ถ้าปล่อยให้ void จะคืนสต็อกซ้ำกับที่ใบลดหนี้คืนไปแล้ว · ของเดิมไม่มีปุ่ม void จึงไม่มีเคสนี้ · **#23 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง |
+| 409 | `SALE_NOT_IN_OPEN_SHIFT` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /sales/:id/void` กับบิลที่ `shift_id` ไม่ใช่กะที่เปิดอยู่ของเครื่องนี้ (กะที่ปิดแล้ว, กะของเครื่องอื่น, หรือบิลนำเข้าที่ไม่มีกะ) — ถ้าปล่อยให้ void รายงานปิดกะที่นับเงินไปแล้วจะเปลี่ยนย้อนหลัง และลิ้นชักที่เงินออกจริงไม่มีรายการเงินออก (#94) · ทางที่ถูกคือออกใบลดหนี้ ซึ่งลงกะปัจจุบัน (ต้องมีกะเปิดอยู่ — ไม่งั้นใบลดหนี้เงินสดได้ `409 NO_OPEN_SHIFT`, #100) · ของเดิมไม่มีปุ่ม void จึงไม่มีเคสนี้ · **#94 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง · ข้อความควรบอกให้ไปออกใบลดหนี้ |
 | 409 | `SALE_ID_REUSED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | §3.1 บอกว่า `id` ที่ client สร้างคือ natural idempotency key → ยิงซ้ำด้วย `id` เดิม **และยอดเท่าเดิม** server คืนบิลเดิมให้ (ไม่ใช่ error ไม่ใช่ตัดสต็อกซ้ำ) แต่ถ้า `id` เดิม **ยอดต่าง** = คนละบิลที่ใส่ `id` ชนกัน ถ้าเงียบไว้เท่ากับทำเงินของบิลใหม่หาย · เดิม `POST /sales` ชน PK แล้วเป็น **500** ซึ่งทำให้พนักงานตีบิลใหม่ = ขายซ้ำ · **#20 คืนข้อความอังกฤษไว้ก่อน** |
 | 409 | `SHIFT_ALREADY_CLOSED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `POST /shifts/close` กับกะที่ปิดไปแล้ว — `physical_cash` คือเงินที่นับจริง กดซ้ำแล้วทับค่าเดิมเงียบ ๆ โดยไม่มีร่องรอย (idempotency key คนละใบกันจึงกันไม่ได้) · ของเดิม `closeShift()` ใน `shifts_repository.dart` **ไม่ throw** แค่เขียนทับค่าเดิม จึงไม่มีข้อความไทยให้ลอก · **ใช้ `DRAWER_CLOSED` ไม่ได้** — ข้อความไทยของ code นั้นพูดถึง“บันทึกรายการเงินเพิ่ม” ซึ่งเป็นคนละการกระทำ · **#28 คืนข้อความอังกฤษไว้ก่อน** |
 | 409 | `CREDIT_LIMIT_EXCEEDED` | 🔴 **ยังไม่ร่าง — client แสดง dialog ไทยของเดิมเอง** | ส่งเฉพาะเมื่อ `paymentMethod = 'เครดิตช่าง'` **และ** `credit_balance + total > credit_limit` **และ** body ไม่มี `overrideCreditLimit: true` — `details { creditLimit, creditBalance, newBalance }` · ของเดิมไม่ใช่ error แต่เป็น confirm dialog (`checkout_screen.dart:567` — ดู §8.2) client จึงแสดง dialog เดิมแล้วส่งบิลซ้ำพร้อม flag; server จึงเขียน `audit_log` (`sale.credit_limit_override`) · **#21 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง |
+| 409 | `CREDIT_PAYMENT_EXCEEDS_BALANCE` | 🔴 **ยังไม่ร่าง — client แสดง dialog ไทยของเดิมเอง** | `POST /mechanics/:id/credit-payments` ที่ `amount > credit_balance` และ body ไม่มี `allowOverpayment: true` — `details { creditBalance, amount, overpayBy }` · ของเดิมไม่ใช่ error แต่เป็น confirm dialog (`mechanics_screen.dart:1331` — *“จำนวนเงิน X เกินยอดค้าง Y ยืนยันรับเงิน?”*) client จึงแสดง dialog เดิมแล้วส่งซ้ำพร้อม flag; server เขียน `audit_log` (`mechanic.credit_payment_overpayment`) · จำเป็นเพราะ AC สั่ง `GREATEST(0, …)` ซึ่งเป็นรูปเดียวกับบั๊กเงินของ #22: clamp บน input ที่ไม่ได้ตรวจ เปลี่ยนการพิมพ์ผิด 100,000 แทน 1,000 ให้กลายเป็นหนี้ที่หายไปเงียบ ๆ พร้อมใบเสร็จของเงินที่ไม่มีใครยื่นให้ · **#24 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง |
+| 409 | `CREDIT_PAYMENT_ID_REUSED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | คู่ของ `SALE_ID_REUSED` — `POST /mechanics/:id/credit-payments` รับ `id` ที่ client สร้าง (`newId('cp')`) เป็นด่านกันซ้ำชั้นที่สองต่อจาก `Idempotency-Key`: ยิงซ้ำด้วย `id` เดิม**และ**ช่าง/ยอด/วิธีจ่ายเท่าเดิม = server คืนรายการเดิม ถ้าไม่ตรง = คนละรายการที่ `id` ชนกัน (บั๊กฝั่ง client) ถ้าเงียบไว้เท่ากับทำเงินของรายการใหม่หาย · **#24 คืนข้อความอังกฤษไว้ก่อน** |
 | 409 | `RETURN_PRICE_MISMATCH` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | ราคาบนบรรทัดใบลดหนี้ไม่ตรงกับราคาที่ `sale_items` ของบิลแม่ขายจริง — `details { lines: [{ productId, price, soldAt[] }] }` · ของเดิม client เป็นคนคิดเงินคืนเอง (`returns_repository.dart` เอา `price` ที่ส่งมาคูณตรง ๆ) จึงไม่มีเคสนี้ แต่บน server ถ้าเชื่อราคาจาก client เครื่อง `pos` จะออกใบลดหนี้ 999,999 บาทจากบิล 85 บาทได้ แล้ว `GREATEST(0, …)` กลบให้เงียบ (ยอดค้างช่างกลายเป็น 0 โดยไม่ error) · บิลเดียวขายของชิ้นเดียวกันได้สองราคา “ราคาของสินค้านี้บนบิล” จึงเป็นเซ็ตไม่ใช่ค่าเดียว — server จึง**ปฏิเสธ** ไม่ใช่แก้ราคาให้เงียบ ๆ · **#22 คืนข้อความอังกฤษไว้ก่อน** ไม่แต่งไทยเอง |
 | 409 | `REFUND_METHOD_NOT_ALLOWED` | 🔴 **ยังไม่ร่าง — ต้องให้เจ้าของร้านเป็นคนตั้ง** | `refundMethod = 'หักจากเครดิต'` กับบิลที่ไม่มี `mechanic_id` — ไม่มีเครดิตให้หัก ใบลดหนี้จะบันทึกว่าหักจากเครดิตทั้งที่ไม่ได้หักอะไร และรายงานปิดกะก็ไม่นับเป็นเงินสด เงินหายทั้งสองทาง · หน้าจอเดิมเปิดตัวเลือกนี้เฉพาะบิลที่มีช่าง (`returns_screen.dart:904`) จึงไม่มีเคสนี้ · whitelist ใน DTO มองไม่เห็นบิล ต้องเช็คหลัง `lockSale` · **#22 คืนข้อความอังกฤษไว้ก่อน** |
 
