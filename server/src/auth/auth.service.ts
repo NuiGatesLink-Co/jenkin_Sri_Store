@@ -35,38 +35,6 @@ export class AuthService {
       throw new UnauthorizedException('Password is required');
     }
 
-    // Brute-force checks (OWASP A07)
-    const userKey = dto.username ? `auth:user:${dto.username}` : null;
-    const ipKey = clientIp ? `auth:ip:${clientIp}` : null;
-
-    if (userKey) {
-      const userStatus = await this.rateLimit.getFailureStatus(userKey, 5, 60);
-      if (!userStatus.allowed) {
-        throw new HttpException(
-          {
-            code: 'RATE_LIMITED',
-            message: 'Too many failed login attempts. Please try again later.',
-            retryAfter: userStatus.retryAfter ?? 60,
-          },
-          HttpStatus.TOO_MANY_REQUESTS,
-        );
-      }
-    }
-
-    if (ipKey) {
-      const ipStatus = await this.rateLimit.getFailureStatus(ipKey, 10, 60);
-      if (!ipStatus.allowed) {
-        throw new HttpException(
-          {
-            code: 'RATE_LIMITED',
-            message: 'Too many requests from this IP. Please try again later.',
-            retryAfter: ipStatus.retryAfter ?? 60,
-          },
-          HttpStatus.TOO_MANY_REQUESTS,
-        );
-      }
-    }
-
     const qr = this.ds.createQueryRunner();
     await qr.connect();
     
@@ -92,6 +60,43 @@ export class AuthService {
           drole = dev.role;
         } else {
           throw new UnauthorizedException('Invalid device token');
+        }
+      }
+
+      // Brute-force checks (OWASP A07)
+      // The username bucket is scoped to the device's tenant: usernames like `owner` repeat
+      // across shops, so an unscoped key let failures in one shop lock that name in all of them.
+      // `clientIp` is the real client only because `configureApp` sets `trust proxy` to 1.
+      const userKey = dto.username
+        ? `auth:user:${deviceTenantId ?? '-'}:${dto.username}`
+        : null;
+      const ipKey = clientIp ? `auth:ip:${clientIp}` : null;
+
+      if (userKey) {
+        const userStatus = await this.rateLimit.getFailureStatus(userKey, 5, 60);
+        if (!userStatus.allowed) {
+          throw new HttpException(
+            {
+              code: 'RATE_LIMITED',
+              message: 'Too many failed login attempts. Please try again later.',
+              retryAfter: userStatus.retryAfter ?? 60,
+            },
+            HttpStatus.TOO_MANY_REQUESTS,
+          );
+        }
+      }
+
+      if (ipKey) {
+        const ipStatus = await this.rateLimit.getFailureStatus(ipKey, 10, 60);
+        if (!ipStatus.allowed) {
+          throw new HttpException(
+            {
+              code: 'RATE_LIMITED',
+              message: 'Too many requests from this IP. Please try again later.',
+              retryAfter: ipStatus.retryAfter ?? 60,
+            },
+            HttpStatus.TOO_MANY_REQUESTS,
+          );
         }
       }
 
@@ -121,6 +126,7 @@ export class AuthService {
           tenantId,
           userId: user.id,
           deviceId: did,
+          ip: clientIp,
           action: 'auth.login_failed',
           before: { reason: 'tenant_inactive' },
         });
@@ -136,6 +142,7 @@ export class AuthService {
           tenantId,
           userId: user.id,
           deviceId: did,
+          ip: clientIp,
           action: 'auth.login_failed',
           before: { reason: 'user_inactive' },
         });
@@ -157,6 +164,7 @@ export class AuthService {
           tenantId,
           userId: user.id,
           deviceId: did,
+          ip: clientIp,
           action: 'auth.login_failed',
           before: { reason: 'invalid_password' },
         });
@@ -190,6 +198,7 @@ export class AuthService {
         tenantId,
         userId: user.id,
         deviceId: did,
+        ip: clientIp,
         action: 'auth.login',
       });
 
