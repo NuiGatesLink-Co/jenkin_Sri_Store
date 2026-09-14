@@ -22,6 +22,13 @@ describe('purchasing / PO (e2e)', () => {
   const auth = (token = managerToken) => ({ Authorization: `Bearer ${token}` });
   const idempotency = () => `po-test-${++key}-${Date.now()}`;
 
+  const createPo = (body: unknown, token = managerToken, k = idempotency()) =>
+    request(app.getHttpServer())
+      .post('/api/v1/purchase-orders')
+      .set(auth(token))
+      .set('Idempotency-Key', k)
+      .send(body as object);
+
   beforeAll(async () => {
     ({ app, admin, cache } = await createTestApp());
   });
@@ -51,16 +58,13 @@ describe('purchasing / PO (e2e)', () => {
   });
 
   it('creates and lists purchase orders', async () => {
-    const createRes = await request(app.getHttpServer())
-      .post('/api/v1/purchase-orders')
-      .set(auth())
-      .send({
-        supplier: 'Siam Auto Supply',
-        items: [
-          { partNo: 'BP-1234', name: 'Front Brake Pad', qty: 10, cost: '250.00' },
-          { partNo: 'UNKNOWN-01', name: 'Unknown Filter', qty: 5, cost: '100.00' },
-        ],
-      });
+    const createRes = await createPo({
+      supplier: 'Siam Auto Supply',
+      items: [
+        { partNo: 'BP-1234', name: 'Front Brake Pad', qty: 10, cost: '250.00' },
+        { partNo: 'UNKNOWN-01', name: 'Unknown Filter', qty: 5, cost: '100.00' },
+      ],
+    });
 
     expect(createRes.status).toBe(201);
     expect(createRes.body.data).toMatchObject({
@@ -101,17 +105,14 @@ describe('purchasing / PO (e2e)', () => {
       [TENANT],
     );
 
-    const poRes = await request(app.getHttpServer())
-      .post('/api/v1/purchase-orders')
-      .set(auth())
-      .send({
-        supplier: 'Siam Auto Supply',
-        items: [
-          { partNo: 'bp-1234', name: 'Front Brake Pad', qty: 5, cost: '320.00' }, // Case-insensitive part_no match
-          { partNo: 'ZERO-STOCK', name: 'Zero Stock Product', qty: 10, cost: '80.00' },
-          { partNo: 'UNMATCHED-99', name: 'Non Existent Part', qty: 2, cost: '500.00' },
-        ],
-      });
+    const poRes = await createPo({
+      supplier: 'Siam Auto Supply',
+      items: [
+        { partNo: 'bp-1234', name: 'Front Brake Pad', qty: 5, cost: '320.00' }, // Case-insensitive part_no match
+        { partNo: 'ZERO-STOCK', name: 'Zero Stock Product', qty: 10, cost: '80.00' },
+        { partNo: 'UNMATCHED-99', name: 'Non Existent Part', qty: 2, cost: '500.00' },
+      ],
+    });
 
     const poId = poRes.body.data.id;
 
@@ -162,13 +163,10 @@ describe('purchasing / PO (e2e)', () => {
   });
 
   it('refuses receiving the same PO twice (409 PO_ALREADY_RECEIVED) and stock moves only once', async () => {
-    const poRes = await request(app.getHttpServer())
-      .post('/api/v1/purchase-orders')
-      .set(auth())
-      .send({
-        supplier: 'Supplier B',
-        items: [{ partNo: 'BP-1234', name: 'Brake Pad', qty: 5, cost: '200.00' }],
-      });
+    const poRes = await createPo({
+      supplier: 'Supplier B',
+      items: [{ partNo: 'BP-1234', name: 'Brake Pad', qty: 5, cost: '200.00' }],
+    });
 
     const poId = poRes.body.data.id;
 
@@ -196,13 +194,10 @@ describe('purchasing / PO (e2e)', () => {
 
   it('leaves product average cost unchanged when receiving a line with cost zero', async () => {
     // BP-1234 stock = 10, cost = 200.00
-    const poRes = await request(app.getHttpServer())
-      .post('/api/v1/purchase-orders')
-      .set(auth())
-      .send({
-        supplier: 'Freebie Supplier',
-        items: [{ partNo: 'BP-1234', name: 'Free Brake Pad', qty: 5, cost: '0.00' }],
-      });
+    const poRes = await createPo({
+      supplier: 'Freebie Supplier',
+      items: [{ partNo: 'BP-1234', name: 'Free Brake Pad', qty: 5, cost: '0.00' }],
+    });
 
     const poId = poRes.body.data.id;
 
@@ -223,13 +218,10 @@ describe('purchasing / PO (e2e)', () => {
   });
 
   it('refuses receive, cancel, and delete for non-managers with 403 FORBIDDEN', async () => {
-    const poRes = await request(app.getHttpServer())
-      .post('/api/v1/purchase-orders')
-      .set(auth())
-      .send({
-        supplier: 'Supplier C',
-        items: [{ partNo: 'BP-1234', name: 'Brake Pad', qty: 1, cost: '100.00' }],
-      });
+    const poRes = await createPo({
+      supplier: 'Supplier C',
+      items: [{ partNo: 'BP-1234', name: 'Brake Pad', qty: 1, cost: '100.00' }],
+    });
 
     const poId = poRes.body.data.id;
 
@@ -243,30 +235,30 @@ describe('purchasing / PO (e2e)', () => {
     const cancelRes = await request(app.getHttpServer())
       .post(`/api/v1/purchase-orders/${poId}/cancel`)
       .set(auth(cashierToken))
+      .set('Idempotency-Key', idempotency())
       .send();
     expect(cancelRes.status).toBe(403);
 
     const delRes = await request(app.getHttpServer())
       .delete(`/api/v1/purchase-orders/${poId}`)
       .set(auth(cashierToken))
+      .set('Idempotency-Key', idempotency())
       .send();
     expect(delRes.status).toBe(403);
   });
 
   it('cancels an open PO and refuses receiving a cancelled PO', async () => {
-    const poRes = await request(app.getHttpServer())
-      .post('/api/v1/purchase-orders')
-      .set(auth())
-      .send({
-        supplier: 'Supplier D',
-        items: [{ partNo: 'BP-1234', name: 'Brake Pad', qty: 2, cost: '150.00' }],
-      });
+    const poRes = await createPo({
+      supplier: 'Supplier D',
+      items: [{ partNo: 'BP-1234', name: 'Brake Pad', qty: 2, cost: '150.00' }],
+    });
 
     const poId = poRes.body.data.id;
 
     const cancelRes = await request(app.getHttpServer())
       .post(`/api/v1/purchase-orders/${poId}/cancel`)
       .set(auth())
+      .set('Idempotency-Key', idempotency())
       .send();
 
     expect(cancelRes.status).toBe(200);
@@ -285,19 +277,17 @@ describe('purchasing / PO (e2e)', () => {
   });
 
   it('deletes an open or cancelled PO and refuses deleting a received PO', async () => {
-    const poRes = await request(app.getHttpServer())
-      .post('/api/v1/purchase-orders')
-      .set(auth())
-      .send({
-        supplier: 'Supplier E',
-        items: [{ partNo: 'BP-1234', name: 'Brake Pad', qty: 1, cost: '100.00' }],
-      });
+    const poRes = await createPo({
+      supplier: 'Supplier E',
+      items: [{ partNo: 'BP-1234', name: 'Brake Pad', qty: 1, cost: '100.00' }],
+    });
 
     const poId = poRes.body.data.id;
 
     const delRes = await request(app.getHttpServer())
       .delete(`/api/v1/purchase-orders/${poId}`)
       .set(auth())
+      .set('Idempotency-Key', idempotency())
       .send();
 
     expect(delRes.status).toBe(200);
