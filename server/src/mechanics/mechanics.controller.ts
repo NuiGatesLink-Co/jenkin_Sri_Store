@@ -11,14 +11,14 @@ import {
   Req,
   Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Paginated, pageParams } from '../common/paginated.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import {
   isoDate,
   parseMechanicCreate,
@@ -42,6 +42,7 @@ export class MechanicsController {
   constructor(
     private readonly mechanics: MechanicsService,
     private readonly creditPayments: CreditPaymentsService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   @Get()
@@ -79,24 +80,36 @@ export class MechanicsController {
   }
 
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
   create(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Mechanic> {
-    requireManager(req);
-    return this.mechanics.create(parseMechanicCreate(body));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        requireManager(req);
+        return this.mechanics.create(parseMechanicCreate(body));
+      },
+    );
   }
 
   @Patch(':id')
-  @UseInterceptors(IdempotencyInterceptor)
   update(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Mechanic> {
-    requireManager(req);
-    return this.mechanics.update(id, parseMechanicPatch(body));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.mechanics.update(id, parseMechanicPatch(body));
+      },
+    );
   }
 
   /**
@@ -110,31 +123,43 @@ export class MechanicsController {
    */
   @Post(':id/credit-payments')
   @RequireDeviceRole('pos')
-  @UseInterceptors(IdempotencyInterceptor)
   creditPayment(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<CreateCreditPaymentResult> {
-    // A `pos` token always carries `did` — the guard refuses this route otherwise —
-    // but the CP number depends on it, so it is checked rather than asserted.
-    if (!req.user.deviceId) {
-      throw new DeviceRoleForbiddenException();
-    }
-    return this.creditPayments.create(id, parseCreateCreditPayment(body), {
-      userId: req.user.userId,
-      deviceId: req.user.deviceId,
-    });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        // A `pos` token always carries `did` — the guard refuses this route otherwise —
+        // but the CP number depends on it, so it is checked rather than asserted.
+        if (!req.user.deviceId) {
+          throw new DeviceRoleForbiddenException();
+        }
+        return this.creditPayments.create(id, parseCreateCreditPayment(body), {
+          userId: req.user.userId,
+          deviceId: req.user.deviceId,
+        });
+      },
+    );
   }
 
   @Delete(':id')
-  @UseInterceptors(IdempotencyInterceptor)
   delete(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ id: string; deleted: true }> {
-    requireManager(req);
-    return this.mechanics.delete(id);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.mechanics.delete(id);
+      },
+    );
   }
 }
 

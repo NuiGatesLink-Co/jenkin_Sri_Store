@@ -8,14 +8,15 @@ import {
   Param,
   Post,
   Req,
+  Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { clientIp } from '../common/client-ip.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { toSatang } from '../common/money.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import {
   DevicesService,
   type Device,
@@ -38,7 +39,10 @@ const LABEL_MAX_LENGTH = 100;
 @Controller('devices')
 @UseGuards(TenantGuard)
 export class DevicesController {
-  constructor(private readonly devices: DevicesService) {}
+  constructor(
+    private readonly devices: DevicesService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   @Get()
   list(@Req() req: AuthenticatedRequest): Promise<Device[]> {
@@ -52,24 +56,30 @@ export class DevicesController {
    * the body, ever — `did` comes from the server (ADR-0004).
    */
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
   create(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ device: Device; enrolCode: string }> {
-    requireOwner(req);
-    const b = asObject(body);
-    if (typeof b.label !== 'string' || b.label.trim() === '') {
-      throw new BadRequestException('label is required');
-    }
-    const label = b.label.trim();
-    if (label.length > LABEL_MAX_LENGTH) {
-      throw new BadRequestException(`label must be at most ${LABEL_MAX_LENGTH} characters`);
-    }
-    if (b.role !== 'pos' && b.role !== 'backoffice') {
-      throw new BadRequestException(`role must be 'pos' or 'backoffice'`);
-    }
-    return this.devices.create(actorOf(req), { label, role: b.role as DeviceRole });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        requireOwner(req);
+        const b = asObject(body);
+        if (typeof b.label !== 'string' || b.label.trim() === '') {
+          throw new BadRequestException('label is required');
+        }
+        const label = b.label.trim();
+        if (label.length > LABEL_MAX_LENGTH) {
+          throw new BadRequestException(`label must be at most ${LABEL_MAX_LENGTH} characters`);
+        }
+        if (b.role !== 'pos' && b.role !== 'backoffice') {
+          throw new BadRequestException(`role must be 'pos' or 'backoffice'`);
+        }
+        return this.devices.create(actorOf(req), { label, role: b.role as DeviceRole });
+      },
+    );
   }
 
   /**
@@ -79,20 +89,26 @@ export class DevicesController {
    */
   @Post(':id/retire')
   @HttpCode(200)
-  @UseInterceptors(IdempotencyInterceptor)
   retire(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ) {
-    requireOwner(req);
-    const b = body === undefined || body === null ? {} : asObject(body);
-    let physicalCash: number | null = null;
-    if (b.physicalCash !== undefined && b.physicalCash !== null && b.physicalCash !== '') {
-      physicalCash = toSatang(b.physicalCash, 'physicalCash');
-      if (physicalCash < 0) throw new BadRequestException('physicalCash must not be negative');
-    }
-    return this.devices.retire(actorOf(req), id, physicalCash);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireOwner(req);
+        const b = body === undefined || body === null ? {} : asObject(body);
+        let physicalCash: number | null = null;
+        if (b.physicalCash !== undefined && b.physicalCash !== null && b.physicalCash !== '') {
+          physicalCash = toSatang(b.physicalCash, 'physicalCash');
+          if (physicalCash < 0) throw new BadRequestException('physicalCash must not be negative');
+        }
+        return this.devices.retire(actorOf(req), id, physicalCash);
+      },
+    );
   }
 }
 

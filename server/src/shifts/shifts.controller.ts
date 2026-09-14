@@ -7,15 +7,16 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { toSatang } from '../common/money.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { Paginated, pageParams } from '../common/paginated.js';
 import {
   ShiftsService,
@@ -31,7 +32,10 @@ interface AuthenticatedRequest extends Request {
 @Controller('shifts')
 @UseGuards(TenantGuard)
 export class ShiftsController {
-  constructor(private readonly shifts: ShiftsService) {}
+  constructor(
+    private readonly shifts: ShiftsService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   /**
    * Both device roles may read: looking at the drawer does not touch it (ADR-0004).
@@ -55,51 +59,69 @@ export class ShiftsController {
   @Post('open')
   @HttpCode(200)
   @RequireDeviceRole('pos')
-  @UseInterceptors(IdempotencyInterceptor)
   open(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<ShiftWithEntries> {
-    const b = asObject(body);
-    return this.shifts.open(actorOf(req), cash(b.startingCash, 'startingCash'));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        const b = asObject(body);
+        return this.shifts.open(actorOf(req), cash(b.startingCash, 'startingCash'));
+      },
+    );
   }
 
   @Post('close')
   @HttpCode(200)
   @RequireDeviceRole('pos')
-  @UseInterceptors(IdempotencyInterceptor)
   close(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<ShiftWithEntries> {
-    const b = asObject(body);
-    return this.shifts.close(
-      actorOf(req).deviceId,
-      cash(b.physicalCash, 'physicalCash'),
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        const b = asObject(body);
+        return this.shifts.close(
+          actorOf(req).deviceId,
+          cash(b.physicalCash, 'physicalCash'),
+        );
+      },
     );
   }
 
   @Post('current/entries')
   @RequireDeviceRole('pos')
-  @UseInterceptors(IdempotencyInterceptor)
   addEntry(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<DrawerEntry> {
-    const b = asObject(body);
-    if (b.type !== 'in' && b.type !== 'out') {
-      throw new BadRequestException(`type must be 'in' or 'out'`);
-    }
-    const amountSatang = toSatang(b.amount, 'amount');
-    if (amountSatang <= 0)
-      throw new BadRequestException('amount must be greater than zero');
-    const note =
-      b.note === undefined || b.note === null ? null : String(b.note);
-    return this.shifts.addEntry(actorOf(req), {
-      type: b.type,
-      amountSatang,
-      note,
-    });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        const b = asObject(body);
+        if (b.type !== 'in' && b.type !== 'out') {
+          throw new BadRequestException(`type must be 'in' or 'out'`);
+        }
+        const amountSatang = toSatang(b.amount, 'amount');
+        if (amountSatang <= 0)
+          throw new BadRequestException('amount must be greater than zero');
+        const note =
+          b.note === undefined || b.note === null ? null : String(b.note);
+        return this.shifts.addEntry(actorOf(req), {
+          type: b.type,
+          amountSatang,
+          note,
+        });
+      },
+    );
   }
 }
 

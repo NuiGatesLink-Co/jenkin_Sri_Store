@@ -8,15 +8,16 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { clientIp } from '../common/client-ip.js';
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { Paginated, pageParams } from '../common/paginated.js';
 import { parseCreateSale } from './sales.dto.js';
 import { SalesService, type CreateSaleResult } from './sales.service.js';
@@ -41,6 +42,7 @@ export class SalesController {
     private readonly sales: SalesService,
     private readonly reads: SaleReadsService,
     private readonly voids: VoidService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   /**
@@ -50,20 +52,26 @@ export class SalesController {
    */
   @Post()
   @RequireDeviceRole('pos')
-  @UseInterceptors(IdempotencyInterceptor)
-  async create(
+  create(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<CreateSaleResult> {
-    // A `pos` token always carries `did` — the guard refuses this route otherwise —
-    // but the receipt number depends on it, so it is checked rather than asserted.
-    if (!req.user.deviceId) {
-      throw new DeviceRoleForbiddenException();
-    }
-    return this.sales.create(parseCreateSale(body), {
-      userId: req.user.userId,
-      deviceId: req.user.deviceId,
-    });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        // A `pos` token always carries `did` — the guard refuses this route otherwise —
+        // but the receipt number depends on it, so it is checked rather than asserted.
+        if (!req.user.deviceId) {
+          throw new DeviceRoleForbiddenException();
+        }
+        return this.sales.create(parseCreateSale(body), {
+          userId: req.user.userId,
+          deviceId: req.user.deviceId,
+        });
+      },
+    );
   }
 
   /** Both device roles: reading a bill does not touch the drawer (ADR-0004). */
@@ -108,23 +116,29 @@ export class SalesController {
   @Post(':id/void')
   @HttpCode(200)
   @RequireDeviceRole('pos')
-  @UseInterceptors(IdempotencyInterceptor)
   voidSale(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<SaleWithItems> {
-    if (!req.user.deviceId) {
-      throw new DeviceRoleForbiddenException();
-    }
-    const pin = (body as { pin?: unknown })?.pin;
-    return this.voids.void(id, {
-      userId: req.user.userId,
-      role: req.user.role,
-      deviceId: req.user.deviceId,
-      pin: typeof pin === 'string' ? pin : '',
-      ip: clientIp(req) ?? undefined,
-    });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        if (!req.user.deviceId) {
+          throw new DeviceRoleForbiddenException();
+        }
+        const pin = (body as { pin?: unknown })?.pin;
+        return this.voids.void(id, {
+          userId: req.user.userId,
+          role: req.user.role,
+          deviceId: req.user.deviceId,
+          pin: typeof pin === 'string' ? pin : '',
+          ip: clientIp(req) ?? undefined,
+        });
+      },
+    );
   }
 }
 
