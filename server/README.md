@@ -702,6 +702,57 @@ every case of `frontend/test/products_repository_test.dart` at the HTTP seam.
 - `PATCH /products/:id` never reads `stock` — stock moves only through writes that log a movement.
 - Product money is now a string on the wire (`price`/`cost`, §1.1); it was a number before #16.
 
+## Bootstrap and settings (#25)
+
+`src/bootstrap/` and `src/settings/` — Checkout's one-shot read (`02_API_SCREENS.md §3.1`) and
+the per-tenant shop-settings row (`01_DATABASE.md §5.7`), ported from `settings_repository.dart`.
+
+- **`GET /bootstrap`** answers `{ products, categories, customers, mechanics, settings }` —
+  every list unpaginated, tombstones excluded — reusing each entity's own `GET` endpoint column
+  list and row mapper verbatim (`products.service.ts`/`customers.service.ts`/
+  `mechanics.service.ts` export `COLUMNS` + `toProduct`/`toCustomer`/`toMechanic` for exactly
+  this), so the shape the client writes into Drift can never drift from what
+  `GET /products`/`/customers`/`/mechanics` would answer on their own. Field names are the
+  contract (ADR-0010): see `02_API_SCREENS.md §3.1` for the full JSON shape.
+- **Not included: the current shift.** Per `02_API_SCREENS.md §3.1` and `03_ARCHITECTURE.md:81`,
+  shifts are not cached and are per-device — the client reads `GET /shifts/current` for that,
+  same as it always has.
+- **The `ETag` is a strong hash of the exact response body**, not a Redis-backed cache: two
+  requests answer the same ETag iff they would answer the same bytes, so "any included entity
+  changing changes the ETag" holds with no separate invalidation bookkeeping to keep in step
+  across five tables. A `304` therefore still costs the same reads as a `200`; only the body is
+  skipped. #32 did not add a `t:{tid}:bootstrap` Redis cache (02_API_SCREENS.md §5's sequence
+  diagram sketches one, but neither §4.2 nor §5 assigns it) — see *The server cache (#32)*.
+  🔴 **A cross-origin dev client needs both CORS entries `app.setup.ts` carries for this:**
+  `If-None-Match` in `allowedHeaders` (or the preflight for the conditional re-fetch is refused)
+  and `ETag` in `exposedHeaders` (or `fetch()` hides the header the client needs to echo back
+  next time). Production is same-origin (nginx serves the client), so neither matters there.
+- All five reads run on the single transaction the request already has open
+  (`common/request-context.ts`) — `READ COMMITTED`, not one atomic cross-statement snapshot,
+  since `TenantGuard` has already issued a query on it by the time a handler starts and isolation
+  can no longer be raised. This is the same consistency level every other multi-entity path in
+  this codebase (the sale path's lock order included) already operates under.
+- **`GET/PATCH /settings`**: `GET` is open to both roles (both device roles too, like every
+  other plain read); `PATCH` is `manager`/`owner`, `Idempotency-Key` mandatory, and writes one
+  `stock.adjust`-style `settings.update` audit row (#43) naming only the fields actually
+  touched. `updated_at` is stamped on every write. A missing settings row answers
+  `404 SETTINGS_NOT_FOUND` — not a code a client should ever see or need to handle, since
+  `POST /platform/tenants` inserts `tenants`+`users`+`settings` transactionally
+  (`02_API_SCREENS.md §4.1`); it exists so a data-integrity fault is loud rather than a bare 500,
+  which is why it carries no `02_API_SCREENS.md §8.1` entry — that section is for errors a
+  client is expected to branch on.
+- 🔴 **`PATCH /settings` validates more strictly than the Dart client
+  (`settings_screen.dart:570-583`).** The Dart `_save()` accepts a blank `shopName`, any
+  `double` for `taxRate` (any sign, any precision), and any `int` for `quoteValidDays`
+  (including zero or negative) — whatever `double.tryParse`/`int.tryParse` returns, unchecked.
+  The server requires a non-empty `shopName` (nothing in `01_DATABASE.md §5.7` or
+  `02_API_SCREENS.md` says it may be blank), `taxRate` in `[0, 100]` at two decimals, and
+  `quoteValidDays` a positive integer up to 3650. This is deliberate (validate before storing,
+  not clamp — the same lesson as #22's `RETURN_PRICE_MISMATCH`), but it means a value the
+  offline Drift build accepts today answers `400` from the server — #55/#56's client work needs
+  to know this before wiring `PATCH /settings` through, and the Drift build itself enforces
+  none of it (the phase-1 divergence this ticket accepts, same shape as #24's).
+
 ## Quotes and parked sales (#27)
 
 `src/quotes/` and `src/parked-sales/`, ported from `quotes_repository.dart` /
@@ -767,104 +818,143 @@ ledger's row count across the whole lifecycle.
 ## The server cache (#32)
 
 `src/infra/tenant-cache.service.ts` (`TenantCache`, global via `TenantCacheModule`). Cache-aside
-on `redis-cache`; every Redis failure fails open (the read goes to Postgres, a write is still
-answered).
+on `redis-cache`. Every Redis failure fails open: a read goes to Postgres, and a write is still
+answered.
 
-**What is cached today: `GET /products` and `GET /products/:id`, nothing else.** 300 s ± 60 s
-(`02_API_SCREENS.md §5`; it was a flat 60 s before #32). The response carries `X-Cache: HIT|MISS`.
-Settings, customers, mechanics, categories, report summaries and `/bootstrap` are **not** cached —
-see *Not done* below.
+**What is cached** (`02_API_SCREENS.md §4.2/§5`). Every cached response carries `X-Cache: HIT|MISS`.
 
-**Keys carry a generation.**
+| Read | Namespace | TTL | Source |
+|---|---|---|---|
+| `GET /products`, `GET /products/:id` | `products` | 300 s ± 60 s | §5 (a flat 60 s before #32) |
+| `GET /settings` | `settings` | 3600 s ± 360 s | §5 TTL; §5 gives no jitter amount, so ±10 % |
+| `GET /customers` (list only) | `customers` | 60 s ± 6 s | §4.2 "1m", ±10 % |
+| `GET /mechanics` (list only) | `mechanics` | 60 s ± 6 s | §4.2 "1m", ±10 % |
+
+The TTLs are in one table, `CACHE_TTL`. These are **not** cached: `GET /customers/:id`,
+`GET /mechanics/:id`, the `/:id/sales` reads, categories, report summaries, and `/bootstrap`
+(see *Not done*).
+
+**Every namespace has its own generation key.**
 
 ```
-t:{tid}:products:gen                         random token, 1 h ± 5 min
+t:{tid}:{ns}:gen                              random token, 1 h ± 5 min
 t:{tid}:products:g:{token}:list:[s:…][n:…][c:…][u:…][a:…]{page}:{limit}
 t:{tid}:products:g:{token}:item:{id}
+t:{tid}:settings:g:{token}:row
+t:{tid}:customers:g:{token}:list:[s:…][u:…]{page}:{limit}
+t:{tid}:mechanics:g:{token}:list:[s:…][u:…]{page}:{limit}
 ```
 
-Invalidating is **one `SET` of a new token**. Nothing is deleted and nothing is scanned: the
-old keys are unreachable at once and expire on their own TTL. `KEYS` is gone from `src/`
-(the test fixture's `clearTenantCache` still uses it; it is not production code).
+Invalidating a namespace is **one `SET` of a new token**. Nothing is deleted and nothing is
+scanned. The old keys become unreachable at once and expire on their own TTL. `KEYS` is gone from
+`src/`; the test fixture's `clearTenantCache` still uses it, but that is not production code.
 
-Why a generation and not §5's tag set (`SADD t:{tid}:tags:products <key>`):
-- 🔴 `redis-cache` is `allkeys-lru`. When Redis evicts a tag set, every key the set listed
-  can still be read, and nothing can find those keys to delete them. When Redis evicts a
-  generation, the next reader creates a new random token, and that invalidates everything.
-  This is also why the token is random and not an `INCR` counter: a counter restarts at 1
-  after eviction and brings back the keys written under 1.
-- 🔴 **The read-populate race.** A reader misses the cache and reads the rows. A writer then
-  commits and invalidates. The reader stores what it read, which is now stale, and that
-  entry would last a whole TTL. To prevent this, `TenantCache.prefix()` is called **before**
-  the query. The reader's late write lands under the token the writer already replaced.
-  Proved by *read-populate race* in `test/cache-invalidation.e2e-spec.ts`, which fails when
-  the prefix is taken after the query.
+**Why a generation instead of §5's tag set** (`SADD t:{tid}:tags:products <key>`):
+- 🔴 `redis-cache` is `allkeys-lru`. If Redis evicts a tag set, the keys it listed stay readable
+  and nothing can find them to delete them. If Redis evicts a generation, the next reader creates
+  a new random token, and that invalidates everything.
+  - The token is random rather than an `INCR` counter for the same reason: a counter restarts
+    at 1 after eviction and brings back the keys written under 1.
+- 🔴 **The read-populate race.** A reader misses and reads the rows, a writer commits and
+  invalidates, and then the reader stores its now-stale rows for a whole TTL.
+  - `TenantCache.prefix()` is called **before** the query, so the reader's late write lands under
+    the token the writer already replaced.
+  - *read-populate race* in `test/cache-invalidation.e2e-spec.ts` proves it: the test fails when
+    the prefix is taken after the query.
+- No ADR requires tag sets. §5 lists them as one way to avoid `KEYS`. This deviation is recorded in
+  §5 for the owner.
 
-**Invalidation runs only after commit.** Request-scoped writes call
-`TenantCache.invalidateAfterCommit(tid, 'products')`. That uses `onTransactionCommit`, the
-same hook the BullMQ enqueues use, so "after the transaction" is defined in one place.
-`TransactionInterceptor` runs the hook after `COMMIT` and before the response is sent, so a
-read right after a `201` is already fresh. A rollback (a thrown error, a 409) drops the hook.
-The call is also placed after every refusal check.
+**Invalidation runs only after commit.**
+- Request-scoped writes call `TenantCache.invalidateAfterCommit(tid, ns)`. It goes through
+  `onTransactionCommit`, the same hook the BullMQ enqueues use, so "after the transaction" is
+  defined in one place.
+- `TransactionInterceptor` runs the hooks after `COMMIT` and before the response is sent, so a
+  read right after a `201` is already fresh.
+- A rollback (a thrown error, or a 409) drops the hooks. Each call is also placed after every
+  refusal check.
+- 🔴 `invalidateAfterCommit` **throws outside a request context.** There, `onTransactionCommit`
+  would run the hook immediately, which is before the caller's own commit.
+- The platform import runs its own `ADMIN_DATA_SOURCE` transaction. It calls `invalidate()` for all
+  four namespaces after `await adminDs.transaction(…)` resolves.
+- A failed invalidation `SET` is logged as `cache invalidation failed`. A failed post-commit hook of
+  any kind is logged as `post-commit hook failed`.
 
-The platform import runs on `ADMIN_DATA_SOURCE` in its own transaction, outside any request
-context. There `onTransactionCommit` would run the hook **immediately**, so the import instead
-calls `invalidate()` after `await adminDs.transaction(…)` resolves.
+**Reads that bypass the cache on purpose.** `SettingsService.get()` stays a plain read, and
+`GET /settings` uses `getCached()`.
+- `PATCH /settings` reads its audit before-image inside the write transaction.
+- `/bootstrap` hashes a fresh body for its `ETag`. It reads customers and mechanics straight from
+  Postgres too.
 
-`t:{tid}:status` belongs to `TenantGuard` and `PATCH /platform/tenants/:id/status` (a `DEL`).
-It is a separate key, so the two paths cannot interfere.
+`t:{tid}:status` belongs to `TenantGuard` and `PATCH /platform/tenants/:id/status` (a `DEL`). It is
+a separate key, so the two paths cannot interfere.
 
 ### Write path → cache keys
 
-Each row invalidates `t:{tid}:products:gen`, which covers every `list:` and `item:` key of
-that tenant only. Each row has a case in `test/cache-invalidation.e2e-spec.ts`: read twice to
-get a HIT, write, then the next read must be a MISS with the new value.
+"`products`" in the Keys column means `t:{tid}:products:gen` is replaced. That covers every cached
+key of that namespace, for that tenant only. Each row has a case in
+`test/cache-invalidation.e2e-spec.ts`: prime to a HIT, write, and the next read must be a MISS
+showing the new value.
 
-| Write path | Why | Keys invalidated | Where |
+| Write path | What moves | Keys invalidated | Where |
 |---|---|---|---|
-| `POST /products` | new row | `t:{tid}:products:*` (generation) | `products.service.ts` `create` |
-| `PATCH /products/:id` | fields | same | `update` |
-| `DELETE /products/:id` | tombstone | same | `delete` |
-| `POST /products/:id/adjust-stock` | stock | same | `adjustStock` |
-| `POST /purchase-orders/:id/receive` | stock + cost (only when a line matched) | same | `purchase-orders.service.ts` |
-| `POST /sales` | stock | same | `sales.service.ts` `create` |
-| `POST /quotes/:id/convert` | stock (sells through `SalesService.create`) | same | via `POST /sales` |
-| `POST /sales/:id/void` | stock restored | same | `void.service.ts` |
-| `POST /returns` | stock restored | same | `returns.service.ts` |
-| `POST /platform/tenants/:id/import` | products inserted | same (direct, after its own commit) | `tenant-import.service.ts` |
+| `POST /products` · `PATCH` · `DELETE /products/:id` | product row | `products` | `products.service.ts` |
+| `POST /products/:id/adjust-stock` | stock | `products` | `adjustStock` |
+| `POST /purchase-orders/:id/receive` | stock + cost (only when a line matched) | `products` | `purchase-orders.service.ts` |
+| `POST /sales` (and `POST /quotes/:id/convert`, which sells through it) | stock; customer points/spend; mechanic totals/tab | `products`; `customers` if the bill names a customer; `mechanics` if it names a mechanic | `sales.service.ts` |
+| `POST /sales/:id/void` | stock restored; ledger reversed | same rule as the sale | `void.service.ts` |
+| `POST /returns` | stock restored; ledger reversed in proportion | same rule, from the original bill | `returns.service.ts` |
+| `POST /mechanics/:id/credit-payments` | mechanic tab | `mechanics` | `credit-payments.service.ts` |
+| `POST /customers` · `PATCH` · `DELETE /customers/:id` | customer row | `customers` | `customers.service.ts` |
+| `POST /mechanics` · `PATCH` · `DELETE /mechanics/:id` | mechanic row | `mechanics` | `mechanics.service.ts` |
+| `PATCH /settings` | settings row | `settings` | `settings.service.ts` |
+| `POST /platform/tenants/:id/import` | all four tables | `products`, `customers`, `mechanics`, `settings` (directly, after its own commit) | `tenant-import.service.ts` |
 
-These write paths invalidate nothing, because nothing they change is cached: categories,
-suppliers, customers, mechanics, credit payments, shifts and drawer entries, settings, quotes
-(create, update, delete, duplicate, purge), parked sales, PO create/cancel/delete, and backup
-export. The tenant-status `DEL` is described above.
+These write paths invalidate nothing, because nothing they change is cached:
+- categories and suppliers
+- shifts and drawer entries
+- quotes: create, update, delete, duplicate, purge
+- parked sales
+- PO create, cancel and delete
+- backup export
+- `POST /platform/tenants`: its `settings` row belongs to a brand-new tenant, which has no keys yet.
 
-Negatives, also in that spec:
-- `409 INSUFFICIENT_STOCK` and `409 CREDIT_LIMIT_EXCEEDED` keep the same generation, and the
-  next read is still a HIT.
-- A probe route writes stock, registers the invalidation, and then throws. The generation is
-  unchanged and the rolled-back stock is never served.
-- A sale in tenant A leaves tenant B's generation alone, and B's next read is still a HIT
-  with B's own rows.
+Negatives, all in the same spec:
+- `409 INSUFFICIENT_STOCK` and `409 CREDIT_LIMIT_EXCEEDED` keep the products generation.
+- `409 CREDIT_LIMIT_EXCEEDED` on a bill naming a customer and a mechanic keeps both people
+  generations, and the mechanic's cached tab is still the old one.
+- `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` keeps the mechanics generation.
+- A walk-in sale (no customer, no mechanic) leaves the people caches as HITs.
+- A probe route writes, registers invalidation for all four namespaces, then throws. Every
+  generation is unchanged.
+- A sale in tenant A leaves tenant B's generation alone, and B still reads a HIT with its own rows.
 
 ### Not done / known limits
 
-- **Only products are cached.** The issue body also asks for settings, customers, mechanics and
-  report summaries; its acceptance criteria do not, and `§5`'s own `reports:summary` row says
-  *"let it expire"*, which contradicts *"a read immediately after a write returns the new value"*.
-  Customers and mechanics have no `§5` key at all. Adding any of them means adding a namespace to
-  `CacheNamespace` and an `invalidateAfterCommit` on every writer of that table (customers and
-  mechanics are also written by sales, returns, voids and credit payments).
-  `GET /bootstrap` keeps its body-hash `ETag` (#25) and gets no Redis cache: nothing in #32's
-  criteria needs one, and it would need every writer of five tables to invalidate it.
-- **No stampede lock** (`§5`: `SET key NX PX 5000` on a miss). Not in #32's criteria.
-- **Fail-open on invalidation.** If Redis rejects the generation `SET`, a cached page can outlive
-  the write by up to its TTL (≤ 360 s).
+- **Report summaries are not cached. Owner question:** §5's `t:{tid}:reports:summary:{from}:{to}`
+  row says *"let it expire"* (300 s), but #32's AC3 says *"a read immediately after a write
+  returns the new value, for every cached endpoint"*. Those cannot both hold.
+  - Caching summaries per AC3 means every sale, void and return invalidates them, which leaves
+    little to cache during business hours.
+  - Caching them per §5 means a summary up to five minutes stale.
+  - The owner decides. Until then they stay live SQL.
+- **`GET /bootstrap` gets no Redis cache.** Neither §4.2 nor §5 assigns one to #32; its body-hash
+  `ETag` (#25) stays.
+- **`GET /categories` is not cached**, although §4.2 marks it "1h". Categories are outside #32's
+  list.
+- **No stampede lock** (§5: `SET key NX PX 5000` on a miss). It is not in #32's criteria.
+- **Fail-open on invalidation.** If Redis rejects the generation `SET`, a cached value can outlive
+  the write by up to its TTL (≤ 360 s for products, ≤ 66 s for people, ≤ 3960 s for settings).
+  It is logged.
 - A read that populates the cache **inside a write transaction** would cache uncommitted rows under
-  the current generation, and a rollback would not replace it. No route does this today (only the
-  two `GET` handlers read through the cache); keep it that way.
-- 🔴 **For #55:** the import writes rows with the snapshot's own `updated_at`, often in the past, so a
-  device whose `?updatedSince=` cursor is already later never sees them. The cache is invalidated; the
-  sync cursor is not something a cache can fix.
+  the current generation, and a rollback would not replace them. No route does this: only the
+  `GET` handlers read through the cache. Keep it that way.
+- 🔴 **For #55:** the import writes rows with the snapshot's own `updated_at`, often in the past.
+  A device whose `?updatedSince=` cursor is already later never sees them. The cache is
+  invalidated, but a cache cannot fix the sync cursor.
+- **Separate ticket, pre-existing on `main`:** the import writes its `audit_log` row **after** its
+  transaction commits (`tenant-import.service.ts`). A platform-admin id with no row (for example,
+  an admin deleted while their token is still valid) commits the import and then answers 500 on
+  `audit_log_platform_admin_id_fkey`.
 
 ## Conventions these slices set
 
