@@ -1,22 +1,30 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { HttpException, HttpStatus, UnauthorizedException } from '@nestjs/common';
 import { TenantGuard } from './tenant.guard.js';
-import { runInRequestContext } from '../request-context.js';
+import {
+  authorisedTenantId,
+  currentTransaction,
+  runInTenantScope,
+} from '../request-context.js';
 
 describe('TenantGuard', () => {
   let guard: TenantGuard;
   let jwtVerifierMock: any;
   let reflectorMock: any;
   let redisCacheMock: any;
-  let managerMock: any;
+  let dsMock: any;
 
   /**
-   * The guard now runs inside the transaction RequestContextMiddleware opens — it
-   * has to, because `SET LOCAL app.tenant_id` only means anything on that one
-   * connection. Every call goes through the scope for the same reason production does.
+   * The guard runs inside the scope `TenantScopeMiddleware` opens for every request (tx.4
+   * #153): no tenant, no transaction. `after` runs inside the same scope once the guard has
+   * returned, so a test can see what the guard left on it.
    */
-  const activate = (ctx: any) =>
-    runInRequestContext({ manager: managerMock }, () => guard.canActivate(ctx));
+  const activate = (ctx: any, after?: () => void) =>
+    runInTenantScope(async () => {
+      const result = await guard.canActivate(ctx);
+      after?.();
+      return result;
+    });
 
   beforeEach(() => {
     jwtVerifierMock = {
@@ -29,11 +37,12 @@ describe('TenantGuard', () => {
       get: vi.fn(),
       set: vi.fn(),
     };
-    managerMock = {
+    dsMock = {
       query: vi.fn().mockResolvedValue([]),
+      createQueryRunner: vi.fn(),
     };
 
-    guard = new TenantGuard(jwtVerifierMock, reflectorMock, redisCacheMock);
+    guard = new TenantGuard(jwtVerifierMock, reflectorMock, redisCacheMock, dsMock);
   });
 
   function createMockContext(authHeader?: string, reqAttrs: Record<string, any> = {}) {
@@ -81,13 +90,9 @@ describe('TenantGuard', () => {
       deviceId: undefined,
       deviceRole: 'pos',
     });
-    // On a cache hit the guard touches the database once — to name the tenant — and
-    // never to re-read the status.
-    expect(managerMock.query).toHaveBeenCalledTimes(1);
-    expect(managerMock.query).not.toHaveBeenCalledWith(
-      expect.stringContaining('SELECT status FROM tenants'),
-      expect.anything(),
-    );
+    // On a cache hit the guard touches the database not at all.
+    expect(dsMock.query).not.toHaveBeenCalled();
+    expect(dsMock.createQueryRunner).not.toHaveBeenCalled();
   });
 
   it('queries database on cache miss and caches result in Redis', async () => {
@@ -99,16 +104,17 @@ describe('TenantGuard', () => {
     });
     reflectorMock.getAllAndOverride.mockReturnValue(undefined);
     redisCacheMock.get.mockResolvedValue(null); // cache miss
-    managerMock.query.mockResolvedValue([{ status: 'active' }]);
+    dsMock.query.mockResolvedValue([{ status: 'active' }]);
 
     const result = await activate(ctx);
     expect(result).toBe(true);
-    // On the request's OWN transaction, never a second pool checkout: the middleware
-    // is already holding one, and reaching for another deadlocks the pool under load.
-    expect(managerMock.query).toHaveBeenCalledWith(
+    // A plain pool read with no transaction: `tenants` has no RLS, and nothing else in the
+    // request holds a connection yet (tx.4 #153).
+    expect(dsMock.query).toHaveBeenCalledWith(
       expect.stringContaining('SELECT status FROM tenants'),
       ['t1'],
     );
+    expect(dsMock.createQueryRunner).not.toHaveBeenCalled();
     expect(redisCacheMock.set).toHaveBeenCalledWith(
       't:t1:status',
       'active',
@@ -117,28 +123,46 @@ describe('TenantGuard', () => {
     );
   });
 
-  it('names the tenant on the request transaction, and only after the status check', async () => {
+  it('names the tenant on the request scope, opens no transaction and sets no GUC', async () => {
     const ctx = createMockContext('Bearer valid-token');
     jwtVerifierMock.verify.mockReturnValue({ aud: 'tenant', sub: 'u1', tid: 't1' });
     reflectorMock.getAllAndOverride.mockReturnValue(undefined);
-    redisCacheMock.get.mockResolvedValue('active');
+    redisCacheMock.get.mockResolvedValue(null);
+    dsMock.query.mockResolvedValue([{ status: 'active' }]);
 
-    await activate(ctx);
+    let named: string | undefined;
+    let open: unknown = 'unset';
+    await activate(ctx, () => {
+      named = authorisedTenantId();
+      open = currentTransaction();
+    });
 
-    expect(managerMock.query).toHaveBeenCalledWith(
-      expect.stringContaining("set_config('app.tenant_id'"),
-      ['t1'],
+    expect(named).toBe('t1');
+    expect(open).toBeNull();
+    // `set_config` is `TenantService.runTx`'s job now (ADR-0003 addendum).
+    expect(dsMock.query).not.toHaveBeenCalledWith(
+      expect.stringContaining('set_config'),
+      expect.anything(),
     );
   });
 
-  it('never names a suspended tenant on a transaction', async () => {
+  it('never names a suspended tenant on the scope', async () => {
     const ctx = createMockContext('Bearer valid-token');
     jwtVerifierMock.verify.mockReturnValue({ aud: 'tenant', sub: 'u1', tid: 't1' });
     reflectorMock.getAllAndOverride.mockReturnValue(undefined);
     redisCacheMock.get.mockResolvedValue('suspended');
 
-    await expect(activate(ctx)).rejects.toThrow(HttpException);
-    expect(managerMock.query).not.toHaveBeenCalled();
+    let unnamed: unknown;
+    await runInTenantScope(async () => {
+      await expect(guard.canActivate(ctx)).rejects.toThrow(HttpException);
+      try {
+        authorisedTenantId();
+      } catch (err) {
+        unnamed = err;
+      }
+    });
+    expect(unnamed).toBeInstanceOf(Error);
+    expect(dsMock.query).not.toHaveBeenCalled();
   });
 
   it('throws TENANT_SUSPENDED (403) with Thai message if tenant is not active', async () => {
@@ -259,7 +283,7 @@ describe('TenantGuard', () => {
     });
     reflectorMock.getAllAndOverride.mockReturnValue(undefined);
     redisCacheMock.get.mockResolvedValue(null);
-    managerMock.query.mockRejectedValue(new Error('Postgres connection timeout'));
+    dsMock.query.mockRejectedValue(new Error('Postgres connection timeout'));
 
     await expect(activate(ctx)).rejects.toThrow('Postgres connection timeout');
   });

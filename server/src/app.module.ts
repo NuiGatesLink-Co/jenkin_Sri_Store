@@ -1,6 +1,5 @@
 import {
   Module,
-  RequestMethod,
   type DynamicModule,
   type MiddlewareConsumer,
   type NestModule,
@@ -16,39 +15,20 @@ import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { PlatformModule } from './platform/platform.module.js';
 import { RateLimitModule } from './rate-limit/rate-limit.module.js';
-import { RequestContextMiddleware } from './common/request-context.middleware.js';
-import { ReturnsController } from './returns/returns.controller.js';
+import { TenantScopeMiddleware } from './common/tenant-scope.middleware.js';
 import { ReturnsModule } from './returns/returns.module.js';
-import { SalesController } from './sales/sales.controller.js';
 import { SalesModule } from './sales/sales.module.js';
-import { ShiftsController } from './shifts/shifts.controller.js';
 import { ShiftsModule } from './shifts/shifts.module.js';
-import { CustomersController } from './customers/customers.controller.js';
 import { CustomersModule } from './customers/customers.module.js';
-import { MechanicsController } from './mechanics/mechanics.controller.js';
 import { MechanicsModule } from './mechanics/mechanics.module.js';
-import { SettingsController } from './settings/settings.controller.js';
-import { BootstrapController } from './settings/bootstrap.controller.js';
 import { SettingsModule } from './settings/settings.module.js';
-import { ReportsController } from './reports/reports.controller.js';
 import { ReportsModule } from './reports/reports.module.js';
 import { QueueModule, QueueProcessorsModule } from './queue/queue.module.js';
-import { QuotesController } from './quotes/quotes.controller.js';
 import { QuotesModule } from './quotes/quotes.module.js';
-import { ParkedSalesController } from './parked-sales/parked-sales.controller.js';
 import { ParkedSalesModule } from './parked-sales/parked-sales.module.js';
 import { BackupModule } from './backup/backup.module.js';
-import { BackupController } from './backup/backup.controller.js';
-import { ProductsController } from './products/products.controller.js';
 import { ProductsModule } from './products/products.module.js';
-import {
-  CategoriesController,
-  MovementsController,
-  SuppliersController,
-} from './products/catalogue.controllers.js';
-import { PurchaseOrdersController } from './purchasing/purchase-orders.controller.js';
 import { PurchasingModule } from './purchasing/purchasing.module.js';
-import { DevicesController } from './devices/devices.controller.js';
 import { DevicesModule } from './devices/devices.module.js';
 
 import { RuntimeConfigService } from './config/runtime-config.service.js';
@@ -70,47 +50,17 @@ export class CoreModule {
   }
 }
 
-/**
- * Routes that need the request transaction — exactly those carrying `TenantGuard`,
- * whose `SET LOCAL app.tenant_id` has nowhere else to live.
- *
- * `AuthController` is listed by route, not as a controller: only `GET /auth/me` has
- * the guard. `/auth/token` and `/auth/refresh` would otherwise pin an idle-in-
- * transaction connection across an argon2 verify, on the one endpoint that sees a
- * thundering herd after a restart.
- */
-const TENANT_ROUTES = [
-  { path: 'auth/me', method: RequestMethod.GET },
-  SalesController,
-  ReturnsController,
-  ShiftsController,
-  CustomersController,
-  MechanicsController,
-  SettingsController,
-  BootstrapController,
-  ReportsController,
-  QuotesController,
-  ParkedSalesController,
-  BackupController,
-  ProductsController,
-  CategoriesController,
-  SuppliersController,
-  MovementsController,
-  PurchaseOrdersController,
-  DevicesController,
-];
-
 /** The HTTP application: core + health + platform. Business modules are added by later tickets. */
 @Module({})
 export class AppModule implements NestModule {
   /**
-   * Every tenant-facing route runs inside a transaction opened before the guards,
-   * because `SET LOCAL app.tenant_id` — the guard's job, ADR-0003 — only exists
-   * inside one. `/health/*` and `/platform/*` are excluded: they have no tenant,
-   * and a transaction per liveness probe is a pool slot spent on nothing.
+   * Every route gets a request scope, and nothing more: `TenantScopeMiddleware` opens no
+   * transaction and touches no database (ADR-0003 addendum, tx.4 #153). `TenantGuard`
+   * names the tenant on the scope and each handler's `TenantService.runTx` opens its own
+   * transaction, so a new controller needs no entry here.
    */
   configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(RequestContextMiddleware).forRoutes(...TENANT_ROUTES);
+    consumer.apply(TenantScopeMiddleware).forRoutes('*');
   }
 
   static forRoot(config: AppConfig, logger: Logger): DynamicModule {
@@ -141,7 +91,7 @@ export class AppModule implements NestModule {
         PurchasingModule,
         DevicesModule,
       ],
-      providers: [RequestContextMiddleware],
+      providers: [TenantScopeMiddleware],
     };
   }
 }

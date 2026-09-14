@@ -12,7 +12,6 @@ import {
   toErrorEnvelope,
 } from './common/http-exception.filter.js';
 import { requestLogger } from './common/logger.js';
-import { TransactionInterceptor } from './common/transaction.interceptor.js';
 import { APP_CONFIG, type AppConfig } from './config/config.js';
 
 /** Everything main.ts and the e2e tests must configure identically. */
@@ -81,10 +80,10 @@ export async function configureApp(
       { path: 'health/ready', method: RequestMethod.GET },
     ],
   });
-  // Order matters: the envelope wraps whatever comes back (a replayed idempotent body
-  // included) and the transaction ends inside it. A handler's idempotency claim runs in
-  // its own runTx, which joins this transaction until tx.4 (#153).
-  app.useGlobalInterceptors(new EnvelopeInterceptor(), new TransactionInterceptor(logger));
+  // The envelope wraps whatever comes back, a replayed idempotent body included. There is
+  // no transaction interceptor (tx.4 #153): each handler's `TenantService.runTx` commits
+  // before it returns, so the envelope only ever wraps committed data.
+  app.useGlobalInterceptors(new EnvelopeInterceptor());
   app.useGlobalFilters(new HttpExceptionFilter(logger));
   app.enableShutdownHooks();
   await app.init();

@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { runInRequestContext } from '../common/request-context.js';
 import { RateLimitService } from './rate-limit.service.js';
 
 describe('RateLimitService (ADR-0006)', () => {
@@ -90,48 +89,17 @@ describe('RateLimitService (ADR-0006)', () => {
     );
   });
 
-  // #162: inside a request the middleware already holds a pool connection, so a second one
-  // from `ds` deadlocks the pool under a burst. The plan is read on the request's own
-  // transaction instead, inside a savepoint.
-  it('reads the plan on the request transaction, never the pool, inside a request (#162)', async () => {
+  // #162 → tx.4 (#153): the savepoint-on-the-request-transaction read is gone with the
+  // request transaction. A guard runs before any `runTx` holds a connection, so the pool
+  // read is the request's first connection; `test/rate-limit-pool.e2e-spec.ts` is the gate.
+  it('a failed plan read fails open and caches nothing', async () => {
     redisMock.get.mockResolvedValue(null);
     redisMock.eval.mockResolvedValue([1, 60]);
-    const manager = {
-      query: vi.fn(async (sql: string) => (sql.startsWith('SELECT') ? [{ plan: 'demo' }] : [])),
-    };
+    dsMock.query.mockRejectedValue(new Error('invalid input syntax for type uuid'));
 
-    const res = await runInRequestContext({ manager: manager as any }, () =>
-      service.checkRateLimit('tenant-demo', 'GET:/products'),
-    );
+    const res = await service.checkRateLimit('not-a-uuid', 'GET:/products');
 
     expect(res.allowed).toBe(true);
-    expect(dsMock.query).not.toHaveBeenCalled();
-    expect(manager.query.mock.calls.map((c) => c[0])).toEqual([
-      'SAVEPOINT rate_limit_plan',
-      'SELECT plan FROM tenants WHERE id = $1',
-      'RELEASE SAVEPOINT rate_limit_plan',
-    ]);
-    expect(redisMock.set).toHaveBeenCalledWith('t:tenant-demo:plan', 'demo', 'EX', 300);
-  });
-
-  it('rolls back to the savepoint when the in-request plan read fails, and fails open (#162)', async () => {
-    redisMock.get.mockResolvedValue(null);
-    redisMock.eval.mockResolvedValue([1, 60]);
-    const manager = {
-      query: vi.fn(async (sql: string) => {
-        if (sql.startsWith('SELECT')) throw new Error('invalid input syntax for type uuid');
-        return [];
-      }),
-    };
-
-    const res = await runInRequestContext({ manager: manager as any }, () =>
-      service.checkRateLimit('not-a-uuid', 'GET:/products'),
-    );
-
-    expect(res.allowed).toBe(true);
-    // Without the rollback the request transaction would be aborted, and every later
-    // statement in it — the guard's `SET LOCAL` included — would fail.
-    expect(manager.query).toHaveBeenLastCalledWith('ROLLBACK TO SAVEPOINT rate_limit_plan');
     expect(redisMock.set).not.toHaveBeenCalled();
   });
 

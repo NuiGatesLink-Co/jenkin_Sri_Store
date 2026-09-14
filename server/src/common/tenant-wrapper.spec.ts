@@ -9,9 +9,9 @@ const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 /**
  * tx.2 (#151): every public method that reads `currentRequestContext()` — directly, or
  * through a private method of its own class — opens its transaction through
- * `TenantService.runTx`. Until tx.4 (#153) a method that skips it still works, because it
- * reads the middleware's transaction; after tx.4 there is no such transaction and it 500s.
- * No endpoint test can see that today, so it is a source scan, like `tenant-door.spec.ts`.
+ * `TenantService.runTx`. Since tx.4 (#153) there is no request-wide transaction, so a method
+ * that skips it 500s — but only on the paths a test happens to reach, so it is a source scan,
+ * like `tenant-door.spec.ts`.
  *
  * The one accepted shape is the wrapper tx.2 introduced, whole body:
  *

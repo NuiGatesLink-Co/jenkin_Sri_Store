@@ -116,8 +116,8 @@ export class IdempotencyService {
    *
    * The controller calls it with the WHOLE handler body as `work`, which is exactly where
    * `IdempotencyInterceptor` sat (tx.3, #152): after the guards, before the handler's
-   * first statement. `runTx` opens the transaction here — or, until tx.4, joins the
-   * middleware's — and every service `runTx` inside `work` joins it, so the claim is the
+   * first statement. `runTx` opens the transaction here (since tx.4 #153 there is no
+   * request-wide one to join) and every service `runTx` inside `work` joins it, so the claim is the
    * transaction's first statement and nothing a service reads or locks comes before it.
    * A service that calls another write path (`QuotesService.convert → SalesService.create`)
    * therefore never claims twice: only controllers call this.

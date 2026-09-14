@@ -30,8 +30,8 @@ export class TenantService {
    * pass another shop's uuid and get its rows back with no error. With no tenant on the
    * scope this throws before touching the pool.
    *
-   * 🔴 **Joins, never nests.** If this scope already has a transaction open — the one
-   * `RequestContextMiddleware` opens until `tx.4`, or an outer `runTx` — `fn` runs on that
+   * 🔴 **Joins, never nests.** If this scope already has a transaction open — an outer
+   * `runTx` (since tx.4 #153 there is no request-wide one) — `fn` runs on that
    * same manager: no second connection (holding one while waiting for another is the pool
    * deadlock of #162), no savepoint, and the outer owner commits. That scope already names
    * the tenant, so `currentRequestContext()` works inside, and post-commit hooks land on the
@@ -44,9 +44,8 @@ export class TenantService {
    * propagate to the owner.
    *
    * 🔴 **Calls in parallel do not join each other.** `Promise.all([runTx(a), runTx(b)])`
-   * with no transaction open takes two connections at once. Harmless while the middleware's
-   * transaction exists (both join it); after `tx.4` it is the #162 pool-deadlock shape under
-   * a burst — run them in one `runTx` instead.
+   * with no transaction open takes two connections at once — the #162 pool-deadlock shape
+   * under a burst, and two snapshots instead of one. Run them in one `runTx` instead.
    *
    * Otherwise it opens one: `set_config('app.tenant_id', …, true)` (the transaction-local
    * form; `SET LOCAL app.tenant_id = $1` is a 42601 — see `tenant-scope.spec.ts`), runs `fn`

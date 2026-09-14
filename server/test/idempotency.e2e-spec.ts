@@ -10,8 +10,6 @@ import {
   type CallHandler,
   type ExecutionContext,
   type NestInterceptor,
-  type MiddlewareConsumer,
-  type NestModule,
 } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { pino } from 'pino';
@@ -27,10 +25,8 @@ import { idempotencyParamsOf } from '../src/idempotency/idempotency.runner.js';
 import { IdempotencyService } from '../src/idempotency/idempotency.service.js';
 import {
   currentRequestContext,
-  currentRequestTransaction,
   setRequestTenant,
 } from '../src/common/request-context.js';
-import { RequestContextMiddleware } from '../src/common/request-context.middleware.js';
 
 // #18 acceptance suite. Runs against the real compose Postgres and Redis as `pos_app`,
 // with RLS on — no mocks, because the primary key and RLS ARE the mechanism under test.
@@ -39,9 +35,9 @@ const TENANT_B = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
 
 /**
  * Stands in for the one thing `TenantGuard` does that this suite cannot get from
- * a real login: naming the tenant. The transaction and the scope come from the real
- * `RequestContextMiddleware`, and the real `TransactionInterceptor` commits — so the
- * chain under test is production's, with only the token replaced by a header.
+ * a real login: naming the tenant. The scope comes from the real `TenantScopeMiddleware`
+ * and the transaction from `runIdempotent`'s real `TenantService.runTx` (tx.4 #153) — so
+ * the chain under test is production's, with only the token replaced by a header.
  */
 class StandInTenantGuard implements NestInterceptor {
   async intercept(
@@ -52,9 +48,6 @@ class StandInTenantGuard implements NestInterceptor {
       .switchToHttp()
       .getRequest<{ headers: Record<string, string> }>()
       .headers['x-test-tenant'];
-    const manager = currentRequestTransaction();
-    if (!manager) throw new Error('middleware did not open a request context');
-    await manager.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenantId]);
     setRequestTenant(tenantId);
     return next.handle();
   }
@@ -125,15 +118,8 @@ class TestAcceptedController {
 @Module({
   imports: [IdempotencyModule],
   controllers: [TestWriteController, TestAcceptedController],
-  providers: [RequestContextMiddleware],
 })
-class TestWriteModule implements NestModule {
-  configure(consumer: MiddlewareConsumer): void {
-    consumer
-      .apply(RequestContextMiddleware)
-      .forRoutes(TestWriteController, TestAcceptedController);
-  }
-}
+class TestWriteModule {}
 
 describe('idempotency (e2e)', () => {
   let app: INestApplication;

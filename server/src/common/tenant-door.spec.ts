@@ -104,8 +104,8 @@ function reachesForPool(source: string): boolean {
 const ALLOWED: Record<string, string> = {
   'common/database/tenant.service.ts':
     'It IS the door: the one place a pool becomes a transaction scoped to the tenant TenantGuard authorised.',
-  'common/request-context.middleware.ts':
-    'Opens the request-wide transaction TenantGuard names the tenant on — the split in force until tx.4 (#153) deletes this file.',
+  'common/guards/tenant.guard.ts':
+    'ADR-0003: reads tenants.status (a GLOBAL_TABLE, no RLS) on a cache miss with a plain pool query before it names the tenant — the request holds no other connection yet (tx.4 #153), so this is never a second one. It never sets app.tenant_id.',
   'infra/db.module.ts':
     'Builds and destroys the three pools (default pos_app, ADMIN_DATA_SOURCE, AUDIT_DATA_SOURCE).',
   'db/data-source.ts':
@@ -113,11 +113,11 @@ const ALLOWED: Record<string, string> = {
   'health/health.controller.ts':
     '/health/ready probes Postgres with SELECT 1: no tenant, no table, deliberately outside any transaction.',
   'auth/auth.service.ts':
-    'ADR-0009: a failed login must leave its audit_log row, which a rolled-back request transaction would erase, and /auth/token must not hold an idle transaction across its argon2 verify; so /auth/token and /auth/refresh stay out of TENANT_ROUTES (only GET /auth/me is in) and set app.tenant_id on their own runners.',
+    'ADR-0009: a failed login must leave its audit_log row, which a rolled-back request transaction would erase, and /auth/token must not hold an idle transaction across its argon2 verify; so /auth/token and /auth/refresh carry no TenantGuard and set app.tenant_id on their own runners.',
   'sales/void.service.ts':
     'auditDenial only, via AUDIT_DATA_SOURCE: a refused void rolls its request back and the refusal record must survive that; never the request pool (void-denial-pool.e2e-spec.ts).',
   'rate-limit/rate-limit.service.ts':
-    'readPlan reads tenants.plan (no RLS) on the pool only when no request transaction exists; inside a request it uses that transaction (#162).',
+    'readPlan reads tenants.plan (no RLS) on the pool from the global rate-limit guard, before any runTx holds a connection — since tx.4 (#153) there is no request transaction to hold one first (#162).',
   'queue/tenant-job-runner.ts':
     'BullMQ jobs have no request: checks tenants.status (ADR-0003 consequence 4), then opens its own transaction with set_config per job. It names its tenant from the job payload (job.data.tenantId), not from a guard — so its callers are policed below (queue/processors/ only).',
   'queue/processors/maintenance.processor.ts':
@@ -166,8 +166,8 @@ const SCOPE_DOORS: Array<{
   {
     name: 'runInRequestContext',
     definedIn: 'common/request-context.ts',
-    callers: (file) => file === 'common/request-context.middleware.ts',
-    why: 'opens the request-wide scope; the middleware alone, until tx.4 (#153) deletes both',
+    callers: () => false,
+    why: 'publishes a tenant + manager nobody authorised or opened; a unit-test seam only since tx.4 (#153) deleted the request-wide transaction',
   },
 ];
 

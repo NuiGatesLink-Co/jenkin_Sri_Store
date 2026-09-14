@@ -243,6 +243,14 @@ describe('runTx joins the open transaction instead of taking a second connection
   });
 
   it('POST /devices/:id/retire: one pos_app transaction while parked, one query runner (retire → closeForRetirement → close)', async () => {
+    // Warm the guards' status and plan caches, as `ringUp` does for the void case. Since
+    // tx.4 (#153) a cold cache is read on the pool — one short runner each, returned before
+    // the handler's `runTx` takes the request's connection — and this case counts only the
+    // handler's runners.
+    await request(app.getHttpServer())
+      .get('/api/v1/devices')
+      .set('Authorization', `Bearer ${ownerToken}`)
+      .expect(200);
     const runners = vi.spyOn(ds, 'createQueryRunner');
 
     // `closeForRetirement` locks the drawer row; `close()` runs after it.

@@ -80,7 +80,7 @@ describe('TenantService.runTx (tx.1, #150)', () => {
     await expect(runInTenantScope(() => tenants.runTx(work))).rejects.toThrow(
       /No tenant on this request/,
     );
-    // The middleware's transaction before the guard ran: still no tenant, still no join.
+    // A transaction already in scope but no tenant named: still no tenant, still no join.
     await expect(
       runInRequestContext({ manager: {} as any }, () => tenants.runTx(work)),
     ).rejects.toThrow(/No tenant on this request/);
@@ -115,14 +115,14 @@ describe('TenantService.runTx (tx.1, #150)', () => {
     ]);
   });
 
-  it('joins the transaction RequestContextMiddleware opened instead of taking a connection', async () => {
+  it('joins a transaction already published on the scope instead of taking a connection', async () => {
     const { tenants, ds } = fakePool();
     const requestManager = { name: 'request-manager' } as any;
     let seen: unknown;
     let ctx: unknown;
 
     await runInRequestContext({ manager: requestManager }, async () => {
-      setRequestTenant(TID); // what TenantGuard does today
+      setRequestTenant(TID); // what TenantGuard does
       await tenants.runTx(async (m) => {
         seen = m;
         ctx = currentRequestContext();
@@ -307,8 +307,41 @@ describe('TenantService.runTx (tx.1, #150)', () => {
       await tenants.runTx(async () => {
         onTransactionCommit(hook);
       });
-      // TransactionInterceptor commits the request transaction and runs this, not runTx.
+      // Whoever published the manager owns its commit and its hooks, not the joined runTx.
       expect(hook).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('onTransactionCommit with no open transaction (tx.4, #153)', () => {
+  // With the request-wide transaction gone, a request scope outside `runTx` has no commit
+  // to wait for. The hook must neither run early nor sit on a scope nobody ends.
+  it('throws in a request scope outside runTx, and the hook never runs', async () => {
+    const hook = vi.fn();
+    await authorised(async () => {
+      expect(() => onTransactionCommit(hook)).toThrow(/needs an open transaction/);
+    });
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('throws outside any scope instead of running the hook at once', () => {
+    const hook = vi.fn();
+    expect(() => onTransactionCommit(hook)).toThrow(/needs an open transaction/);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('a hook registered inside runTx, in a scope that outlives it, runs once after that commit', async () => {
+    const { tenants, events } = fakePool();
+    await authorised(async () => {
+      await tenants.runTx(async () => {
+        onTransactionCommit(() => {
+          events.push('hook');
+        });
+      });
+      expect(events.slice(-3)).toEqual(['commit', 'release', 'hook']);
+      // Back in the request scope: no transaction, so a late registration is refused.
+      expect(() => onTransactionCommit(() => undefined)).toThrow(/needs an open transaction/);
+    });
+    expect(events.filter((e) => e === 'hook')).toHaveLength(1);
   });
 });
