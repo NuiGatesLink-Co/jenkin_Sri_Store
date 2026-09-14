@@ -64,6 +64,12 @@ export class ProductsController {
         'updatedSince is keyset-paged: follow meta.nextCursor instead of page',
       );
     }
+    // A scan that read nothing names no product. Treating a blank `?partNo=` as "no
+    // filter" would answer with catalogue page 1, and a scanner taking `data[0]` would
+    // put an arbitrary part on the bill.
+    if (partNo !== undefined && partNo.trim() === '') {
+      return new Paginated([], { total: 0, ...parsed });
+    }
     const result = await this.products.list({
       search: search || undefined,
       partNo: partNo?.trim() || undefined,

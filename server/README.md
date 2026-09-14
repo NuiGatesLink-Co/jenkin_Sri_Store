@@ -648,9 +648,17 @@ every case of `frontend/test/products_repository_test.dart` at the HTTP seam.
   over a tie larger than a page* (nine rows, one microsecond, limit 3).
 - 🔴 **Not solved here — late commits.** A write stamped with its transaction's start time
   (`now()`) can commit after a reader has already moved its cursor past that time, and is then
-  never read. Recorded as #55's read-back-window question under ADR-0010 *ยังไม่เคาะ*.
+  never read. Recorded as #55's read-back-window question under ADR-0010 *ยังไม่เคาะ*. **Until
+  #55 decides that window, a client must start each refresh a safety margin before its stored
+  cursor** (an `updatedSince` some seconds earlier, no `afterId`), otherwise the protocol above
+  loses late-committing writes; the rows it reads again are upserts by id, so re-reading is harmless.
 - **`?partNo=` is one product, trimmed and case-insensitive** (`lower(part_no) = lower($n)`,
-  served by `uq_products_partno_ci`) — the same comparison uniqueness uses.
+  served by `uq_products_partno_ci`) — the same comparison uniqueness uses. A `partNo` that is
+  present but blank answers an empty page, never catalogue page 1.
+- **The platform import pre-flights case-duplicate part numbers** (`tenant-import.service.ts`):
+  a snapshot whose products share a part number ignoring case is a 400 naming the ids, before
+  the transaction, like the negative-stock pre-flight. It compares with JS `toLowerCase()`; a
+  non-ASCII pair that JS and Postgres `lower()` fold differently would still reach the index as a 500.
 - **`?search=`** puts the predicate on `SEARCH_EXPRESSION` — the exact expression
   `idx_products_search` is built on — then rechecks `part_no`/`name`/`name_th` so matching stays
   what the screens do (no `compat`). 🔴 **Under RLS the trigram index is not used:** as

@@ -91,6 +91,24 @@ export class TenantImportService {
         );
       }
     }
+    // Every imported product is written live, and `uq_products_partno_ci` (#16) refuses
+    // two live part numbers that differ only by case. Drift has no such constraint, so a
+    // real backup can hold them; without this the import dies mid-transaction as a 500.
+    // The part number is derived exactly as the insert below derives it, and a repeated
+    // id is not a clash (the insert keeps the first and skips the rest).
+    const idsByPartNo = new Map<string, Set<string>>();
+    for (const p of products) {
+      const id = String(p.id);
+      const key = String(p.partNo || p.part_no || id).toLowerCase();
+      idsByPartNo.set(key, (idsByPartNo.get(key) ?? new Set()).add(id));
+    }
+    for (const [partNo, ids] of idsByPartNo) {
+      if (ids.size > 1) {
+        throw new BadRequestException(
+          `Pre-flight failed: products ${[...ids].map((id) => `'${id}'`).join(', ')} share part number '${partNo}' (case-insensitive)`,
+        );
+      }
+    }
 
     // 3. Single-transaction import
     await this.adminDs.transaction(async (manager) => {

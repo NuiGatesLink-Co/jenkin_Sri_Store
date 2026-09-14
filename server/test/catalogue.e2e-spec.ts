@@ -1,9 +1,10 @@
-import type { INestApplication } from '@nestjs/common';
+import { BadRequestException, type INestApplication } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
 import { seedCategories } from '../src/db/seed.js';
 import { CAT_PALETTE } from '../src/products/categories.service.js';
+import { TenantImportService } from '../src/platform/tenant-import.service.js';
 import { SEARCH_EXPRESSION } from '../src/products/products.service.js';
 import {
   accessToken,
@@ -494,6 +495,11 @@ describe('catalogue (e2e)', () => {
       expect(one.body.data.map((p: { id: string }) => p.id)).toEqual(['bp1']);
       expect(one.body.meta.total).toBe(1);
       expect((await get('/products?partNo=BP')).body.data).toEqual([]);
+      // A blank scan names no product — not "no filter", which would be page 1.
+      const blank = await get('/products?partNo=%20%20');
+      expect(blank.status).toBe(200);
+      expect(blank.body.data).toEqual([]);
+      expect(blank.body.meta.total).toBe(0);
       // A scan compares the way uniqueness is enforced: case-insensitive, trimmed.
       expect(
         (
@@ -859,6 +865,33 @@ describe('catalogue (e2e)', () => {
           .meta.total,
       ).toBe(3);
       expect((await get('/movements?from=yesterday')).status).toBe(400);
+    });
+  });
+
+  describe('platform import (uq_products_partno_ci)', () => {
+    it('refuses a snapshot whose part numbers differ only by case with a 400 naming the ids, writing nothing', async () => {
+      const importer = app.get(TenantImportService);
+      const err = await importer
+        .importSnapshot(
+          OTHER,
+          {
+            __meta: { version: 2 },
+            sa_products: [
+              { id: 'imp-a', partNo: 'BP-1', name: 'A', stock: 1 },
+              { id: 'imp-b', partNo: 'bp-1', name: 'B', stock: 1 },
+            ],
+          },
+          fixture.userId,
+        )
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(BadRequestException);
+      expect((err as BadRequestException).getStatus()).toBe(400);
+      expect((err as Error).message).toContain("'imp-a', 'imp-b'");
+      const rows = await admin.query(
+        `SELECT count(*)::int AS n FROM products WHERE tenant_id = $1::uuid`,
+        [OTHER],
+      );
+      expect(rows[0].n).toBe(0);
     });
   });
 
