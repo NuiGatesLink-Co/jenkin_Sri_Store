@@ -30,7 +30,7 @@ describe('ProductsService Caching & Reads', () => {
       manager: managerMock,
     } as any);
 
-    service = new ProductsService(new TenantCache(redisMock), { log: vi.fn() } as any);
+    service = new ProductsService(new TenantCache(redisMock, { warn: vi.fn() } as any), { log: vi.fn() } as any);
   });
 
   it('returns cached products when cache hits (fromCache: true)', async () => {
@@ -114,7 +114,7 @@ describe('ProductsService Caching & Reads', () => {
     await service.list({ page: 1, limit: 10 });
     expect((await service.list({ page: 1, limit: 10 })).fromCache).toBe(true);
 
-    await new TenantCache(redisMock).invalidate(
+    await new TenantCache(redisMock, { warn: vi.fn() } as any).invalidate(
       '00000000-0000-4000-8000-000000000001',
       'products',
     );
@@ -125,7 +125,7 @@ describe('ProductsService Caching & Reads', () => {
   });
 
   it('a reader that read before a commit cannot cache over the invalidation (read-populate race)', async () => {
-    const cache = new TenantCache(redisMock);
+    const cache = new TenantCache(redisMock, { warn: vi.fn() } as any);
     const tid = '00000000-0000-4000-8000-000000000001';
     const row = (stock: number) => ({
       id: 'p1', part_no: 'BP-1', name: 'n', name_th: 'n', category: 'c', brand: 'b',

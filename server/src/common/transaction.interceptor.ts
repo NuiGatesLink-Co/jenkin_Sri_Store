@@ -5,6 +5,7 @@ import {
   type NestInterceptor,
 } from '@nestjs/common';
 import { catchError, concatMap, from, throwError, type Observable } from 'rxjs';
+import type { Logger } from 'pino';
 import type { QueryRunner } from 'typeorm';
 import { OWNED_BY_INTERCEPTOR } from './request-context.middleware.js';
 import { currentRequestTransaction, executePostCommitHooks } from './request-context.js';
@@ -21,6 +22,8 @@ import { currentRequestTransaction, executePostCommitHooks } from './request-con
  */
 @Injectable()
 export class TransactionInterceptor implements NestInterceptor {
+  constructor(private readonly logger?: Logger) {}
+
   intercept(_ctx: ExecutionContext, next: CallHandler): Observable<unknown> {
     const qr = currentRequestTransaction()?.queryRunner;
     if (!qr) return next.handle();
@@ -34,7 +37,9 @@ export class TransactionInterceptor implements NestInterceptor {
     return next.handle().pipe(
       concatMap(async (value) => {
         await end(qr, 'commit');
-        await executePostCommitHooks();
+        await executePostCommitHooks((err) =>
+          this.logger?.warn({ err }, 'post-commit hook failed'),
+        );
         return value;
       }),
       catchError((err: unknown) =>

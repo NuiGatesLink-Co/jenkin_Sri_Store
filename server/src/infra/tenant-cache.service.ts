@@ -1,14 +1,32 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import type { Redis } from 'ioredis';
-import { onTransactionCommit } from '../common/request-context.js';
+import type { Logger } from 'pino';
+import {
+  hasRequestContext,
+  onTransactionCommit,
+} from '../common/request-context.js';
+import { LOGGER } from './logger.provider.js';
 import { REDIS_CACHE } from './redis.module.js';
 
 /**
- * A group of cached keys that one write invalidates together (#32). Only `products`
- * exists today: it is the one read path the server caches.
+ * A group of cached keys that one write invalidates together (#32), one generation
+ * each. `02_API_SCREENS.md §4.2/§5` name the reads: `GET /products` (+ `/:id`),
+ * `GET /settings`, `GET /customers`, `GET /mechanics`.
  */
-export type CacheNamespace = 'products';
+export type CacheNamespace = 'products' | 'settings' | 'customers' | 'mechanics';
+
+/**
+ * TTL per namespace: §5 for products (300 s ± 60 s) and settings (3600 s), §4.2 for
+ * customers and mechanics (1 m). §5 requires jitter on every key but gives an amount
+ * only for products, so the others get ±10 %.
+ */
+export const CACHE_TTL: Record<CacheNamespace, { base: number; jitter: number }> = {
+  products: { base: 300, jitter: 60 },
+  settings: { base: 3600, jitter: 360 },
+  customers: { base: 60, jitter: 6 },
+  mechanics: { base: 60, jitter: 6 },
+};
 
 /** How long a generation lives. Its expiry only costs one miss per key, never staleness. */
 const GENERATION_TTL_SEC = 3600;
@@ -46,7 +64,10 @@ export function generationKey(tenantId: string, ns: CacheNamespace): string {
  */
 @Injectable()
 export class TenantCache {
-  constructor(@Inject(REDIS_CACHE) private readonly redis: Redis) {}
+  constructor(
+    @Inject(REDIS_CACHE) private readonly redis: Redis,
+    @Inject(LOGGER) private readonly logger: Logger,
+  ) {}
 
   /**
    * The key prefix for `ns` at its current generation. `null` when Redis cannot answer:
@@ -86,9 +107,11 @@ export class TenantCache {
     }
   }
 
-  async set(key: string, value: unknown, ttlSec: number): Promise<void> {
+  /** Stores `value` under `key` with `ns`'s TTL and jitter. */
+  async set(key: string, value: unknown, ns: CacheNamespace): Promise<void> {
+    const { base, jitter } = CACHE_TTL[ns];
     try {
-      await this.redis.set(key, JSON.stringify(value), 'EX', ttlSec);
+      await this.redis.set(key, JSON.stringify(value), 'EX', ttlWithJitter(base, jitter));
     } catch {
       // Fail-open.
     }
@@ -98,8 +121,18 @@ export class TenantCache {
    * Invalidates `ns` for this tenant strictly after the request transaction commits,
    * through the same hook the BullMQ enqueues use. A rollback — a thrown error, a 409 —
    * discards the hook, so a refused write neither invalidates nor exposes anything.
+   *
+   * 🔴 Throws outside a request context. There `onTransactionCommit` runs the hook at
+   * once, so a worker or admin-data-source write would invalidate BEFORE its own
+   * commit, and a reader in between would cache the old rows under the new generation.
    */
   invalidateAfterCommit(tenantId: string, ns: CacheNamespace): void {
+    if (!hasRequestContext()) {
+      throw new Error(
+        'TenantCache.invalidateAfterCommit needs a request transaction. Outside a request, ' +
+          'await your own transaction and then call TenantCache.invalidate().',
+      );
+    }
     onTransactionCommit(() => this.invalidate(tenantId, ns));
   }
 
@@ -119,8 +152,9 @@ export class TenantCache {
         'EX',
         ttlWithJitter(GENERATION_TTL_SEC, GENERATION_JITTER_SEC),
       );
-    } catch {
-      // Fail-open.
+    } catch (err) {
+      // Fail-open, but loudly: a cached value can now outlive this write by its TTL.
+      this.logger.warn({ tenantId, ns, err }, 'cache invalidation failed');
     }
   }
 }

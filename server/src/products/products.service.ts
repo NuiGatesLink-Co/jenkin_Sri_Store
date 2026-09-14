@@ -9,7 +9,7 @@ import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
-import { TenantCache, ttlWithJitter } from '../infra/tenant-cache.service.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import {
   MOVEMENT_COLUMNS,
   movementOut,
@@ -96,10 +96,6 @@ const INT4_MAX = 2_147_483_647;
 
 /** Postgres `unique_violation`. */
 const UNIQUE_VIOLATION = '23505';
-
-/** 02_API_SCREENS.md §5: 300s + jitter ±60s. */
-const PRODUCTS_CACHE_TTL_SEC = 300;
-const PRODUCTS_CACHE_JITTER_SEC = 60;
 
 type CachedList = { items: Product[]; total: number; nextCursor?: SyncCursor | null };
 
@@ -225,7 +221,7 @@ export class ProductsService {
       await this.cache.set(
         key,
         { items, total, nextCursor } satisfies CachedList,
-        ttlWithJitter(PRODUCTS_CACHE_TTL_SEC, PRODUCTS_CACHE_JITTER_SEC),
+        'products',
       );
     }
 
@@ -255,7 +251,7 @@ export class ProductsService {
       await this.cache.set(
         key,
         product,
-        ttlWithJitter(PRODUCTS_CACHE_TTL_SEC, PRODUCTS_CACHE_JITTER_SEC),
+        'products',
       );
     }
 
