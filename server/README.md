@@ -1082,7 +1082,35 @@ Negatives, all in the same spec:
     today; a future deactivate path must `DEL pa:<id>:exists`**, or the admin can still write for 60s.
   - `audit_log.ip` stores null for a value containing `%` (an IPv6 zone id passes `net.isIP` but
     Postgres `inet` rejects it, and inside the transaction that rolled back the write).
-    **Still open:** the stored IP is the *leftmost* `X-Forwarded-For` entry, which the client controls.
+    The stored IP is the rightmost `X-Forwarded-For` entry since #132 (`common/client-ip.ts`).
+
+## Login brute-force limits (#134, #138)
+
+`POST /auth/token` has two fixed 60-second buckets in `REDIS_CACHE`, both through
+`RateLimitService.consumeAttempt`:
+
+| Bucket | Key | Limit | Taken |
+|---|---|---|---|
+| IP | `auth:ip:<clientIp>` | 10 attempts | before `qr.connect()`, so a locked-out IP costs no pool connection |
+| Username | `auth:user:<device tenant or ->:<username>` | 5 attempts | after the device-token lookup |
+
+- 🔴 **An attempt is counted before its outcome is known, in one `INCR`.** The old
+  `getFailureStatus` then `recordFailure` pair was check-then-increment: 15 concurrent bad logins all
+  read the same count and all answered 401 (measured on `main` by `security.e2e-spec.ts`, now 10×401
+  and 5×429). So every refusal counts — invalid or retired device token (IP bucket only), unknown or
+  ambiguous username, inactive user, suspended tenant, wrong password. Responses are unchanged.
+- 🔴 **A success never clears the IP bucket.** It gives back only its own attempt
+  (`refundAttempt`, which never creates a key). Clearing it let one valid account reset the bucket
+  every 9 failures and spray usernames. A success still clears that username's bucket.
+- **Keys are hashed** (`rl:<sha256>:<window>`). Replacing non-ASCII characters with `_` made two
+  equal-length Thai usernames, and `a.b` / `a_b`, share one bucket. This applies to every
+  `RateLimitService` key-based bucket, the void manager-PIN one included.
+- The client address comes from `clientIp(req)`, the same helper the audit services use; nginx must be
+  the only proxy in front of the API (07 §9).
+- Redis errors fail open, like the rest of `RateLimitService`.
+- **Not changed:** the void manager-PIN path (`sales/void.service.ts`) still uses check-then-increment,
+  and `User is inactive` / `TENANT_SUSPENDED` are answered before the password is checked, which tells a
+  caller that a username exists. Both are follow-ups, not part of #138.
 
 ## Conventions these slices set
 

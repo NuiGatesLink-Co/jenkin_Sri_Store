@@ -38,9 +38,15 @@ export class AuthService {
     // Brute-force checks (OWASP A07). The IP bucket needs no tenant, so it is checked before a
     // pool connection is taken: a locked-out IP must not cost a connection and a device lookup.
     // `clientIp` is the real client only because `configureApp` sets `trust proxy` to 1.
+    //
+    // Every attempt is counted up front, atomically (#138): a separate check then increment let N
+    // concurrent attempts all pass. So every refusal counts — bad device token, unknown or ambiguous
+    // username, inactive user, suspended tenant, wrong password — and only a successful login gives
+    // its own attempt back. The IP bucket is never cleared on success: that let one valid account
+    // reset the bucket every 9 failures and spray usernames with no IP limit.
     const ipKey = clientIp ? `auth:ip:${clientIp}` : null;
     if (ipKey) {
-      const ipStatus = await this.rateLimit.getFailureStatus(ipKey, 10, 60);
+      const ipStatus = await this.rateLimit.consumeAttempt(ipKey, 10, 60);
       if (!ipStatus.allowed) {
         throw new HttpException(
           {
@@ -71,14 +77,12 @@ export class AuthService {
         if (devRes.length === 1) {
           const dev = devRes[0];
           if (dev.retired_at) {
-            if (ipKey) await this.rateLimit.recordFailure(ipKey, 60);
             throw new UnauthorizedException('Device has been retired');
           }
           deviceTenantId = dev.tenant_id;
           did = dev.id;
           drole = dev.role;
         } else {
-          if (ipKey) await this.rateLimit.recordFailure(ipKey, 60);
           throw new UnauthorizedException('Invalid device token');
         }
       }
@@ -90,7 +94,7 @@ export class AuthService {
         : null;
 
       if (userKey) {
-        const userStatus = await this.rateLimit.getFailureStatus(userKey, 5, 60);
+        const userStatus = await this.rateLimit.consumeAttempt(userKey, 5, 60);
         if (!userStatus.allowed) {
           throw new HttpException(
             {
@@ -115,8 +119,6 @@ export class AuthService {
 
       if (userRows.length === 0) {
         this.logger.warn(`Login failed: user not found for username=${dto.username}`);
-        if (userKey) await this.rateLimit.recordFailure(userKey, 60);
-        if (ipKey) await this.rateLimit.recordFailure(ipKey, 60);
         throw new UnauthorizedException('Invalid credentials');
       }
 
@@ -161,8 +163,6 @@ export class AuthService {
         valid = false;
       }
       if (!valid) {
-        if (userKey) await this.rateLimit.recordFailure(userKey, 60);
-        if (ipKey) await this.rateLimit.recordFailure(ipKey, 60);
         await this.logAuthEventWithRls(qr, tenantId, {
           tenantId,
           userId: user.id,
@@ -174,9 +174,10 @@ export class AuthService {
         throw new UnauthorizedException('Invalid credentials');
       }
 
-      // Clear brute-force failure tracking on successful authentication
+      // A correct password clears this username's failures; the IP bucket only gets this one
+      // attempt back, so failures against other usernames from the same address stay counted.
       if (userKey) await this.rateLimit.clearKey(userKey, 60);
-      if (ipKey) await this.rateLimit.clearKey(ipKey, 60);
+      if (ipKey) await this.rateLimit.refundAttempt(ipKey, 60);
 
       // 3. Issue Tokens
       const payload: Omit<JwtPayload, 'iss' | 'iat' | 'exp'> = {

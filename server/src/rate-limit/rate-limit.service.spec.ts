@@ -124,3 +124,90 @@ describe('RateLimitService (ADR-0006)', () => {
     );
   });
 });
+
+// #138: brute-force counters keyed by caller-chosen strings.
+describe('RateLimitService attempt counters (#138)', () => {
+  // A Redis stand-in with the INCR/EXPIRE and EXISTS/DECR semantics the Lua scripts implement.
+  const fakeRedis = () => {
+    const store = new Map<string, number>();
+    return {
+      store,
+      get: vi.fn(async (k: string) => (store.has(k) ? String(store.get(k)) : null)),
+      ttl: vi.fn(async () => 60),
+      del: vi.fn(async (k: string) => store.delete(k)),
+      eval: vi.fn(async (script: string, _n: number, key: string) => {
+        if (script.includes('INCR')) {
+          store.set(key, (store.get(key) ?? 0) + 1);
+          return [store.get(key), 60];
+        }
+        if (store.has(key)) {
+          store.set(key, store.get(key)! - 1);
+          return store.get(key);
+        }
+        return 0;
+      }),
+    };
+  };
+
+  it('gives equal-length Thai usernames separate buckets', async () => {
+    const redis = fakeRedis();
+    const service = new RateLimitService(redis as any, {} as any);
+
+    await service.recordFailure('auth:user:t1:สมชาย', 60);
+    await service.recordFailure('auth:user:t1:สมศรี', 60);
+
+    expect(redis.store.size).toBe(2);
+  });
+
+  it('does not collide a.b with a_b', async () => {
+    const redis = fakeRedis();
+    const service = new RateLimitService(redis as any, {} as any);
+
+    await service.recordFailure('auth:user:t1:a.b', 60);
+    await service.recordFailure('auth:user:t1:a_b', 60);
+
+    expect(redis.store.size).toBe(2);
+  });
+
+  it('allows exactly `limit` concurrent attempts', async () => {
+    const redis = fakeRedis();
+    const service = new RateLimitService(redis as any, {} as any);
+
+    const results = await Promise.all(
+      Array.from({ length: 15 }, () => service.consumeAttempt('auth:ip:10.0.0.1', 10, 60)),
+    );
+
+    expect(results.filter((r) => r.allowed)).toHaveLength(10);
+    expect(results.filter((r) => !r.allowed)).toHaveLength(5);
+  });
+
+  it('refunds one attempt without clearing the others', async () => {
+    const redis = fakeRedis();
+    const service = new RateLimitService(redis as any, {} as any);
+    for (let i = 0; i < 3; i++) await service.consumeAttempt('auth:ip:10.0.0.2', 10, 60);
+
+    await service.refundAttempt('auth:ip:10.0.0.2', 60);
+
+    expect([...redis.store.values()]).toEqual([2]);
+  });
+
+  it('never creates a key when refunding into an empty window', async () => {
+    const redis = fakeRedis();
+    const service = new RateLimitService(redis as any, {} as any);
+
+    await service.refundAttempt('auth:ip:10.0.0.3', 60);
+
+    expect(redis.store.size).toBe(0);
+  });
+
+  it('fails open when Redis errors', async () => {
+    const service = new RateLimitService(
+      { eval: vi.fn().mockRejectedValue(new Error('down')) } as any,
+      {} as any,
+    );
+    await expect(service.consumeAttempt('auth:ip:10.0.0.4', 1, 60)).resolves.toEqual({
+      allowed: true,
+    });
+    await expect(service.refundAttempt('auth:ip:10.0.0.4', 60)).resolves.toBeUndefined();
+  });
+});

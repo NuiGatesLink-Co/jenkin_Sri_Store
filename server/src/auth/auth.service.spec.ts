@@ -9,6 +9,8 @@ describe('AuthService', () => {
   const rateLimitMock = {
     getFailureStatus: vi.fn().mockResolvedValue({ allowed: true }),
     recordFailure: vi.fn().mockResolvedValue(1),
+    consumeAttempt: vi.fn().mockResolvedValue({ allowed: true }),
+    refundAttempt: vi.fn().mockResolvedValue(undefined),
     clearKey: vi.fn().mockResolvedValue(undefined),
   };
 
@@ -402,7 +404,12 @@ describe('AuthService', () => {
           token,
         ) as Promise<string>;
 
-      const build = (passHash: string, tenantByHash: Record<string, string> = {}) => {
+      const build = (
+        passHash: string,
+        tenantByHash: Record<string, string> = {},
+        userOverrides: Record<string, unknown> = {},
+        userCount = 1,
+      ) => {
         const auditMock = { log: vi.fn() };
         const qrMock = {
           connect: vi.fn(),
@@ -416,19 +423,18 @@ describe('AuthService', () => {
               return tid ? [{ tenant_id: tid, id: `d-${tid}`, role: 'pos', retired_at: null }] : [];
             }
             if (sql.includes('auth_lookup_user_for_login')) {
-              return [
-                {
-                  id: 'u1',
-                  tenant_id: params[1] ?? 't1',
-                  username: 'owner',
-                  password_hash: passHash,
-                  role: 'owner',
-                  display_name: 'Store Owner',
-                  is_active: true,
-                  tenant_status: 'active',
-                  timezone: 'Asia/Bangkok',
-                },
-              ];
+              return Array.from({ length: userCount }, () => ({
+                id: 'u1',
+                tenant_id: params[1] ?? 't1',
+                username: 'owner',
+                password_hash: passHash,
+                role: 'owner',
+                display_name: 'Store Owner',
+                is_active: true,
+                tenant_status: 'active',
+                timezone: 'Asia/Bangkok',
+                ...userOverrides,
+              }));
             }
             return [];
           }),
@@ -445,7 +451,7 @@ describe('AuthService', () => {
       };
 
       const checkedKeys = (prefix: string) =>
-        rateLimitMock.getFailureStatus.mock.calls
+        rateLimitMock.consumeAttempt.mock.calls
           .map((c: any[]) => c[0] as string)
           .filter((k) => k.startsWith(prefix));
 
@@ -454,7 +460,7 @@ describe('AuthService', () => {
           [await hash('tokA')]: 'tenant-a',
           [await hash('tokB')]: 'tenant-b',
         });
-        rateLimitMock.getFailureStatus.mockClear();
+        rateLimitMock.consumeAttempt.mockClear();
 
         for (const deviceToken of ['tokA', 'tokB']) {
           await expect(
@@ -470,7 +476,7 @@ describe('AuthService', () => {
 
       it('keys the ip bucket by the client address it is given', async () => {
         const { service } = build('not-an-argon2-hash');
-        rateLimitMock.getFailureStatus.mockClear();
+        rateLimitMock.consumeAttempt.mockClear();
 
         for (const ip of ['10.0.0.5', '10.0.0.6']) {
           await expect(service.login({ username: 'owner', password: 'x' }, ip)).rejects.toThrow(
@@ -489,7 +495,7 @@ describe('AuthService', () => {
           {} as any,
           rateLimitMock as any,
         );
-        rateLimitMock.getFailureStatus.mockResolvedValueOnce({ allowed: false, retryAfter: 42 });
+        rateLimitMock.consumeAttempt.mockResolvedValueOnce({ allowed: false, retryAfter: 42 });
 
         try {
           await expect(
@@ -498,19 +504,81 @@ describe('AuthService', () => {
           expect(createQueryRunner).not.toHaveBeenCalled();
         } finally {
           // A pre-fix service throws before consuming the Once value; don't leak it into the next test.
-          rateLimitMock.getFailureStatus.mockReset();
-          rateLimitMock.getFailureStatus.mockResolvedValue({ allowed: true });
+          rateLimitMock.consumeAttempt.mockReset();
+          rateLimitMock.consumeAttempt.mockResolvedValue({ allowed: true });
         }
       });
 
       it('counts an invalid device token against the ip bucket', async () => {
         const { service } = build('not-an-argon2-hash');
-        rateLimitMock.recordFailure.mockClear();
+        rateLimitMock.consumeAttempt.mockClear();
+        rateLimitMock.refundAttempt.mockClear();
 
         await expect(
           service.login({ username: 'owner', password: 'x', deviceToken: 'unknown' }, '10.0.0.10'),
         ).rejects.toThrow('Invalid device token');
-        expect(rateLimitMock.recordFailure).toHaveBeenCalledWith('auth:ip:10.0.0.10', 60);
+        expect(rateLimitMock.consumeAttempt).toHaveBeenCalledWith('auth:ip:10.0.0.10', 10, 60);
+        expect(rateLimitMock.refundAttempt).not.toHaveBeenCalled();
+      });
+
+      // #138 item 1: a success must not wipe the IP bucket, or one valid account resets it every
+      // 9 failures and sprays usernames with no IP limit.
+      it('gives back only its own attempt on success and never clears the ip bucket', async () => {
+        const argon2 = await import('argon2');
+        const { service } = build(await argon2.hash('password123'));
+        rateLimitMock.clearKey.mockClear();
+        rateLimitMock.refundAttempt.mockClear();
+
+        await service.login({ username: 'owner', password: 'password123' }, '10.0.0.11');
+
+        expect(rateLimitMock.clearKey).not.toHaveBeenCalledWith('auth:ip:10.0.0.11', 60);
+        expect(rateLimitMock.refundAttempt).toHaveBeenCalledWith('auth:ip:10.0.0.11', 60);
+        expect(rateLimitMock.clearKey).toHaveBeenCalledWith('auth:user:-:owner', 60);
+      });
+
+      // #138 item 2: the attempt is counted before the outcome is known, in one atomic call, so
+      // there is no separate read that concurrent attempts can all pass.
+      it('counts the attempt atomically instead of check-then-increment', async () => {
+        const { service } = build('not-an-argon2-hash');
+        rateLimitMock.getFailureStatus.mockClear();
+        rateLimitMock.recordFailure.mockClear();
+        rateLimitMock.consumeAttempt.mockClear();
+
+        await expect(service.login({ username: 'owner', password: 'x' }, '10.0.0.12')).rejects.toThrow(
+          'Invalid credentials',
+        );
+
+        expect(rateLimitMock.getFailureStatus).not.toHaveBeenCalled();
+        expect(rateLimitMock.recordFailure).not.toHaveBeenCalled();
+        expect(rateLimitMock.consumeAttempt.mock.calls.map((c: any[]) => c[0])).toEqual([
+          'auth:ip:10.0.0.12',
+          'auth:user:-:owner',
+        ]);
+      });
+
+      // #138 item 4: every refusal counts against both buckets; the responses are unchanged.
+      it.each([
+        ['an ambiguous username', {}, 2, 'Ambiguous username'],
+        ['an inactive user', { is_active: false }, 1, 'User is inactive'],
+        ['a suspended tenant', { tenant_status: 'suspended' }, 1, 'ร้านนี้ถูกระงับการใช้งาน'],
+      ])('counts %s against the ip and username buckets', async (_l, overrides, count, message) => {
+        const { service } = build('not-an-argon2-hash', {}, overrides, count as number);
+        rateLimitMock.consumeAttempt.mockClear();
+        rateLimitMock.recordFailure.mockClear();
+        rateLimitMock.refundAttempt.mockClear();
+        rateLimitMock.clearKey.mockClear();
+
+        await expect(service.login({ username: 'owner', password: 'x' }, '10.0.0.13')).rejects.toThrow(
+          message as string,
+        );
+
+        const counted = [
+          ...rateLimitMock.consumeAttempt.mock.calls,
+          ...rateLimitMock.recordFailure.mock.calls,
+        ].map((c: any[]) => c[0]);
+        expect(counted).toEqual(expect.arrayContaining(['auth:ip:10.0.0.13', 'auth:user:-:owner']));
+        expect(rateLimitMock.refundAttempt).not.toHaveBeenCalled();
+        expect(rateLimitMock.clearKey).not.toHaveBeenCalled();
       });
 
       it('records the client ip on auth.login_failed and auth.login', async () => {

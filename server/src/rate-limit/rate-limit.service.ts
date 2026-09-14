@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import { DataSource } from 'typeorm';
 import { REDIS_CACHE } from '../infra/redis.module.js';
@@ -21,6 +22,26 @@ end
 local ttl = redis.call('TTL', KEYS[1])
 return { current, ttl }
 `;
+
+// Gives back one attempt, but never creates the key: a refund that lands after the window rolled
+// over must not start the new window at -1.
+const REFUND_LUA = `
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return redis.call('DECR', KEYS[1])
+end
+return 0
+`;
+
+/**
+ * The Redis key for a caller-chosen key in the current window (#138). Hashed rather than
+ * character-replaced: replacing every non-ASCII character with `_` made two Thai usernames of the
+ * same length (and `a.b` / `a_b`) share one bucket and lock each other out.
+ */
+function windowKey(key: string, windowSec: number): string {
+  const windowSlice = Math.floor(Math.floor(Date.now() / 1000) / windowSec);
+  const digest = createHash('sha256').update(key).digest('hex');
+  return `rl:${digest}:${windowSlice}`;
+}
 
 @Injectable()
 export class RateLimitService {
@@ -100,10 +121,7 @@ export class RateLimitService {
     windowSec: number,
   ): Promise<RateLimitCheckResult> {
     try {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const windowSlice = Math.floor(nowSec / windowSec);
-      const sanitizedKey = key.replace(/[^a-zA-Z0-9_:-]/g, '_');
-      const redisKey = `rl:${sanitizedKey}:${windowSlice}`;
+      const redisKey = windowKey(key, windowSec);
 
       const result = (await this.redis.eval(
         RATE_LIMIT_LUA,
@@ -135,10 +153,7 @@ export class RateLimitService {
     windowSec: number,
   ): Promise<RateLimitCheckResult> {
     try {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const windowSlice = Math.floor(nowSec / windowSec);
-      const sanitizedKey = key.replace(/[^a-zA-Z0-9_:-]/g, '_');
-      const redisKey = `rl:${sanitizedKey}:${windowSlice}`;
+      const redisKey = windowKey(key, windowSec);
 
       const countStr = await this.redis.get(redisKey);
       const count = countStr ? parseInt(countStr, 10) : 0;
@@ -160,10 +175,7 @@ export class RateLimitService {
    */
   async recordFailure(key: string, windowSec: number): Promise<number> {
     try {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const windowSlice = Math.floor(nowSec / windowSec);
-      const sanitizedKey = key.replace(/[^a-zA-Z0-9_:-]/g, '_');
-      const redisKey = `rl:${sanitizedKey}:${windowSlice}`;
+      const redisKey = windowKey(key, windowSec);
 
       const result = (await this.redis.eval(
         RATE_LIMIT_LUA,
@@ -180,14 +192,51 @@ export class RateLimitService {
   }
 
   /**
+   * Counts one attempt and answers whether it is within `limit`, in a single atomic step (#138).
+   * `getFailureStatus` followed by `recordFailure` is check-then-increment: N concurrent attempts
+   * all read the same count and all pass. Every attempt counts here; a caller that succeeds gives
+   * its own attempt back with `refundAttempt`. Fails open like the rest of this service.
+   */
+  async consumeAttempt(
+    key: string,
+    limit: number,
+    windowSec: number,
+  ): Promise<RateLimitCheckResult> {
+    try {
+      const [count, ttl] = (await this.redis.eval(
+        RATE_LIMIT_LUA,
+        1,
+        windowKey(key, windowSec),
+        windowSec,
+      )) as [number, number];
+      if (count > limit) {
+        return { allowed: false, retryAfter: ttl > 0 ? ttl : windowSec };
+      }
+      return { allowed: true };
+    } catch (err) {
+      this.logger.warn(`RateLimitService fail-open for ${key}: ${err}`);
+      return { allowed: true };
+    }
+  }
+
+  /**
+   * Returns the one attempt a successful caller consumed. Unlike `clearKey` it leaves every other
+   * attempt counted, so a success cannot wipe failures made by anyone else.
+   */
+  async refundAttempt(key: string, windowSec: number): Promise<void> {
+    try {
+      await this.redis.eval(REFUND_LUA, 1, windowKey(key, windowSec));
+    } catch {
+      // Non-critical: the attempt simply stays counted for the rest of the window
+    }
+  }
+
+  /**
    * Clears failed attempt counter upon success.
    */
   async clearKey(key: string, windowSec = 60): Promise<void> {
     try {
-      const nowSec = Math.floor(Date.now() / 1000);
-      const windowSlice = Math.floor(nowSec / windowSec);
-      const sanitizedKey = key.replace(/[^a-zA-Z0-9_:-]/g, '_');
-      const redisKey = `rl:${sanitizedKey}:${windowSlice}`;
+      const redisKey = windowKey(key, windowSec);
       await this.redis.del(redisKey);
     } catch {
       // Non-critical

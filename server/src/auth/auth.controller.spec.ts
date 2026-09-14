@@ -21,10 +21,23 @@ describe('AuthController', () => {
   it('login delegates to authService.login', async () => {
     authServiceMock.login.mockResolvedValue({ accessToken: 'a1', refreshToken: 'r1' });
 
-    const reqMock = { ip: '127.0.0.1' } as any;
+    const reqMock = { ip: '127.0.0.1', headers: {} } as any;
     const res = await controller.login({ username: 'owner', password: 'pwd' }, reqMock);
     expect(res).toEqual({ accessToken: 'a1', refreshToken: 'r1' });
     expect(authServiceMock.login).toHaveBeenCalledWith({ username: 'owner', password: 'pwd' }, '127.0.0.1');
+  });
+
+  // #138 item 5: one validated IP source. The header is the one nginx forwards for a client that
+  // sent its own `X-Forwarded-For: 1.1.1.1`; req.ip is nginx's container. Leftmost (1.1.1.1) or the
+  // raw socket (172.18.0.9) would both be wrong.
+  it('login passes the rightmost X-Forwarded-For entry nginx appended', async () => {
+    authServiceMock.login.mockClear();
+    authServiceMock.login.mockResolvedValue({});
+    const reqMock = { ip: '172.18.0.9', headers: { 'x-forwarded-for': '1.1.1.1, 10.0.0.5' } } as any;
+
+    await controller.login({ username: 'owner', password: 'pwd' }, reqMock);
+
+    expect(authServiceMock.login).toHaveBeenCalledWith({ username: 'owner', password: 'pwd' }, '10.0.0.5');
   });
 
   it('login throws UnauthorizedException when credentials are missing', async () => {

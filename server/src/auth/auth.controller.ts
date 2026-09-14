@@ -3,6 +3,7 @@ import type { Request } from 'express';
 import { AuthService, type LoginDto } from './auth.service.js';
 import { JwtVerifier } from './jwt-keys.service.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
+import { clientIp } from '../common/client-ip.js';
 
 @Controller('auth')
 export class AuthController {
@@ -17,8 +18,8 @@ export class AuthController {
     if (!dto.username || !dto.password) {
       throw new UnauthorizedException('Username and password are required');
     }
-    const ip = req.ip || req.socket.remoteAddress;
-    return this.authService.login(dto, ip);
+    // One validated source for the caller's address, the same helper the audit services use (#138).
+    return this.authService.login(dto, clientIp(req) ?? undefined);
   }
 
   @Post('refresh')
