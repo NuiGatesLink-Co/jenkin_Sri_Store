@@ -81,9 +81,9 @@ export async function configureApp(
       { path: 'health/ready', method: RequestMethod.GET },
     ],
   });
-  // Order matters: the envelope wraps whatever comes back, the transaction ends
-  // inside it, and every route-scoped interceptor (IdempotencyInterceptor above all)
-  // runs inside the transaction — its record must commit with the work it describes.
+  // Order matters: the envelope wraps whatever comes back (a replayed idempotent body
+  // included) and the transaction ends inside it. A handler's idempotency claim runs in
+  // its own runTx, which joins this transaction until tx.4 (#153).
   app.useGlobalInterceptors(new EnvelopeInterceptor(), new TransactionInterceptor(logger));
   app.useGlobalFilters(new HttpExceptionFilter(logger));
   app.enableShutdownHooks();

@@ -69,7 +69,10 @@ export class ShiftsController {
       res,
       () => {
         const b = asObject(body);
-        return this.shifts.open(actorOf(req), cash(b.startingCash, 'startingCash'));
+        return this.shifts.open(
+          actorOf(req),
+          cash(b.startingCash, 'startingCash'),
+        );
       },
     );
   }

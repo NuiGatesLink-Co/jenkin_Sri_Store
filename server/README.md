@@ -208,9 +208,41 @@ docker/postgres/init/    creates the non-superuser pos_app role on first boot
 ## Idempotency (#18)
 
 Every write that touches money or stock carries `Idempotency-Key`
-(`02_API_SCREENS.md §1.4`). Apply `IdempotencyInterceptor` to those routes — never
-globally: it must run inside the request transaction, and a global copy would wrap
-routes that have no tenant and no key at all.
+(`02_API_SCREENS.md §1.4`). Since `tx.3` (#152) it is explicit in the handler — there is no
+interceptor. The controller's whole body becomes the work callback:
+
+```ts
+@Post(':id/void')
+@HttpCode(200)
+voidSale(@Param('id') id: string, @Body() body: unknown, @Req() req: AuthenticatedRequest,
+         @Res({ passthrough: true }) res: Response) {
+  return this.idempotency.runIdempotent(idempotencyParamsOf(req, 200), res, () => {
+    /* the handler body, unchanged */
+  });
+}
+```
+
+- `idempotencyParamsOf(req, successCode)` (`idempotency/idempotency.runner.ts`) refuses a
+  missing or over-long key (`400 IDEMPOTENCY_KEY_INVALID`) and fingerprints the request: the
+  **concrete** `METHOD baseUrl+path` (never `req.route.path` — two bills' `/void` would share
+  one fingerprint, #75) and the body hash.
+- 🔴 `IdempotencyService.runIdempotent(params, res, work)` opens `TenantService.runTx` itself and
+  runs claim → `work` → complete **on that one manager**, the claim first. Every service
+  `runTx` inside `work` joins it, so nothing a service reads or locks comes before the claim,
+  a refused write rolls the claim back with it (the `409 CREDIT_LIMIT_EXCEEDED` → same key +
+  `overrideCreditLimit` counter path depends on that), and a service that calls another write
+  path (`QuotesService.convert → SalesService.create`) never claims twice — only controllers call
+  `runIdempotent`. Until `tx.4` its `runTx` joins the middleware's transaction; after it, it is
+  the transaction. `test/idempotency-money.e2e-spec.ts` pins both shapes against the tables.
+- A replay sets the stored status on `res` (hence `@Res({ passthrough: true })`) and returns the
+  stored body; the global `EnvelopeInterceptor` wraps it exactly like the original.
+- 🔴 `successCode` must equal the route's `@HttpCode` (else 201 for POST, 200 otherwise).
+  `src/idempotency/idempotency-routes.spec.ts` checks every call site against its decorators,
+  checks the claim is the handler's first statement, and pins the list of idempotent routes, so
+  a route that loses its claim fails there. Regression accepted in `tx.3`: the interceptor read
+  the status at request time; a stored record now carries the code the route declared when it
+  ran, so a deploy that changes a route's `@HttpCode` between a request and its retry replays
+  the old code.
 
 - **Postgres is the authority.** `idempotency_keys`'s primary key `(tenant_id, key)` is
   the whole concurrency mechanism: a second request carrying a live key blocks on the
@@ -275,8 +307,8 @@ The addendum separates **who decides** the tenant from **who executes** `set_con
   joins the middleware's transaction, and `test/runtx-join.e2e-spec.ts` pins that a void
   or a device retirement holds one `pos_app` connection, not two. A new public method that
   reads `currentRequestContext()` needs the same wrapper, or it 500s once `tx.4` lands —
-  `src/common/tenant-wrapper.spec.ts` fails on one that lacks it (only
-  `IdempotencyInterceptor.intercept` is allowlisted, until `tx.3` #152). For `tx.4`: the
+  `src/common/tenant-wrapper.spec.ts` fails on one that lacks it (its allowlist is empty since
+  `tx.3` #152 deleted `IdempotencyInterceptor`). For `tx.4`: the
   owner-role checks in `BackupController.exportTenantData` / `getJobStatus` and
   `QuotesController.purgeQuotes` now run *inside* `runTx`, after `authorisedTenantId()`, and
   those handlers touch no table (BullMQ only) — so after `tx.4` a 403 opens a transaction,
