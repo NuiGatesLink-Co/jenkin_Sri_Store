@@ -2,6 +2,7 @@
 
 1 บรรทัดต่อ handoff · เรียงใหม่ → เก่า · รูปแบบตาม [`handoff-prompt-template.md`](handoff-prompt-template.md)
 
+- 2026-09-14 — [#25 Ticket 25 `p6.1` GET /bootstrap + GET/PATCH /settings](ticket-25-p61-bootstrap-settings.md) — เอนด์พอยต์ GET /bootstrap คำนวณ Strong ETag SHA256 ตอบ 304 Not Modified เมื่อข้อมูลไม่เปลี่ยน + GET/PATCH /settings ตรวจสิทธิ์ manager — ปิดแล้ว
 - 2026-09-14 — [#66 `ops.3` runtime config via etcd v3](ticket-66-ops3-etcd-runtime-config.md) — `RuntimeConfigService` ใน NestJS อ่านและ watch `/pos/config/log_level` ผ่าน etcd v3 gRPC-gateway HTTP API ด้วย native `fetch` (ไม่พึ่งพา `etcd3` npm) · mutate `logger.level` แบบ real-time โดยไม่ต้อง restart app · fail-open ปลอดภัย fallback ไปใช้ `LOG_LEVEL` จาก `.env` ทันทีเมื่อ etcd unreachable — เสร็จสมบูรณ์พร้อม merge
 
 - 2026-09-14 — [#67 `cd.2` auto-deploy & rollback workflow](ticket-67-cd2-auto-deploy.md) — GitHub Actions workflow `.github/workflows/deploy.yml` (workflow_run trigger หลัง Server CI & Flutter CI สำเร็จบน main + workflow_dispatch rollback) · pre-flight check ตรวจ release images บน GHCR ผ่าน `verify-ghcr-tags.sh` (exit 0 กัน race condition) · concurrency group deploy-demo (ไม่ cancel กลางคัน) · Ansible deploy release บน environment demo — เสร็จสมบูรณ์พร้อม merge
