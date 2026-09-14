@@ -1,10 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
+import {
+  authorisedTenantId,
+  currentTransaction,
+  executePostCommitHooks,
+  runInTransaction,
+} from '../request-context.js';
 
 /**
- * Handles executing database operations within a Postgres RLS context (app.tenant_id).
- * This ensures that a connection pool connection is properly scoped to the tenant
- * and reset afterwards, preventing data leaks across tenants.
+ * The tenant door: the one way code obtains an `EntityManager` that RLS answers for, under
+ * the tenant `TenantGuard` authorised (ADR-0003 addendum *"ใครตัดสิน กับ ใครลงมือ"* — the
+ * guard decides, this executes).
  */
 @Injectable()
 export class TenantService {
@@ -13,25 +19,58 @@ export class TenantService {
   constructor(private readonly ds: DataSource) {}
 
   /**
-   * Runs a function with `app.tenant_id` set for the duration of one transaction.
-   * Postgres clears a transaction-scoped setting on completion, ensuring no
-   * connection pool contamination.
+   * Runs `fn` in a transaction scoped to the request's authorised tenant.
+   *
+   * 🔴 **The tenant is not a parameter, and never will be.** It comes from the request
+   * scope, where only `TenantGuard` puts it. A `runTx(tid, fn)` would let any call site
+   * pass another shop's uuid and get its rows back with no error. With no tenant on the
+   * scope this throws before touching the pool.
+   *
+   * 🔴 **Joins, never nests.** If this scope already has a transaction open — the one
+   * `RequestContextMiddleware` opens until `tx.4`, or an outer `runTx` — `fn` runs on that
+   * same manager: no second connection (holding one while waiting for another is the pool
+   * deadlock of #162), no savepoint, and the outer owner commits. That scope already names
+   * the tenant, so `currentRequestContext()` works inside, and post-commit hooks land on the
+   * owner's list.
+   *
+   * Otherwise it opens one: `set_config('app.tenant_id', …, true)` (the transaction-local
+   * form; `SET LOCAL app.tenant_id = $1` is a 42601 — see `tenant-scope.spec.ts`), runs `fn`
+   * with the manager published, commits or rolls back, returns the connection, and only
+   * then runs the hooks registered inside — the order `TransactionInterceptor` uses.
    */
-  async run<T>(tid: string, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
-    return this.runTx(tid, fn);
-  }
+  async runTx<T>(fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    const tenantId = authorisedTenantId();
+    const open = currentTransaction();
+    if (open) return fn(open);
 
-  /**
-   * Runs a function inside a Postgres transaction scoped to `tid`.
-   * `set_config(..., true)` is the transaction-local form, cleared by Postgres when
-   * the transaction ends (commit/rollback). It is deliberately not the `SET LOCAL
-   * app.tenant_id = $1` spelling: SET is a utility statement, takes no bind
-   * parameter, and that form fails with 42601 on every call.
-   */
-  async runTx<T>(tid: string, fn: (manager: EntityManager) => Promise<T>): Promise<T> {
-    return this.ds.transaction(async (manager) => {
-      await manager.query(`SELECT set_config('app.tenant_id', $1, true)`, [tid]);
-      return fn(manager);
-    });
+    const qr = this.ds.createQueryRunner();
+    try {
+      await qr.connect();
+      await qr.startTransaction();
+      return await runInTransaction(
+        { tenantId, manager: qr.manager },
+        async () => {
+          await qr.query(`SELECT set_config('app.tenant_id', $1, true)`, [
+            tenantId,
+          ]);
+          const value = await fn(qr.manager);
+          await qr.commitTransaction();
+          await qr.release();
+          await executePostCommitHooks((err) =>
+            this.logger.warn(`post-commit hook failed: ${String(err)}`),
+          );
+          return value;
+        },
+      );
+    } catch (err) {
+      try {
+        if (qr.isTransactionActive) await qr.rollbackTransaction();
+      } catch {
+        /* the original error is the one worth reporting */
+      }
+      throw err;
+    } finally {
+      if (!qr.isReleased) await qr.release();
+    }
   }
 }

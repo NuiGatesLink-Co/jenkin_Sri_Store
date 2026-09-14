@@ -268,9 +268,9 @@ The addendum separates **who decides** the tenant from **who executes** `set_con
 - 🔴 **`runTx(fn)` never takes a `tid`.** It reads the tenant the guard put in scope and
   throws if there is none. A `runTx(tid, fn)` shape lets any call site name another shop's
   uuid and get its rows back with no error, which is the one thing ADR-0003 exists to
-  prevent. `src/common/database/tenant.service.ts` still has `run(tid, fn)` and
-  `runTx(tid, fn)` today, with no caller; `tx.1` (#150) replaces them. Do not add a call
-  site to either.
+  prevent. Since `tx.1` (#150) `src/common/database/tenant.service.ts` has only `runTx(fn)`
+  (the old `run(tid, fn)` / `runTx(tid, fn)` had no caller and are gone); no service calls
+  it yet — `tx.2` (#151) starts that.
 - **`runTx` joins, it does not nest.** A `runTx` inside an open transaction (the
   middleware's, until `tx.4`, or an outer `runTx`) reuses its manager. That is what lets
   `tx.1`–`tx.3` land with no behaviour change, and it is what stops
