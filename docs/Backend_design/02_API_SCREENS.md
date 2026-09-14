@@ -277,6 +277,11 @@ sequenceDiagram
   } }
 ```
 * **รับซ้ำไม่ได้**: ยิงซ้ำต้องได้ `409 PO_ALREADY_RECEIVED` (เช็ค status ภายใน transaction ไม่ใช่ก่อน)
+* **#26 (สิ่งที่ implement จริง):** `updated[]` มี `productId` ด้วย และ response มี `movements[]` (แถว `receive` ที่เขียน, `ref_id` = PO id) ·
+  PO ที่ `cancelled` รับของไม่ได้ = `409 PO_CANCELLED` · ยกเลิก/ลบ PO ที่รับของแล้ว = `409 PO_ALREADY_RECEIVED` · ยกเลิกซ้ำคืนแถวเดิม ·
+  PO ที่ไม่มี (หรือของร้านอื่น) = `404 PO_NOT_FOUND` สำหรับ receive/cancel, `DELETE` ตอบ 200 เหมือน `DELETE /products/:id` ·
+  part_no เดียวกันหลายบรรทัด → คิดต้นทุนทีละบรรทัดตามลำดับ (เหมือน loop ของ Dart) แต่เขียน `movements` แถวเดียวต่อสินค้า เพราะ `uq_movements_ref` ·
+  ไม่มีการรับของบางส่วน (partial receipt) — รับทั้งใบตาม `po_items` เหมือนของเดิม
 
 ### 3.4 Vehicle Search (ค้นอะไหล่จากรุ่นรถ)
 
@@ -685,6 +690,8 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `REFUND_METHOD_NOT_ALLOWED` | – **ยังไม่มีข้อความไทย** (เลือก `หักจากเครดิต` กับบิลที่ไม่มีช่าง — เพิ่มตอน #22 ดู §8.1) |
 | 409 | `CREDIT_PAYMENT_EXCEEDS_BALANCE` | – **ยังไม่มีข้อความไทย** (ช่างจ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` — client แสดง dialog เดิมแล้วส่งซ้ำ เพิ่มตอน #24 ดู §8.1) |
 | 409 | `CREDIT_PAYMENT_ID_REUSED` | – **ยังไม่มีข้อความไทย** (`id` ของการชำระถูกใช้ไปแล้วกับรายการที่ช่าง/ยอด/วิธีจ่ายไม่ตรงกัน — เพิ่มตอน #24 ดู §8.1) |
+| 404 | `PO_NOT_FOUND` | – (`Purchase order not found` · receive/cancel กับ PO ที่ไม่มี หรือเป็นของร้านอื่น — เพิ่มตอน #26) |
+| 409 | `PO_CANCELLED` | – **ยังไม่มีข้อความไทย** (`This purchase order is cancelled and cannot be received.` — รับของจาก PO ที่ยกเลิกแล้ว · หน้าจอเดิมซ่อนปุ่มรับของของ PO ที่ไม่ใช่ `open` จึงไม่มีเคสนี้ — เพิ่มตอน #26) |
 | 401/403 | `UNAUTHENTICATED` / `FORBIDDEN` | – |
 | 429 | `RATE_LIMITED` | `ระบบกำลังทำงานหนัก กรุณารอสักครู่` | – |
 
