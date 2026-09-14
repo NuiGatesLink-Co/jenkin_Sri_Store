@@ -632,6 +632,41 @@ describe('Security Hardening & Negative-Path E2E (#44 sec.1)', () => {
       expect(blockedRes.headers['retry-after']).toBeDefined();
     });
 
+    // #138: the count and the check are one atomic step. With a separate read, every concurrent
+    // attempt saw the same count and all 15 got through. Distinct usernames keep the per-user
+    // bucket out of it; a unique forwarded address keeps other tests' attempts out of the IP bucket.
+    it('lets exactly 10 of 15 concurrent bad logins from one address through', async () => {
+      const ip = `198.51.100.${Math.floor(Math.random() * 250) + 1}`;
+      const statuses = await Promise.all(
+        Array.from({ length: 15 }, (_, i) =>
+          request(app.getHttpServer())
+            .post('/api/v1/auth/token')
+            .set('X-Forwarded-For', `1.1.1.1, ${ip}`)
+            .send({ username: `nobody-${randomUUID()}-${i}`, password: 'wrong' })
+            .then((r) => r.status),
+        ),
+      );
+
+      expect(statuses.filter((s) => s === 401)).toHaveLength(10);
+      expect(statuses.filter((s) => s === 429)).toHaveLength(5);
+    });
+
+    it('lets exactly 5 of 8 concurrent bad logins for one username through', async () => {
+      const username = `nobody-${randomUUID()}`;
+      const statuses = await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          request(app.getHttpServer())
+            .post('/api/v1/auth/token')
+            .set('X-Forwarded-For', `203.0.113.${Math.floor(Math.random() * 200) + i + 1}`)
+            .send({ username, password: 'wrong' })
+            .then((r) => r.status),
+        ),
+      );
+
+      expect(statuses.filter((s) => s === 401)).toHaveLength(5);
+      expect(statuses.filter((s) => s === 429)).toHaveLength(3);
+    });
+
     it('rate-limits consecutive failed manager PIN attempts on void with 429 and Retry-After', async () => {
       // Create a sale to target for voiding
       const saleId = `sale-void-pin-${randomUUID()}`;
