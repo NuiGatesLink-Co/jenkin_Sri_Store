@@ -954,14 +954,21 @@ Negatives, all in the same spec:
 - 🔴 **For #55:** the import writes rows with the snapshot's own `updated_at`, often in the past.
   A device whose `?updatedSince=` cursor is already later never sees them. The cache is
   invalidated, but a cache cannot fix the sync cursor.
-- **Separate ticket, pre-existing on `main`:** platform writes log `audit_log` **after** their own
-  write commits, through `AuditService.log()` on `ADMIN_DATA_SOURCE`. A platform-admin id with no row
-  (for example, an admin deleted while their token is still valid) commits the write and then answers
-  500 on `audit_log_platform_admin_id_fkey`. Every call site needs the same fix:
-  - `src/platform/tenant-import.service.ts` — `importSnapshot` (after the import transaction and
-    after the cache invalidation)
-  - `src/platform/platform-tenants.service.ts` — `createTenant` (~line 113), `updateStatus`
-    (~line 152), `listTenants` (~line 168)
+- **Fixed by #123 (PR #130):** platform writes used to log `audit_log` **after** their own write
+  committed, so an admin deleted while their token was still valid committed the write and then got
+  500 on `audit_log_platform_admin_id_fkey`. Now:
+  - 🔴 `platform/audit.service.ts` is `log(runner, input)`, with no default connection. `createTenant`,
+    `updateStatus` and the import pass the transaction's `manager`, so a failed audit rolls the write
+    back. The cache purge and invalidation still run **after** commit. `e2e` proves the rollback for all
+    three by pre-seeding `pa:<id>:exists='1'` for an admin id with no row.
+  - `listTenants` and login pass `adminDs`; `listTenants` logs a warning on an audit failure instead of
+    failing the read.
+  - `PlatformAuthGuard` checks `platform_admins` (`id` + `is_active`), cached in `REDIS_CACHE` as
+    `pa:<id>:exists` for 60s, falling back to the DB if Redis errors. **Nothing deactivates an admin
+    today; a future deactivate path must `DEL pa:<id>:exists`**, or the admin can still write for 60s.
+  - `audit_log.ip` stores null for a value containing `%` (an IPv6 zone id passes `net.isIP` but
+    Postgres `inet` rejects it, and inside the transaction that rolled back the write).
+    **Still open:** the stored IP is the *leftmost* `X-Forwarded-For` entry, which the client controls.
 
 ## Conventions these slices set
 
