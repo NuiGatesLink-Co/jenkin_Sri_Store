@@ -190,6 +190,26 @@ describe('Platform Realm & Tenant Provisioning (#5)', () => {
       ).rejects.toThrow(BadRequestException);
     });
 
+    it('pre-flight scan rejects part numbers that differ only by case', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService);
+      await expect(
+        importService.importSnapshot(
+          't1',
+          {
+            __meta: { version: 2 },
+            sa_products: [
+              { id: 'p1', partNo: 'BP-1', stock: 1 },
+              { id: 'p2', partNo: 'bp-1', stock: 1 },
+            ],
+          },
+          'adm1',
+        ),
+      ).rejects.toThrow("products 'p1', 'p2' share part number 'bp-1'");
+      expect(mockAdminDs.transaction).not.toHaveBeenCalled();
+    });
+
     it('imports snapshot cleanly when valid and tenant is empty', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
