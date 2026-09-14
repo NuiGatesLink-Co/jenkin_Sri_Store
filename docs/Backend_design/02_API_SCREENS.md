@@ -365,6 +365,14 @@ refundTotal, refundMethod, reason, customerId, mechanicId, mechanicName, date, s
 > แล้วให้พนักงานกดขายอีกที ทำให้ถ้าปิดแอปกลางทาง ใบเสนอราคาจะค้างสถานะ
 > → แนะนำให้เป็น endpoint เดียวจบ (`/convert`) จะได้ atomic
 
+> **#27 (สร้างแล้ว — ดู `server/README.md` *Quotes and parked sales*):**
+> * `GET /quotes?status=` รับ `open` / `expired` / `converted` ตาม `_applyFilter` ของ `quotes_screen.dart`
+>   ทุกใบตอบ `isExpired` (`valid_until < now()` ตอนอ่าน) และ `isConverted` (`status = 'converted'`) ตาม `QuoteRowStatus` — ไม่เขียน status `'expired'` ลงตาราง
+> * `PATCH /quotes/:id` แก้ได้แค่ `customerName` / `customerPhone` / `notes` · ส่ง `status` / รายการ / ยอดเงิน = 400 · ใบที่แปลงแล้ว = `409 QUOTE_ALREADY_CONVERTED`
+> * `POST /quotes/:id/convert` body = body ของ `POST /sales` **ยกเว้น** `items` / `subtotal` / `discount` / `total` (มาจากใบเสนอราคา ส่งมา = 400) → ตอบ `{ sale, quote }` โดย `sale` คือผลของ `POST /sales` ทุกช่อง
+>   ล็อกแถว quote `FOR UPDATE` ก่อน แล้วตามลำดับของ sale path · แปลงซ้ำด้วย `id` บิลเดิม = replay บิลเดิม, `id` อื่น = `409 QUOTE_ALREADY_CONVERTED` · หมดอายุ = `409 QUOTE_EXPIRED` · status ไม่ใช่ `open` = `409 QUOTE_NOT_OPEN`
+> * `DELETE /parked-sales/:id` ตอบแถวที่ลบ (การลบคือการเรียกบิลคืน — สองเครื่องเรียกพร้อมกันได้ใบเดียว อีกเครื่อง `404 PARKED_SALE_NOT_FOUND`)
+
 ### 3.9 Reports
 
 **⚠️ หน้านี้ต้องรื้อทั้งหน้า:** ปัจจุบันโหลด `getSales()` + `getReturns()` + `getAll()` (สินค้าทั้งหมด)
@@ -685,6 +693,11 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `REFUND_METHOD_NOT_ALLOWED` | – **ยังไม่มีข้อความไทย** (เลือก `หักจากเครดิต` กับบิลที่ไม่มีช่าง — เพิ่มตอน #22 ดู §8.1) |
 | 409 | `CREDIT_PAYMENT_EXCEEDS_BALANCE` | – **ยังไม่มีข้อความไทย** (ช่างจ่ายเกินยอดค้างโดยไม่มี `allowOverpayment: true` — client แสดง dialog เดิมแล้วส่งซ้ำ เพิ่มตอน #24 ดู §8.1) |
 | 409 | `CREDIT_PAYMENT_ID_REUSED` | – **ยังไม่มีข้อความไทย** (`id` ของการชำระถูกใช้ไปแล้วกับรายการที่ช่าง/ยอด/วิธีจ่ายไม่ตรงกัน — เพิ่มตอน #24 ดู §8.1) |
+| 404 | `QUOTE_NOT_FOUND` | `Quote not found` (– ไม่มีข้อความไทย · เพิ่มตอน #27) |
+| 404 | `PARKED_SALE_NOT_FOUND` | `Parked sale not found` (– ไม่มีข้อความไทย · บิลพักถูกเรียกคืน/ลบไปแล้ว — เพิ่มตอน #27) |
+| 409 | `QUOTE_ALREADY_CONVERTED` | – **ยังไม่มีข้อความไทย** (ใบเสนอราคาแปลงเป็นบิลแล้ว — แปลงซ้ำด้วยบิลอื่น หรือแก้ไขใบที่แปลงแล้ว; `details.convertedSaleId` · ข้อความหน้าจอเดิม `ใบนี้แปลงเป็นการขายแล้ว แก้ไขไม่ได้` ใช้ได้เฉพาะกรณีแก้ไข — เพิ่มตอน #27) |
+| 409 | `QUOTE_EXPIRED` | – **ยังไม่มีข้อความไทย** (แปลงใบเสนอราคาที่หมดอายุ — หน้าจอเดิมซ่อนปุ่มเลยไม่มีข้อความ — เพิ่มตอน #27) |
+| 409 | `QUOTE_NOT_OPEN` | – **ยังไม่มีข้อความไทย** (แปลงใบที่ status ไม่ใช่ `open` และไม่ใช่ `converted` เช่น `cancelled` จากข้อมูลนำเข้า — เพิ่มตอน #27) |
 | 401/403 | `UNAUTHENTICATED` / `FORBIDDEN` | – |
 | 429 | `RATE_LIMITED` | `ระบบกำลังทำงานหนัก กรุณารอสักครู่` | – |
 

@@ -684,6 +684,52 @@ every case of `frontend/test/products_repository_test.dart` at the HTTP seam.
 - `PATCH /products/:id` never reads `stock` — stock moves only through writes that log a movement.
 - Product money is now a string on the wire (`price`/`cost`, §1.1); it was a number before #16.
 
+## Quotes and parked sales (#27)
+
+`src/quotes/` and `src/parked-sales/`, ported from `quotes_repository.dart` /
+`parked_repository.dart`. 🔴 **Neither writes `products` or `movements`.** The one exception
+is `POST /quotes/:id/convert`, which sells through `SalesService.create` — it never writes
+stock itself. `test/quotes-parked.e2e-spec.ts` asserts every product's stock and the
+ledger's row count across the whole lifecycle.
+
+- **Quotes: any role, both device roles; convert is `pos` only.** Every write takes an
+  `Idempotency-Key`. A QT number comes from `DocNumberService` in the token's device series, so a
+  session with no device token is `403 DEVICE_ROLE_FORBIDDEN`.
+- **`validUntil = now + (validDays ?? 30) × 24h`.** This is the Dart data layer's literal; the
+  server never reads `settings.quote_valid_days`, and the caller passes that value, as Checkout does.
+- **`isExpired` is `valid_until < now()`, evaluated at read time on every quote whatever its
+  status. `isConverted` is `status = 'converted'`** — `QuoteRowStatus`. The stored status is never
+  rewritten to `'expired'`. `?status=open|expired|converted` is `quotes_screen.dart`'s
+  `_applyFilter`: `expired` excludes converted quotes.
+- **A quote is held to the sale's arithmetic when it is saved** (`assertSaleTotals`,
+  `409 TOTAL_MISMATCH`), so a quote that saves is a quote that converts.
+- **`PATCH` takes header text only** (`customerName`, `customerPhone`, `notes`). It refuses
+  `status`, lines and money with a 400, and refuses any change to a converted quote with
+  `409 QUOTE_ALREADY_CONVERTED`. The screen's old convert, `updateQuote(status: 'converted')` followed
+  by `POST /sales`, is the half-finished state `02_API_SCREENS.md §3.8` calls out, so it is not
+  reachable here. `DELETE` works on any quote, as the screen allows.
+- **Convert body = `POST /sales` minus lines and money** (`id`, `paymentMethod`, customer,
+  mechanic, `mechanicDelta`, `overrideCreditLimit`). The lines, prices, discount and total are
+  the saved quote's. Sending any of them is a 400: an edited cart is a different bill, and a
+  different bill goes through `POST /sales`. A quote line with no product goes to the sale path with
+  an empty id, as Checkout does, and comes back as `สต็อกไม่พอ … ไม่พบในสต็อก`.
+- 🔴 **Lock order on convert: quote `FOR UPDATE` → the sale path's own order.** Nothing else
+  locks a quote after a shift, a mechanic, a product or a counter, so this cannot form a cycle.
+  Converting twice cannot produce two bills:
+  - A second request waits on the quote row, then finds it converted.
+  - The same bill `id` replays the original. The sale is replayed through `existingSale`, and the
+    quote is re-read. The e2e compares the whole body.
+  - Any other `id` gets `409 QUOTE_ALREADY_CONVERTED`, with `details.convertedSaleId`.
+  - The replay check runs before the expiry check, so a quote converted on its last day still
+    replays the next morning.
+  - An open quote whose bill `id` is already taken is `409 SALE_ID_REUSED`. Otherwise
+    `existingSale` would replay an unrelated bill, and the quote would be marked converted into it.
+- **Parked sales: `pos` only, reads included** (ADR-0004). The body is `{ payload: {...} }`, stored
+  verbatim as JSONB. The list is tenant-wide, newest first, and not filtered by device. Whether a till may see another device's cart is
+  an open question for the owner. **`DELETE` returns the deleted row, so the delete is the
+  recall.** When two tills recall the same bill, one `DELETE … RETURNING` finds it and the other
+  gets `404 PARKED_SALE_NOT_FOUND`.
+
 ## Conventions these slices set
 
 - **Pagination lives in `meta`, not in `data`** (§1.2). A handler returns
