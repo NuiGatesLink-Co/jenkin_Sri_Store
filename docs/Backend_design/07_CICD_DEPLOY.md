@@ -10,6 +10,19 @@
 ticket ใต้ #10: #61 `ci.4` · #62 `ci.5` · #63 `ops.1` · #64 `ops.2` · #65 `cd.1` (รอ #61 #62) · #66 `ops.3` (รอ #64) ·
 #67 `cd.2` (รอ #65) · #39 และ #44 ได้ comment ปรับขอบเขต
 
+สถานะ 2026-09-14 (**#39** `ci.2`): §2 กติกา 4 ข้อและ §4 ทำจริงแล้วใน
+`.github/workflows/flutter.yml` / `server.yml` — job `changes` (`dorny/paths-filter@v4`,
+ทำงานเฉพาะ `pull_request`, มี `permissions: pull-requests: read` เพราะเรียก PR-files API) กรอง
+เฉพาะ job ฝั่งของตัวเอง (`analyze-and-test`/`deps-audit`/`codegen-check` ในไฟล์แรก,
+`lint`/`audit`/`unit` ในไฟล์ที่สอง) ด้วย `if: ${{ !cancelled() && (... || needs.changes.outputs.… == 'true') }}`
+— `!cancelled()` จำเป็นเพราะ `needs: [changes]` เฉย ๆ จะทำให้ job ถูก skip ตามไปด้วยเมื่อ `changes`
+เอง skip (ทุก push); `integration` (ถือ cross-tenant isolation test ใน `test/security.e2e-spec.ts`)
+ไม่ถูกกรองเลย; `push` ขึ้น `main` ไม่มี `paths:` อีกต่อไปทั้งสองไฟล์ ทุก commit บน main จึงรันเต็มเสมอ
+(ปิดช่องว่าง AC4 ของ #40 ไปด้วย). `flutter-ci-status` / `server-ci-status` ท้ายไฟล์ของตัวเอง `needs`
+ทุก job รวม `changes`, ใช้ `if: always()` + loop เช็คผลตามกติกาข้อ 4 ข้างบน. concurrency group บน
+`main` คีย์ด้วย SHA ไม่ใช่ ref เดียว กัน merge ถี่แล้ว run กลางถูก evict. **Branch protection บน
+GitHub ยังไม่ได้ตั้ง** — คำสั่งจริงอยู่ท้าย §4 ข้างล่างนี้
+
 ---
 
 ## 1. แผนที่ 7 บล็อก (ตารางบนสไลด์ ↔ ของจริงใน repo)
@@ -57,9 +70,15 @@ flowchart LR
    ครบ 2 ตัวสำหรับ SHA เดียวเสมอ (= 1 release) และ job ปล่อยของใช้ `needs:` ธรรมดาได้
 3. **job `integration` รันทุก PR ไม่ดู path** — เป็น job ที่ถือ test อ่านข้ามร้าน (กติกา multi-tenant ข้อ 6
    ใน `03_ARCHITECTURE §5`) ~90 วินาที
-4. **status job ชื่อไม่ซ้ำกัน** (`flutter-ci-status`, `server-ci-status`) ใช้ `if: ${{ !cancelled() }}`
-   และแดงเมื่อ job ที่ต้องพึ่งเป็น `failure` **หรือ `cancelled`** — `always()` เฉย ๆ จะทำให้ run ที่ถูก
-   cancel (PR push ซ้อน) รายงานเขียวปลอม
+4. **status job ชื่อไม่ซ้ำกัน** (`flutter-ci-status`, `server-ci-status`) ใช้ `if: always()`
+   บวกกับ loop เช็ค `needs.<job>.result` ของทุก job ใน `needs:` (รวม `changes` เอง) แบบ explicit —
+   ผ่านเฉพาะ `success`/`skipped`, อย่างอื่น (`failure`, `cancelled`) คือ `exit 1`. **`always()` ปลอดภัย
+   ก็ต่อเมื่อมี loop เช็คผลแบบนี้คู่กันเท่านั้น** — `always()` เฉย ๆ (ไม่เช็คผล) คือเขียวปลอมที่ข้อนี้เตือน
+   เดิม เพราะ status job จะรันและ "ผ่าน" แม้ job ที่มันพึ่งพาถูก cancel หรือ fail ก็ตาม. เหตุผลที่ต้องเป็น
+   `always()` ไม่ใช่ `!cancelled()`: ถ้า workflow run ทั้งอันถูก cancel (เช่น PR push ซ้อนกันแล้ว
+   concurrency evict run เดิม) `!cancelled()` จะทำให้ status job เอง**ถูก skip** ไม่ใช่รันแล้วรายงาน
+   fail — และ required check ที่ "ถูก skip" GitHub นับเป็นผ่าน (เขียวปลอมอีกแบบหนึ่ง) `always()` การันตี
+   ว่า status job รันจริงเสมอ แล้วให้ loop เป็นคนตัดสินสีแทน
 
 ---
 
@@ -98,6 +117,25 @@ flowchart LR
 | Secret scanning + push protection | ✅ (repo public ฟรี) | gate ที่ถูกที่สุดในระบบ |
 
 ถ้าเพิ่ม job ใหม่ใน workflow: ให้มันเป็น `needs:` ของ status job ไม่ใช่ required check เพิ่ม
+
+**คำสั่งตั้งค่าจริง** (เจ้าของ repo รันเอง — agent ไม่รันให้ ตาม hard limit ของ #39):
+
+```bash
+gh api repos/NuimanLP/srisurart-pos-flutter/branches/main/protection \
+  --method PUT \
+  -H "Accept: application/vnd.github+json" \
+  -f 'required_status_checks[strict]=false' \
+  -f 'required_status_checks[contexts][]=flutter-ci-status' \
+  -f 'required_status_checks[contexts][]=server-ci-status' \
+  -F 'enforce_admins=false' \
+  -F 'required_pull_request_reviews=null' \
+  -F 'restrictions=null' \
+  -F 'allow_force_pushes=false' \
+  -F 'allow_deletions=false'
+```
+
+`strict=false` คือแถว "Require branches up to date" ข้างบน; `contexts` สองตัวคือแถว "Required status
+checks" เท่านั้น — ห้ามเพิ่มชื่อ job อื่น (ดูเหตุผลบรรทัดบน)
 
 ---
 

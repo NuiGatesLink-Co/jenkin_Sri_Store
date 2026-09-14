@@ -9,10 +9,6 @@ name: Server CI
 #                                   It adds docker-compose.dev.yml, which is the only
 #                                   file that publishes 5432/6379/6380 on loopback so a
 #                                   runner-side test can connect (sec.1, 2026-09-09).
-# Path-filtered to server/** so client-only changes skip it (ADR-0011); flutter.yml
-# ignores server/** in turn. Do NOT make these jobs required checks on main until
-# #39 adds an always-runs job — a server-only PR runs no Flutter jobs at all.
-#
 # Job "audit" (sec.1, 2026-09-09) is the CVE gate for the source tree: `pnpm audit` on the
 # lockfile plus a Trivy filesystem scan (lockfile + Dockerfile misconfiguration). The built
 # *image* is scanned in "build-image" instead, where a finding can still stop a release.
@@ -22,6 +18,14 @@ name: Server CI
 # GHCR. It answers #44's open image-scan question by fixing the image (server/Dockerfile:
 # base pinned by digest, `apk upgrade`, npm/npx deleted from the runtime stage) rather than
 # by suppressing findings; ADR-0013 forbids a .trivyignore anywhere in this repo. No deploy.
+#
+# #39: path filtering no longer happens at the trigger level (a frontend-only PR must
+# still produce a green, always-reported server-ci-status, or it can never satisfy a
+# required check — CLAUDE.md "Known trap"). "lint"/"audit"/"unit" are gated per-job on the
+# `changes` job instead, and only for pull_request — a push to `main` always runs every
+# job. "integration" is deliberately NEVER gated on path (see its own comment below): it
+# carries the cross-tenant isolation tests in test/security.e2e-spec.ts, which run on
+# every PR regardless of what changed.
 
 permissions:
   contents: read
@@ -29,13 +33,13 @@ permissions:
 on:
   push:
     branches: [main]
-    paths: ['server/**', '.github/workflows/server.yml']
   pull_request:
-    paths: ['server/**', '.github/workflows/server.yml']
   workflow_dispatch:
 
 concurrency:
-  group: server-${{ github.ref }}
+  # Keyed by SHA on main so two quick merges each keep their own run (and their own
+  # release image) rather than the second evicting the first's in-progress run.
+  group: server-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   # Never cancel a main run — it is the only producer of that commit's image.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -44,9 +48,39 @@ defaults:
     working-directory: server
 
 jobs:
+  changes:
+    name: detect changed paths (pull_request only)
+    runs-on: ubuntu-latest
+    # Push and workflow_dispatch never filter (see the header comment), so this
+    # job — and the path check it feeds — only needs to run for a PR.
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      # dorny/paths-filter on a pull_request event calls the PR-files API, which
+      # needs this beyond the file-level `contents: read`.
+      pull-requests: read
+    outputs:
+      server: ${{ steps.filter.outputs.server }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            server:
+              - 'server/**'
+              - '.github/workflows/server.yml'
+
   lint:
     name: lint + typecheck
     runs-on: ubuntu-latest
+    needs: [changes]
+    # `needs: [changes]` on its own would implicitly require `changes` to have
+    # *succeeded*; on push/workflow_dispatch it is skipped by its own `if:` above,
+    # which would cascade to skip this job too. `!cancelled()` overrides that
+    # implicit requirement so the second clause (the actual path gate) is what
+    # decides, on both push and pull_request.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.server == 'true') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -60,6 +94,13 @@ jobs:
   audit:
     name: audit (pnpm audit + Trivy fs)
     runs-on: ubuntu-latest
+    needs: [changes]
+    # `needs: [changes]` on its own would implicitly require `changes` to have
+    # *succeeded*; on push/workflow_dispatch it is skipped by its own `if:` above,
+    # which would cascade to skip this job too. `!cancelled()` overrides that
+    # implicit requirement so the second clause (the actual path gate) is what
+    # decides, on both push and pull_request.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.server == 'true') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -83,6 +124,13 @@ jobs:
   unit:
     name: unit
     runs-on: ubuntu-latest
+    needs: [changes]
+    # `needs: [changes]` on its own would implicitly require `changes` to have
+    # *succeeded*; on push/workflow_dispatch it is skipped by its own `if:` above,
+    # which would cascade to skip this job too. `!cancelled()` overrides that
+    # implicit requirement so the second clause (the actual path gate) is what
+    # decides, on both push and pull_request.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.server == 'true') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -95,6 +143,11 @@ jobs:
   integration:
     name: integration (Postgres + both Redis, real migrations)
     runs-on: ubuntu-latest
+    # #39: deliberately NOT gated on `changes` — this job's `pnpm test:e2e` run
+    # includes the cross-tenant isolation tests (test/security.e2e-spec.ts,
+    # "denies cross-tenant read access" / "denies cross-tenant void" / "ignores
+    # tenantId in request body"), which the sixth multi-tenant rule requires on
+    # every PR regardless of which paths it touches (07_CICD_DEPLOY.md §2, rule 3).
     env:
       # Base + dev overlay for every `docker compose` call in this job. The base file
       # publishes no datastore port; only the overlay does, and only on 127.0.0.1.
@@ -157,8 +210,8 @@ jobs:
     # Level 3 (#61). Runs only after every gate job above is green (an `if:` without a status
     # function implies success() over `needs`), so a red build pushes nothing. There is still
     # NO deploy: the production host is undecided until before q4 (03_ARCHITECTURE.md §8).
-    # Coordination with #39: when it lands, this job becomes a `needs:` of that workflow's
-    # always-runs status job. It is never itself a required check (07 §4).
+    # #39: this job is a `needs:` of server-ci-status below; it is never itself a required
+    # check (07 §4).
     steps:
       - uses: actions/checkout@v4
 
@@ -219,3 +272,39 @@ jobs:
           docker tag "$IMAGE:$GITHUB_SHA" "$IMAGE:main"
           docker push "$IMAGE:$GITHUB_SHA"
           docker push "$IMAGE:main"
+
+  server-ci-status:
+    name: server-ci-status
+    runs-on: ubuntu-latest
+    needs: [changes, lint, audit, unit, integration, build-image]
+    # #39: this is the only server-side required check on `main`. It must report
+    # on every PR — including a frontend-only one, where "lint"/"audit"/"unit"
+    # (and `changes` itself, on push/workflow_dispatch) are legitimately skipped
+    # — so this uses `always()` to run unconditionally rather than `!cancelled()`,
+    # which would let GitHub skip *this* job too when the whole run is cancelled;
+    # a skipped required check is treated as passing, which is the false green
+    # 07_CICD_DEPLOY.md §2 rule 4 warns about. `always()` is safe here only
+    # because the result loop below explicitly fails on "cancelled" (and any
+    # other non-success/non-skipped result) for every job in `needs` — bare
+    # `always()` with no such check would itself be a false green.
+    if: always()
+    # No checkout here, so `server/` doesn't exist — override the workflow-level
+    # working-directory or bash can't even start.
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: require every job above to have succeeded or been skipped
+        run: |
+          for result in \
+            "${{ needs.changes.result }}" \
+            "${{ needs.lint.result }}" \
+            "${{ needs.audit.result }}" \
+            "${{ needs.unit.result }}" \
+            "${{ needs.integration.result }}" \
+            "${{ needs.build-image.result }}"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "::error::a required server job did not succeed: $result"
+              exit 1
+            fi
+          done
