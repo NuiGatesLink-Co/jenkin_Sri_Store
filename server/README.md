@@ -1120,16 +1120,25 @@ docker compose -f docker-compose.yml -f ../deploy/compose/monitoring.yml up -d
 `.env`, the same way `POS_APP_PASSWORD`/`REDIS_PASSWORD`/`BULL_BOARD_PASSWORD` already are —
 the stack fails fast if it's unset.
 
-🔴 **Not wired into the deploy playbook, and no open ticket owns that wiring.** `#67` `cd.2`
-merged (PR #108) without adding this overlay: `deploy/ansible/deploy.yml`'s `compose_files` is
-still `-f docker-compose.yml -f vm.override.yml` only, and the playbook copies neither
-`deploy/prometheus/` nor `deploy/grafana/` to `/opt/pos/`. Whoever picks this up next needs a
-new issue, and a trap to avoid: on the VM every compose file lands flat at `/opt/pos/*.yml`, so
-if `monitoring.yml` is copied there the same way, its relative `../deploy/prometheus/…` and
-`../deploy/grafana/…` paths resolve against `/opt/pos/` and land on `/opt/deploy/…`, which
-won't exist — `deploy/prometheus/` and `deploy/grafana/` have to be mirrored to that same
-relative location (or the compose invocation needs `--project-directory`), not just the one
-`monitoring.yml` file.
+**Wired into the deploy playbook by #121.** `deploy/ansible/deploy.yml` adds `-f monitoring.yml`
+to every compose command, copies `monitoring.yml` to `/opt/pos/` and the `deploy/prometheus/` and
+`deploy/grafana/` trees to `/opt/pos/deploy/` (pruning files the repo no longer has), and brings
+the three services up **after** `/health/ready` passes and `.current_sha` is recorded. A changed
+config recreates Prometheus and Grafana — a single-file bind mount keeps the old inode after the
+copy, and the compose config hash does not change. If `127.0.0.1:9090/-/healthy` or
+`127.0.0.1:3000/api/health` does not answer 200, the deploy **warns and still succeeds**: monitoring
+is not a gate for the POS. `-e enable_monitoring=false` (or `ENABLE_MONITORING=false`) leaves the
+overlay out and removes containers an earlier deploy left running; toggling it on a VM already
+running that SHA waits for the next release, because the duplicate-release check ends the play.
+While it is on, the VM's `.env` must carry `GRAFANA_ADMIN_PASSWORD` — add it to the
+`DEMO_ENV_FILE` secret and re-run `provision.yml` first — or the first compose command fails
+before anything changes.
+
+🔴 **The bind mounts are `${MONITORING_CONFIG_DIR:-../deploy}/…`.** Relative paths resolve
+against the project directory — `server/` from the repo, but the flat `/opt/pos/` on the VM,
+where `../deploy/…` is `/opt/deploy/…` and Docker silently creates an empty directory for the
+missing source. The playbook sets `MONITORING_CONFIG_DIR=./deploy`; running compose **by hand on
+the VM** needs the same variable.
 
 **Nothing new is reachable from outside the host.** `node-exporter` publishes no port at all
 (Prometheus reaches it on the compose network); `prometheus` (`127.0.0.1:9090`) and `grafana`

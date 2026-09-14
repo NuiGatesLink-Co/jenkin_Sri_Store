@@ -10,6 +10,9 @@
 # 7. Restarts worker, bull-board, and Nginx
 # 8. Verifies overall deployment health via GET /health/ready through Nginx
 # 9. Records deployed SHA in /opt/pos/.current_sha
+# 10. Brings up the monitoring overlay and probes it on loopback. A monitoring failure only warns:
+#     the POS release is already verified and recorded (07 §6). With enable_monitoring=false it
+#     removes monitoring containers left from an earlier deploy instead.
 
 - name: Deploy Srisurart POS Release
   hosts: all
@@ -20,7 +23,18 @@
     image_tag: "{{ lookup('env', 'IMAGE_TAG') | default(ansible_image_tag | default(''), true) }}"
     app_dir: "/opt/pos"
     repo_root: "{{ playbook_dir }}/../.."
-    compose_files: "-f docker-compose.yml -f vm.override.yml"
+    # Monitoring overlay (#121). On by default; `-e enable_monitoring=false` or
+    # ENABLE_MONITORING=false leaves it out of every compose command and removes its containers.
+    # When on, the VM's .env must carry GRAFANA_ADMIN_PASSWORD, or the first compose command (pull)
+    # fails fast. Toggling the flag on a VM already running image_tag does nothing: the play ends at
+    # the duplicate-release check below, so the change applies with the next release.
+    enable_monitoring: "{{ lookup('env', 'ENABLE_MONITORING') | default('true', true) | bool }}"
+    compose_files: "-f docker-compose.yml -f vm.override.yml{{ ' -f monitoring.yml' if enable_monitoring | bool else '' }}"
+
+  # monitoring.yml's bind mounts resolve against the project directory (/opt/pos); the config
+  # trees are copied to /opt/pos/deploy/ below. Ansible merges this into each task's environment.
+  environment:
+    MONITORING_CONFIG_DIR: "./deploy"
 
   tasks:
     - name: Validate image_tag parameter
@@ -66,6 +80,57 @@
         src: "{{ repo_root }}/server/docker/nginx/nginx.conf"
         dest: "{{ app_dir }}/docker/nginx/nginx.conf"
         mode: "0644"
+
+    - name: Copy monitoring overlay Compose configuration
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/deploy/compose/monitoring.yml"
+        dest: "{{ app_dir }}/monitoring.yml"
+        mode: "0644"
+      when: enable_monitoring | bool
+
+    - name: Copy Prometheus and Grafana configuration trees
+      ansible.builtin.copy:
+        src: "{{ repo_root }}/deploy/{{ item }}/"
+        dest: "{{ app_dir }}/deploy/{{ item }}/"
+        mode: "0644"
+        directory_mode: "0755"
+      loop:
+        - prometheus
+        - grafana
+      register: monitoring_config_copy
+      when: enable_monitoring | bool
+
+    # copy never deletes: a dashboard removed or renamed in the repo would stay provisioned
+    - name: List monitoring config files in the repo
+      ansible.builtin.find:
+        paths:
+          - "{{ repo_root }}/deploy/prometheus"
+          - "{{ repo_root }}/deploy/grafana"
+        recurse: true
+      delegate_to: localhost
+      register: monitoring_config_repo
+      when: enable_monitoring | bool
+
+    - name: List monitoring config files on the VM
+      ansible.builtin.find:
+        paths:
+          - "{{ app_dir }}/deploy/prometheus"
+          - "{{ app_dir }}/deploy/grafana"
+        recurse: true
+      register: monitoring_config_vm
+      when: enable_monitoring | bool
+
+    - name: Remove monitoring config files no longer in the repo
+      ansible.builtin.file:
+        path: "{{ app_dir }}/deploy/{{ item }}"
+        state: absent
+      loop: "{{ vm_files | difference(repo_files) }}"
+      vars:
+        # find returns normalised paths, so strip the resolved repo prefix, not the `../..` form
+        repo_files: "{{ monitoring_config_repo.files | map(attribute='path') | map('replace', (repo_root ~ '/deploy') | realpath ~ '/', '') | list }}"
+        vm_files: "{{ monitoring_config_vm.files | map(attribute='path') | map('replace', app_dir ~ '/deploy/', '') | list }}"
+      register: monitoring_config_prune
+      when: enable_monitoring | bool
 
     - name: Copy Postgres initialization scripts
       ansible.builtin.copy:
@@ -191,6 +256,59 @@
         content: "{{ image_tag }}\n"
         dest: "{{ app_dir }}/.current_sha"
         mode: "0644"
+
+    # Monitoring overlay (#121): host loopback only, reached over an SSH tunnel (07 §7).
+    # Runs after the POS release is verified and recorded, and never fails the deploy (07 §6).
+    - name: Monitoring overlay
+      when: enable_monitoring | bool
+      block:
+        - name: Bring up node-exporter, Prometheus and Grafana
+          ansible.builtin.command: "docker compose {{ compose_files }} up -d node-exporter prometheus grafana"
+          environment:
+            IMAGE_TAG: "{{ image_tag }}"
+          args:
+            chdir: "{{ app_dir }}"
+
+        # A single-file bind mount keeps the old inode after copy's atomic rename, and the compose
+        # config hash does not change, so only a recreate picks up new Prometheus/Grafana config.
+        - name: Recreate Prometheus and Grafana when their config changed
+          ansible.builtin.command: "docker compose {{ compose_files }} up -d --force-recreate prometheus grafana"
+          environment:
+            IMAGE_TAG: "{{ image_tag }}"
+          args:
+            chdir: "{{ app_dir }}"
+          changed_when: true
+          when: monitoring_config_copy is changed or monitoring_config_prune is changed
+
+        - name: Verify Prometheus and Grafana answer on host loopback
+          ansible.builtin.uri:
+            url: "{{ item }}"
+            status_code: 200
+          loop:
+            - "http://127.0.0.1:9090/-/healthy"
+            - "http://127.0.0.1:3000/api/health"
+          register: monitoring_ready
+          retries: 20
+          delay: 3
+          until: monitoring_ready.status == 200
+      rescue:
+        - name: Warn that monitoring is unhealthy (POS release is unaffected)
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: release '{{ image_tag }}' is deployed and healthy, but the monitoring overlay
+              failed on {{ inventory_hostname }}: {{ ansible_failed_result.msg | default(ansible_failed_result.stderr | default('see task output above')) }}.
+              Check `docker compose {{ compose_files }} ps` in {{ app_dir }}.
+
+    - name: Remove monitoring containers left from an earlier deploy
+      ansible.builtin.command: "docker compose -f docker-compose.yml -f vm.override.yml -f monitoring.yml rm -sf node-exporter prometheus grafana"
+      environment:
+        IMAGE_TAG: "{{ image_tag }}"
+      args:
+        chdir: "{{ app_dir }}"
+        removes: "{{ app_dir }}/monitoring.yml"
+      register: monitoring_removed
+      failed_when: false
+      when: not (enable_monitoring | bool)
 
     - name: Log successful deployment completion
       ansible.builtin.debug:
