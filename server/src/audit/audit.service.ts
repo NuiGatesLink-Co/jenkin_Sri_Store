@@ -1,5 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
-import * as net from 'node:net';
+import { toInet } from '../common/client-ip.js';
 import { EntityManager } from 'typeorm';
 
 export interface AuditLogParams {
@@ -26,13 +26,7 @@ export class AuditService {
    */
   async log(manager: EntityManager, params: AuditLogParams): Promise<void> {
     try {
-      let cleanIp: string | null = null;
-      if (params.ip) {
-        const candidate = params.ip.split(',')[0].trim();
-        if (candidate && net.isIP(candidate) !== 0) {
-          cleanIp = candidate;
-        }
-      }
+      const cleanIp = toInet(params.ip);
 
       await manager.query(
         `

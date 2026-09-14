@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { PlatformAuthGuard } from './platform-auth.guard.js';
+import { clientIp } from '../common/client-ip.js';
 import {
   CreateTenantDto,
   PlatformTenantsService,
@@ -32,7 +33,7 @@ export class PlatformTenantsController {
     @Body() dto: CreateTenantDto,
     @Req() req: AuthenticatedRequest,
   ) {
-    const ip = (req.headers['x-forwarded-for'] as string) || req.ip;
+    const ip = clientIp(req) ?? undefined;
     return this.tenantsService.createTenant(dto, req.platformAdmin.id, ip);
   }
 
@@ -42,7 +43,7 @@ export class PlatformTenantsController {
     @Body() body: { status: 'active' | 'suspended' | 'closed' },
     @Req() req: AuthenticatedRequest,
   ) {
-    const ip = (req.headers['x-forwarded-for'] as string) || req.ip;
+    const ip = clientIp(req) ?? undefined;
     return this.tenantsService.updateStatus(
       id,
       body.status,
@@ -53,7 +54,7 @@ export class PlatformTenantsController {
 
   @Get()
   async listTenants(@Req() req: AuthenticatedRequest) {
-    const ip = (req.headers['x-forwarded-for'] as string) || req.ip;
+    const ip = clientIp(req) ?? undefined;
     return this.tenantsService.listTenants(req.platformAdmin.id, ip);
   }
 }

@@ -16,6 +16,7 @@ import { Queue } from 'bullmq';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { newId } from '../common/ids.js';
+import { clientIp } from '../common/client-ip.js';
 import {
   DEFAULT_JOB_OPTIONS,
   JOB_TENANT_EXPORT,
@@ -53,8 +54,7 @@ export class BackupController {
 
     const { tenantId } = currentRequestContext();
     const correlationId = newId('export_');
-    const forwarded = req.headers['x-forwarded-for'];
-    const ip = typeof forwarded === 'string' ? forwarded.split(',')[0].trim() : req.ip;
+    const ip = clientIp(req) ?? undefined;
 
     const payload: TenantExportJobPayload = {
       tenantId,
