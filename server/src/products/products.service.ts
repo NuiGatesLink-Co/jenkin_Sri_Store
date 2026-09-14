@@ -2,19 +2,14 @@ import {
   BadRequestException,
   HttpException,
   HttpStatus,
-  Inject,
   Injectable,
 } from '@nestjs/common';
-import type { Redis } from 'ioredis';
 import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
-import {
-  currentRequestContext,
-  onTransactionCommit,
-} from '../common/request-context.js';
+import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
-import { REDIS_CACHE } from '../infra/redis.module.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import {
   MOVEMENT_COLUMNS,
   movementOut,
@@ -102,22 +97,23 @@ const INT4_MAX = 2_147_483_647;
 /** Postgres `unique_violation`. */
 const UNIQUE_VIOLATION = '23505';
 
-const PRODUCTS_CACHE_TTL_SEC = 60;
+type CachedList = { items: Product[]; total: number; nextCursor?: SyncCursor | null };
 
 @Injectable()
 export class ProductsService {
   constructor(
-    @Inject(REDIS_CACHE) private readonly redis: Redis,
+    private readonly cache: TenantCache,
     private readonly audit: AuditService,
   ) {}
 
-  private cacheKey(tenantId: string, query: ListQuery): string {
+  /** `prefix` carries the tenant and the current generation (`TenantCache.prefix`). */
+  private cacheKey(prefix: string, query: ListQuery): string {
     // Every filter is part of the key: a `?partNo=` lookup sharing a key with the
     // unfiltered page would answer a barcode scan with the whole first page.
     const part = (tag: string, value: string | undefined) =>
       value ? `${tag}:${encodeURIComponent(value)}:` : '';
     return (
-      `t:${tenantId}:products:list:` +
+      `${prefix}list:` +
       part('s', query.search) +
       part('n', query.partNo) +
       part('c', query.category) +
@@ -134,20 +130,13 @@ export class ProductsService {
     fromCache: boolean;
   }> {
     const { tenantId, manager } = currentRequestContext();
-    const key = this.cacheKey(tenantId, query);
+    // Before the query, always — see `TenantCache.prefix`.
+    const prefix = await this.cache.prefix(tenantId, 'products');
+    const key = prefix === null ? null : this.cacheKey(prefix, query);
 
-    try {
-      const cached = await this.redis.get(key);
-      if (cached) {
-        const parsed = JSON.parse(cached) as {
-          items: Product[];
-          total: number;
-          nextCursor?: SyncCursor | null;
-        };
-        return { ...parsed, fromCache: true };
-      }
-    } catch {
-      // Redis fail-open: if cache fails, proceed to database
+    if (key !== null) {
+      const cached = await this.cache.get<CachedList>(key);
+      if (cached) return { ...cached, fromCache: true };
     }
 
     const params: unknown[] = [tenantId];
@@ -228,15 +217,12 @@ export class ProductsService {
         : null
       : undefined;
 
-    try {
-      await this.redis.set(
+    if (key !== null) {
+      await this.cache.set(
         key,
-        JSON.stringify({ items, total, nextCursor }),
-        'EX',
-        PRODUCTS_CACHE_TTL_SEC,
+        { items, total, nextCursor } satisfies CachedList,
+        'products',
       );
-    } catch {
-      // Redis fail-open
     }
 
     return { items, total, nextCursor, fromCache: false };
@@ -244,15 +230,12 @@ export class ProductsService {
 
   async byId(id: string): Promise<{ product: Product; fromCache: boolean }> {
     const { tenantId, manager } = currentRequestContext();
-    const key = `t:${tenantId}:products:item:${id}`;
+    const prefix = await this.cache.prefix(tenantId, 'products');
+    const key = prefix === null ? null : `${prefix}item:${id}`;
 
-    try {
-      const cached = await this.redis.get(key);
-      if (cached) {
-        return { product: JSON.parse(cached) as Product, fromCache: true };
-      }
-    } catch {
-      // Fail-open
+    if (key !== null) {
+      const cached = await this.cache.get<Product>(key);
+      if (cached) return { product: cached, fromCache: true };
     }
 
     const rows = (await manager.query(
@@ -264,15 +247,12 @@ export class ProductsService {
     if (!rows || rows.length === 0) throw productNotFound();
 
     const product = toProduct(rows[0]);
-    try {
-      await this.redis.set(
+    if (key !== null) {
+      await this.cache.set(
         key,
-        JSON.stringify(product),
-        'EX',
-        PRODUCTS_CACHE_TTL_SEC,
+        product,
+        'products',
       );
-    } catch {
-      // Fail-open
     }
 
     return { product, fromCache: false };
@@ -303,7 +283,7 @@ export class ProductsService {
         ],
       ),
     )) as ProductRow[];
-    this.invalidateAfterCommit(tenantId);
+    this.cache.invalidateAfterCommit(tenantId, 'products');
     return toProduct(rows[0]);
   }
 
@@ -340,7 +320,7 @@ export class ProductsService {
       ),
     );
     if (rows.length === 0) throw productNotFound();
-    this.invalidateAfterCommit(tenantId);
+    this.cache.invalidateAfterCommit(tenantId, 'products');
     return toProduct(rows[0]);
   }
 
@@ -358,7 +338,7 @@ export class ProductsService {
         WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL`,
       [tenantId, id],
     );
-    this.invalidateAfterCommit(tenantId);
+    this.cache.invalidateAfterCommit(tenantId, 'products');
     return { id, deleted: true };
   }
 
@@ -443,25 +423,10 @@ export class ProductsService {
       },
     });
 
-    this.invalidateAfterCommit(tenantId);
+    this.cache.invalidateAfterCommit(tenantId, 'products');
     return { stockAfter, product, movement: movementOut(movement[0]) };
   }
 
-  /** 02_API_SCREENS.md §5: invalidate only after COMMIT, or a rollback leaves stale cache. */
-  private invalidateAfterCommit(tenantId: string): void {
-    onTransactionCommit(() => this.invalidateCache(tenantId));
-  }
-
-  async invalidateCache(tenantId: string): Promise<void> {
-    try {
-      const keys = await this.redis.keys(`t:${tenantId}:products:*`);
-      if (keys.length > 0) {
-        await this.redis.del(...keys);
-      }
-    } catch {
-      // Fail-open
-    }
-  }
 }
 
 /**

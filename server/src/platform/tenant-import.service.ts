@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { ADMIN_DATA_SOURCE } from '../infra/db.module.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import { AuditService } from './audit.service.js';
 
 export class SnapshotPayload {
@@ -47,6 +48,7 @@ export class TenantImportService {
   constructor(
     @Inject(ADMIN_DATA_SOURCE) private readonly adminDs: DataSource,
     private readonly auditService: AuditService,
+    private readonly cache: TenantCache,
   ) {}
 
   async importSnapshot(
@@ -555,6 +557,14 @@ export class TenantImportService {
         );
       }
     });
+
+    // #32: the transaction above has committed (it is the admin data source's own, not
+    // a request transaction, so `invalidateAfterCommit` would not wait for it). A
+    // throw inside it rejects before reaching this line, so a failed import
+    // invalidates nothing.
+    for (const ns of ['products', 'categories', 'customers', 'mechanics', 'settings'] as const) {
+      await this.cache.invalidate(tenantId, ns);
+    }
 
     await this.auditService.log({
       tenantId,

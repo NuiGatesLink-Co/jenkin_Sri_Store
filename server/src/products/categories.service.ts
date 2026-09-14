@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
 import { SEED_CATEGORIES } from '../db/seed.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 
 export interface Category {
   name: string;
@@ -41,6 +42,26 @@ export function catColor(name: string, ordered: readonly string[]): string {
 
 @Injectable()
 export class CategoriesService {
+  constructor(private readonly cache: TenantCache) {}
+
+  /**
+   * `GET /categories` through `t:{tid}:categories:g:{token}:list` (§5, 3600 s). `list()`
+   * stays a plain read: `create()` calls it inside its write transaction and
+   * `/bootstrap` hashes a fresh body, and neither may touch the cache.
+   */
+  async listCached(): Promise<{ categories: Category[]; fromCache: boolean }> {
+    const { tenantId } = currentRequestContext();
+    const prefix = await this.cache.prefix(tenantId, 'categories');
+    const key = prefix === null ? null : `${prefix}list`;
+    if (key !== null) {
+      const cached = await this.cache.get<Category[]>(key);
+      if (cached) return { categories: cached, fromCache: true };
+    }
+    const categories = await this.list();
+    if (key !== null) await this.cache.set(key, categories, 'categories');
+    return { categories, fromCache: false };
+  }
+
   /**
    * `[{ name, color }]` in ONE query (02_API_SCREENS.md §3.1): the client used to call
    * `catColor()` once per category, which becomes 1 + N requests over HTTP.
@@ -78,6 +99,7 @@ export class CategoriesService {
        ON CONFLICT (tenant_id, name) DO NOTHING`,
       [tenantId, name],
     );
+    this.cache.invalidateAfterCommit(tenantId, 'categories');
     const all = await this.list();
     return all.find((c) => c.name === name) as Category;
   }
@@ -92,6 +114,7 @@ export class CategoriesService {
       `DELETE FROM categories WHERE tenant_id = $1::uuid AND name = $2`,
       [tenantId, name],
     );
+    this.cache.invalidateAfterCommit(tenantId, 'categories');
     return { name, deleted: true };
   }
 }

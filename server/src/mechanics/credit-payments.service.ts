@@ -6,6 +6,7 @@ import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import type { CreateCreditPayment } from './credit-payments.dto.js';
 
@@ -78,6 +79,7 @@ export class CreditPaymentsService {
     private readonly docNumbers: DocNumberService,
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
+    private readonly cache: TenantCache,
   ) {}
 
   async create(
@@ -168,6 +170,8 @@ export class CreditPaymentsService {
       mechanicId,
       dto.amountSatang,
     );
+    // #32: the tab moved — `GET /mechanics` is stale once this commits.
+    this.cache.invalidateAfterCommit(tenantId, 'mechanics');
 
     if (overpaid) {
       // §8.2: who took more than the tab, and how much more. On the request

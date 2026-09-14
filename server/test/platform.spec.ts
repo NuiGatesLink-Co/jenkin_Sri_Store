@@ -25,6 +25,7 @@ describe('Platform Realm & Tenant Provisioning (#5)', () => {
   let auditService: AuditService;
   let mockAdminDs: any;
   let mockRedisCache: any;
+  let tenantCache: { invalidate: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     mockAdminDs = {
@@ -37,6 +38,7 @@ describe('Platform Realm & Tenant Provisioning (#5)', () => {
       del: vi.fn(),
     };
     auditService = new AuditService(mockAdminDs);
+    tenantCache = { invalidate: vi.fn() };
   });
 
   describe('PlatformAuthGuard', () => {
@@ -163,7 +165,7 @@ describe('Platform Realm & Tenant Provisioning (#5)', () => {
       // Mock sales query returning 1 row
       mockAdminDs.query.mockResolvedValueOnce([{ n: 1 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -171,13 +173,14 @@ describe('Platform Realm & Tenant Provisioning (#5)', () => {
           'adm1',
         ),
       ).rejects.toThrow(ConflictException);
+      expect(tenantCache.invalidate).not.toHaveBeenCalled();
     });
 
     it('pre-flight scan rejects negative product stock', async () => {
       // Check tables return 0
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -193,7 +196,7 @@ describe('Platform Realm & Tenant Provisioning (#5)', () => {
     it('pre-flight scan rejects part numbers that differ only by case', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -213,7 +216,7 @@ describe('Platform Realm & Tenant Provisioning (#5)', () => {
     it('imports snapshot cleanly when valid and tenant is empty', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
       const res = await importService.importSnapshot(
         't1',
         {
@@ -227,6 +230,8 @@ describe('Platform Realm & Tenant Provisioning (#5)', () => {
 
       expect(res.status).toBe('success');
       expect(mockAdminDs.transaction).toHaveBeenCalled();
+      // #32: the product cache is dropped once the import's transaction has committed.
+      expect(tenantCache.invalidate).toHaveBeenCalledWith('t1', 'products');
     });
   });
 });

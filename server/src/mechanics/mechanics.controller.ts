@@ -9,10 +9,11 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
@@ -45,10 +46,11 @@ export class MechanicsController {
 
   @Get()
   async list(
-    @Query('search') search?: string,
-    @Query('updatedSince') updatedSince?: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query('search') search: string | undefined,
+    @Query('updatedSince') updatedSince: string | undefined,
+    @Query('page') page: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Paginated<Mechanic>> {
     const parsed = pageParams(page, limit);
     const result = await this.mechanics.list({
@@ -56,6 +58,7 @@ export class MechanicsController {
       updatedSince: isoDate(updatedSince, 'updatedSince'),
       ...parsed,
     });
+    res.setHeader('X-Cache', result.fromCache ? 'HIT' : 'MISS');
     return new Paginated(result.items, { total: result.total, ...parsed });
   }
 
