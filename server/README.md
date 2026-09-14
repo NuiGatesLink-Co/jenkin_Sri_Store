@@ -261,7 +261,7 @@ The addendum separates **who decides** the tenant from **who executes** `set_con
 | | in force today | target |
 |---|---|---|
 | decides the tenant + checks `tenants.status` | `TenantGuard` | `TenantGuard` (unchanged) |
-| where the decision is kept | `app.tenant_id` on the middleware's transaction | request scope (`AsyncLocalStorage`) via `setRequestTenant()` |
+| where the decision is kept | `app.tenant_id` on the middleware's transaction **and** `setRequestTenant()` | request scope (`AsyncLocalStorage`) via `setRequestTenant()` |
 | runs `set_config('app.tenant_id', …, true)` | `TenantGuard` | `TenantService.runTx(fn)`, reading the tenant from that scope |
 | opens and commits the transaction | middleware opens, interceptor commits | `TenantService.runTx(fn)`, inside the handler |
 
@@ -279,14 +279,18 @@ The addendum separates **who decides** the tenant from **who executes** `set_con
 - **A suspended tenant is still never named.** The guard refuses before
   `setRequestTenant()`, so `runTx` has no tenant to `set_config` and RLS shows nothing.
   There is still no separate `TenantInterceptor`.
-- **The new footgun is an injected `DataSource`.** Forgetting `runTx` and calling
+- **The footgun that becomes easier to reach for is an injected `DataSource`** (it exists
+  today too: `AuthService` and `VoidService`'s audit hold their own, on purpose). Forgetting `runTx` and calling
   `currentRequestContext()` still throws (a loud 500). Querying through a bare
   `DataSource` answers **200 with zero rows**, and an `UPDATE` reports success having
   changed nothing. `tx.1` adds `src/common/tenant-door.spec.ts`: a source scan that fails
   when a file outside an allowlist injects `DataSource`, with a reason on each allowlist
   line. The allowlist is built from today's tree, not from the plan's 12-file count.
 - `tx.4` deletes `RequestContextMiddleware`, `TransactionInterceptor`,
-  `OWNED_BY_INTERCEPTOR`, the `res.on('close')` backstop and `TENANT_ROUTES`; the guard's
+  `OWNED_BY_INTERCEPTOR`, the `res.on('close')` backstop and `TENANT_ROUTES`, and **adds**
+  `TenantScopeMiddleware` (global, `forRoutes('*')`, touches no DB) so every request still
+  has a scope — without it `setRequestTenant()` throws, `onTransactionCommit` runs its hook
+  immediately instead of after commit, and `invalidateAfterCommit` throws. The guard's
   status probe moves to a plain pool read (`tenants` has no RLS, and it is then the
   request's first connection, not a second). Two users of today's request transaction that
   the 2026-09-10 plan does not name must be carried across by then:
@@ -303,7 +307,7 @@ holds because only the guard names the tenant:
 | stage | does |
 |---|---|
 | `RequestContextMiddleware` | opens the transaction and the scope: `runInRequestContext({ manager }, next)` |
-| `TenantGuard` | checks `tenants.status` on that manager, then `set_config('app.tenant_id', …, true)` and `setRequestTenant()` |
+| `TenantGuard` | checks `tenants.status` (Redis `t:{tid}:status` first; on a miss, read on that manager), then `set_config('app.tenant_id', …, true)` and `setRequestTenant()` |
 | `TransactionInterceptor` (global, after `EnvelopeInterceptor`) | commits on success, rolls back on error, before the response is sent; then runs `onTransactionCommit` hooks |
 
 **How the tenant is named: `SELECT set_config('app.tenant_id', $1, true)`, never
@@ -320,11 +324,14 @@ literal form cannot come back.
 `currentRequestContext()` throws rather than defaulting, so a route without the guard
 fails closed instead of reading someone's data. It fails closed twice: outside the scope,
 and inside it before the guard has named a tenant. `RequestContextMiddleware` opens the
-transaction only for the routes listed in `TENANT_ROUTES` (`src/app.module.ts`), not
-globally: a transaction per liveness probe is a pool slot spent on nothing, and
-`/auth/token` and `/auth/refresh` would hold an idle-in-transaction connection across an
-argon2 verify. **Until `tx.4`, a new controller with `TenantGuard` must be added to
-`TENANT_ROUTES`**, or the guard finds no request transaction and answers 500.
+transaction only for the routes covered by `TENANT_ROUTES` (`src/app.module.ts`), not
+globally: a transaction per liveness probe is a pool slot spent on nothing. `/auth/*` stays
+out except `GET /auth/me`, because ADR-0009 requires a failed login's audit row to survive
+the rollback (and `/auth/token` would otherwise hold an idle-in-transaction connection
+across its argon2 verify). **Until `tx.4`, a new `TenantGuard` route must be covered by
+`TENANT_ROUTES`**, or the guard finds no request transaction and answers 500. The middleware
+matches by path, not by class: `PurchasingController` is not listed but works, because it
+shares `purchase-orders` with `PurchaseOrdersController`.
 
 A guard that throws never reaches an interceptor, so the response's own `close` event is
 the backstop that rolls back and returns the connection to the pool. `TransactionInterceptor`
@@ -340,8 +347,9 @@ handing a live query queue to whichever request took that connection next.
    for another is a pool deadlock — they all sit there until `connectionTimeoutMillis`
    fires and all return 500, and the 500s are *other people's requests*, not the one that
    misbehaved. Read through `currentRequestContext().manager`. (`tenants` and
-   `platform_admins` are the two tables with no RLS, so even a status probe can go
-   through it.)
+   `platform_admins` are the two tables with no RLS, so until `tx.4` even a status probe
+   goes through it; in the target the probe is a plain pool read, because it is then the
+   request's first connection.)
 
    Work that genuinely cannot run in the request transaction — today that is exactly one
    call site, `VoidService`'s refusal audit, which must survive the rollback the 403

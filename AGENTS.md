@@ -305,7 +305,7 @@ silently restore exactly what ADR-0003 banned, failing as a cross-tenant read th
 The proving prototype is commit `0feaf94` on `worktree-agent-a1756ff02f223b4eb` (never merge it).
 The slices are tracked as issues #149 → #150 → #151 → #152 → #153 → #154 (parent #142).
 `server/README.md` *The request-context seam* describes both the target shape and the split in force
-until `tx.4` (#153); until then a new `TenantGuard` controller still has to be listed in `TENANT_ROUTES`.
+until `tx.4` (#153); until then a new `TenantGuard` route must be covered by `TENANT_ROUTES` (the middleware matches by path).
 
 🔴 **The e2e suite cannot tolerate a second concurrent runner on the same database** —
 `test/schema.e2e-spec.ts` tears the schema down and re-applies it. CI is safe (one Postgres per job),
