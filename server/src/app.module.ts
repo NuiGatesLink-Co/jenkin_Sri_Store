@@ -26,6 +26,9 @@ import { CustomersController } from './customers/customers.controller.js';
 import { CustomersModule } from './customers/customers.module.js';
 import { MechanicsController } from './mechanics/mechanics.controller.js';
 import { MechanicsModule } from './mechanics/mechanics.module.js';
+import { SettingsController } from './settings/settings.controller.js';
+import { BootstrapController } from './settings/bootstrap.controller.js';
+import { SettingsModule } from './settings/settings.module.js';
 
 /** Shared infrastructure (config, logger, Postgres, both Redis) — no HTTP. */
 @Module({})
@@ -59,6 +62,8 @@ const TENANT_ROUTES = [
   ShiftsController,
   CustomersController,
   MechanicsController,
+  SettingsController,
+  BootstrapController,
 ];
 
 /** The HTTP application: core + health + platform. Business modules are added by later tickets. */
@@ -91,6 +96,7 @@ export class AppModule implements NestModule {
         ShiftsModule,
         CustomersModule,
         MechanicsModule,
+        SettingsModule,
       ],
       providers: [RequestContextMiddleware],
     };
