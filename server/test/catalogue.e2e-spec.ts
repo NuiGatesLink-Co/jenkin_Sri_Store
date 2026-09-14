@@ -3,10 +3,11 @@ import type { Redis } from 'ioredis';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
 import { seedCategories } from '../src/db/seed.js';
-import { CAT_PALETTE, catColor } from '../src/products/categories.service.js';
+import { CAT_PALETTE } from '../src/products/categories.service.js';
 import { SEARCH_EXPRESSION } from '../src/products/products.service.js';
 import {
   accessToken,
+  asTenant,
   createTestApp,
   resetTenant,
   seedProduct,
@@ -27,6 +28,8 @@ const OTHER = '16161616-2626-4626-8626-262626262626';
 describe('catalogue (e2e)', () => {
   let app: INestApplication;
   let admin: DataSource;
+  /** `pos_app`: RLS enabled and forced, as production connects. */
+  let ds: DataSource;
   let cache: Redis;
   let fixture: TenantFixture;
   let manager: string;
@@ -94,7 +97,7 @@ describe('catalogue (e2e)', () => {
   });
 
   beforeAll(async () => {
-    ({ app, admin, cache } = await createTestApp());
+    ({ app, ds, admin, cache } = await createTestApp());
   });
 
   beforeEach(async () => {
@@ -210,6 +213,38 @@ describe('catalogue (e2e)', () => {
         message: 'รหัสอะไหล่นี้มีอยู่แล้ว',
       });
       expect(await liveCount()).toBe(3);
+    });
+
+    it('two concurrent creates of BP-1 and bp-1: exactly one 201, one 409', async () => {
+      const [a, b] = await Promise.all([
+        post('/products', newProduct({ partNo: 'BP-1' })),
+        post('/products', newProduct({ partNo: 'bp-1' })),
+      ]);
+      expect([a.status, b.status].sort()).toEqual([201, 409]);
+      const refused = a.status === 409 ? a : b;
+      expect(refused.body.error).toEqual({
+        code: 'DUPLICATE_PART_NO',
+        message: 'รหัสอะไหล่นี้มีอยู่แล้ว',
+      });
+      const rows = await admin.query(
+        `SELECT count(*)::int AS n FROM products
+          WHERE tenant_id = $1::uuid AND lower(part_no) = 'bp-1' AND deleted_at IS NULL`,
+        [TENANT],
+      );
+      expect(rows[0].n).toBe(1);
+    });
+
+    it('the database refuses a case-duplicate from a writer that skips the API', async () => {
+      await expect(
+        admin.query(
+          `INSERT INTO products (tenant_id, id, part_no, name, name_th, category, brand, price, cost, stock)
+           VALUES ($1::uuid, 'dup', 'hn-15412-kvb', 'x', 'x', 'x', 'x', 0, 0, 0)`,
+          [TENANT],
+        ),
+      ).rejects.toMatchObject({
+        code: '23505',
+        constraint: 'uq_products_partno_ci',
+      });
     });
 
     it('update to a colliding partNo (another product) is refused', async () => {
@@ -436,7 +471,7 @@ describe('catalogue (e2e)', () => {
       ).toBe(201);
     });
 
-    it('AC2: ?partNo= returns exactly one product; a near match returns none', async () => {
+    it('AC2: ?partNo= returns exactly one product, ignoring case and padding; a near match returns none', async () => {
       await seedProduct(admin, TENANT, {
         id: 'bp1',
         partNo: 'BP-1',
@@ -459,6 +494,12 @@ describe('catalogue (e2e)', () => {
       expect(one.body.data.map((p: { id: string }) => p.id)).toEqual(['bp1']);
       expect(one.body.meta.total).toBe(1);
       expect((await get('/products?partNo=BP')).body.data).toEqual([]);
+      // A scan compares the way uniqueness is enforced: case-insensitive, trimmed.
+      expect(
+        (
+          await get(`/products?partNo=${encodeURIComponent(' bp-1 ')}`)
+        ).body.data.map((p: { id: string }) => p.id),
+      ).toEqual(['bp1']);
       // Filters are part of the cache key: the unfiltered page is not a partNo answer.
       expect((await get('/products')).body.data.length).toBeGreaterThan(1);
       expect(
@@ -480,11 +521,10 @@ describe('catalogue (e2e)', () => {
       // A LIKE wildcard in the term is a literal.
       expect((await get('/products?search=%25')).body.data).toEqual([]);
 
-      // The predicate alone, with sequential scans priced out: the only way left to
-      // answer it is an index on the identical expression. (With the tenant filter
-      // added, a table this small is cheaper through `idx_products_cat`, which proves
-      // nothing either way.)
-      const plan = await admin.transaction(async (tx) => {
+      // 1. The predicate is written on the index's own expression: as the table owner
+      //    (RLS bypassed) and with sequential scans priced out, the only way left to
+      //    answer it is `idx_products_search`. A non-matching expression gets a seq scan.
+      const ownerPlan = await admin.transaction(async (tx) => {
         await tx.query(`SET LOCAL enable_seqscan = off`);
         return (await tx.query(
           `EXPLAIN SELECT id FROM products
@@ -492,7 +532,24 @@ describe('catalogue (e2e)', () => {
           ['%เบรก%'],
         )) as { 'QUERY PLAN': string }[];
       });
-      expect(plan.map((r) => r['QUERY PLAN']).join('\n')).toContain(
+      expect(ownerPlan.map((r) => r['QUERY PLAN']).join('\n')).toContain(
+        'idx_products_search',
+      );
+
+      // 2. What production actually gets. As `pos_app` under forced RLS, `textlike`
+      //    (LIKE) is not LEAKPROOF, so the planner may not evaluate it inside the index
+      //    ahead of the tenant policy: the search runs on a tenant index plus a filter.
+      //    This pins today's truth — an open design question recorded in
+      //    `01_DATABASE.md §5.2` — so whoever resolves it has to change this line.
+      const appPlan = await asTenant(ds, TENANT, async (q) => {
+        await q(`SET LOCAL enable_seqscan = off`);
+        return (await q(
+          `EXPLAIN SELECT id FROM products
+            WHERE ${SEARCH_EXPRESSION} LIKE lower($1) ESCAPE '\\'`,
+          ['%เบรก%'],
+        )) as { 'QUERY PLAN': string }[];
+      });
+      expect(appPlan.map((r) => r['QUERY PLAN']).join('\n')).not.toContain(
         'idx_products_search',
       );
     });
@@ -503,17 +560,23 @@ describe('catalogue (e2e)', () => {
         (await del(`/categories/${encodeURIComponent('เบรก')}`)).status,
       ).toBe(200);
 
+      // What the API owes the colour: the product keeps its category name, no cascade,
+      // and the category is gone from the list. The colour itself is the client's —
+      // `GET /categories` carries palette colours for listed names only, and an orphan
+      // is drawn by the client's hash fallback (`ProductsRepository.catColor`,
+      // `AppColors.catColor`), which the spec leaves where it is.
       const pad = await get('/products/p8');
       expect(pad.status).toBe(200);
       expect(pad.body.data.category).toBe('เบรก');
-      const names = (
-        (await get('/categories')).body.data as { name: string }[]
-      ).map((c) => c.name);
-      expect(names).not.toContain('เบรก');
-      // The orphan renders through the hash fallback, deterministically, from the palette.
-      const color = catColor('เบรก', names);
-      expect(CAT_PALETTE).toContain(color);
-      expect(catColor('เบรก', names)).toBe(color);
+      expect(pad.body.data.stock).toBe(5);
+      const cats = (await get('/categories')).body.data as {
+        name: string;
+        color: string;
+      }[];
+      expect(cats.map((c) => c.name)).not.toContain('เบรก');
+      expect(
+        cats.every((c) => (CAT_PALETTE as readonly string[]).includes(c.color)),
+      ).toBe(true);
     });
 
     it('AC4: an adjustment below zero clamps and writes exactly one movement (see parity case)', async () => {
@@ -628,6 +691,65 @@ describe('catalogue (e2e)', () => {
       expect(res.body.data[1].deletedAt).not.toBeNull();
       expect(res.body.meta.total).toBe(2);
       expect((await get('/products?updatedSince=not-a-date')).status).toBe(400);
+      expect((await get('/products?afterId=p1')).status).toBe(400);
+      expect(
+        (
+          await get(
+            `/products?updatedSince=${encodeURIComponent(cursor)}&page=2`,
+          )
+        ).status,
+      ).toBe(400);
+    });
+
+    it('a keyset sync pass over a tie larger than a page returns every row exactly once and ends', async () => {
+      // Nine rows (the three seeded + six more) sharing ONE microsecond timestamp — what
+      // a sale's `now()` or a platform import produces — read three at a time. With a
+      // strict `updated_at > cursor` and a millisecond cursor, this either skipped six
+      // rows or served the first page forever.
+      for (let i = 0; i < 6; i++) {
+        await seedProduct(admin, TENANT, {
+          id: `tie${i}`,
+          partNo: `TIE-${i}`,
+          name: `Tie ${i}`,
+          price: 1,
+          cost: 1,
+          stock: 1,
+        });
+      }
+      await del('/products/tie3');
+      await admin.query(
+        `UPDATE products SET updated_at = '2026-03-01 10:00:00.123456+00' WHERE tenant_id = $1::uuid`,
+        [TENANT],
+      );
+
+      const seen: string[] = [];
+      let cursor: { updatedSince: string; afterId?: string } = {
+        updatedSince: '2026-01-01T00:00:00.000Z',
+      };
+      let requests = 0;
+      for (;;) {
+        expect(++requests).toBeLessThanOrEqual(5); // terminates, never re-serves a page
+        const qs = new URLSearchParams({ ...cursor, limit: '3' }).toString();
+        const page = await get(`/products?${qs}`);
+        expect(page.status).toBe(200);
+        seen.push(...page.body.data.map((p: { id: string }) => p.id));
+        if (page.body.meta.nextCursor) {
+          cursor = page.body.meta.nextCursor;
+          // Full precision: the wire `updatedAt` would say .123Z.
+          expect(cursor.updatedSince).toBe('2026-03-01T10:00:00.123456Z');
+        }
+        if (page.body.data.length < 3) break;
+      }
+      expect(seen).toHaveLength(9);
+      expect(new Set(seen).size).toBe(9);
+      expect(seen).toContain('tie3'); // the tombstone travels with the rest
+
+      // The last cursor is where the next refresh starts: nothing is served again.
+      const final = await get(
+        `/products?${new URLSearchParams(cursor).toString()}`,
+      );
+      expect(final.body.data).toEqual([]);
+      expect(final.body.meta.nextCursor).toBeNull();
     });
 
     it('PATCH ignores stock and bumps updatedAt', async () => {
