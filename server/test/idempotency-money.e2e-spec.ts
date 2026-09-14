@@ -23,7 +23,7 @@ import {
 // committed in a different transaction from its work is a bill charged twice with every
 // response a 200, so this suite does not trust responses: it counts rows.
 //
-//   - Over HTTP (the middleware transaction still exists until tx.4): the same key five
+//   - Over HTTP (since tx.4 #153 the route's runIdempotent opens the only transaction): the same key five
 //     times, three of them at once, on the three money writes that move stock or cash.
 //   - Called directly with no request transaction (the tx.4 shape): the controller's own
 //     runIdempotent must open the one transaction, and claim, work and completion must all

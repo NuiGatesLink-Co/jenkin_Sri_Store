@@ -190,8 +190,8 @@ describe('idempotency (e2e)', () => {
     app = moduleRef.createNestApplication();
     ds = app.get(DataSource);
     // Registered before configureApp's, so it is the outermost interceptor and runs
-    // ahead of the transaction interceptor and the handler's idempotency claim — the
-    // position a real guard has, since guards run before every interceptor.
+    // ahead of the envelope and the handler's idempotency claim — the position a real
+    // guard has, since guards run before every interceptor.
     app.useGlobalInterceptors(new StandInTenantGuard());
     await configureApp(app, logger);
   });

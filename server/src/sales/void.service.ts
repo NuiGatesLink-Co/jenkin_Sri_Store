@@ -373,7 +373,7 @@ export class VoidService {
   /**
    * Records a refused void.
    *
-   * On its **own** connection, because the 403 rolls the request transaction back and
+   * On its **own** connection, because the 403 rolls `runIdempotent`'s transaction back and
    * an audit row written on it would vanish with the attempt it was recording. This
    * is a four-digit PIN with no per-user rate limit yet (#44); brute-forcing it must
    * not be invisible.

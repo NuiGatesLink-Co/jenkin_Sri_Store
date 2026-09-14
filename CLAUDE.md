@@ -666,8 +666,9 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   `docs/handoff_log/orchestrated-round-2026-09-14.md`.
   🔴 **Guards count as "inside a request" (#162):** a global guard that takes a second pool connection while the
   middleware holds the first deadlocks the pool at `DB_POOL_SIZE` concurrent requests (10 s stall, then 500s).
-  `RateLimitService.getTenantPlan` does that on a cold plan cache (every 5 min in production); it now reads on the
-  request transaction inside a savepoint. That — not a machine limit — was `200 concurrent bills`.
+  `RateLimitService.getTenantPlan` did that on a cold plan cache (every 5 min in production); #162 read it on the
+  request transaction inside a savepoint, and since tx.4 (#153) removed that transaction it is a plain pool read taken
+  before any `runTx` — nothing may take a connection before the guards. That — not a machine limit — was `200 concurrent bills`.
   🔴 **Node 24.15.0 on Windows crashes e2e workers (#160)** — `0xC0000409` in libuv's `uv__tcp_try_connect`
   (libuv#5107). Use Node **≥ 24.16.0** on Windows dev machines; e2e setup warns. CI (Linux) is unaffected.
   🔴 **Never edit files under `node_modules` for debugging** — pnpm hard-links them from one store, so the edit

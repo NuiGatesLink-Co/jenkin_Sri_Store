@@ -135,15 +135,47 @@ describe('the tenant scope without a request transaction (e2e, tx.4 #153)', () =
       `UPDATE tenants SET status = 'suspended' WHERE id = $1::uuid`,
       [TENANT],
     );
-    await cache.del(`t:${TENANT}:status`);
+    // Both caches cold, so the count below is exact rather than "at most".
+    await cache.del(`t:${TENANT}:status`, `t:${TENANT}:plan`);
+    runners.mockRestore();
+    const original = ds.createQueryRunner.bind(ds);
+    const seen: { sql: string[]; began: boolean }[] = [];
+    const counted = vi
+      .spyOn(ds, 'createQueryRunner')
+      .mockImplementation(
+        (...args: Parameters<DataSource['createQueryRunner']>) => {
+          const qr = original(...args);
+          const record = { sql: [] as string[], began: false };
+          seen.push(record);
+          const query = qr.query.bind(qr);
+          qr.query = ((sql: string, ...rest: unknown[]) => {
+            record.sql.push(sql);
+            return (query as (...a: unknown[]) => unknown)(sql, ...rest);
+          }) as typeof qr.query;
+          const start = qr.startTransaction.bind(qr);
+          qr.startTransaction = ((...a: Parameters<typeof start>) => {
+            record.began = true;
+            return start(...a);
+          }) as typeof qr.startTransaction;
+          return qr;
+        },
+      );
     const res = await http()
       .get('/api/v1/tx4-probe')
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('TENANT_SUSPENDED');
-    // Cold status and plan caches: one pool read each (`SELECT status`, `SELECT plan`), and
-    // nothing that opens a transaction for the shop.
-    expect(runners.mock.calls.length).toBeLessThanOrEqual(2);
+    // Exactly two short pool reads — the rate limiter's `SELECT plan` and the guard's
+    // `SELECT status` — and no transaction: no runTx runner, no `set_config` for the shop.
+    expect(counted).toHaveBeenCalledTimes(2);
+    expect(seen.map((r) => r.began)).toEqual([false, false]);
+    expect(seen.flatMap((r) => r.sql).sort()).toEqual([
+      'SELECT plan FROM tenants WHERE id = $1',
+      'SELECT status FROM tenants WHERE id = $1',
+    ]);
+    expect(
+      seen.flatMap((r) => r.sql).some((s) => s.includes('set_config')),
+    ).toBe(false);
     await admin.query(
       `UPDATE tenants SET status = 'active' WHERE id = $1::uuid`,
       [TENANT],

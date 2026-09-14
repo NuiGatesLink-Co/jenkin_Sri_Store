@@ -15,8 +15,8 @@ import { runInTenantScope } from './request-context.js';
 @Injectable()
 export class TenantScopeMiddleware implements NestMiddleware {
   use(_req: Request, _res: Response, next: NextFunction): void {
-    void runInTenantScope(async () => {
-      next();
-    });
+    // Synchronous on purpose: a throw from `next()` reaches Express as a failed request,
+    // never as an unhandled rejection.
+    runInTenantScope(() => next());
   }
 }

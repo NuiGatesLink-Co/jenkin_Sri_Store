@@ -9,12 +9,18 @@ import {
   resetTenant,
 } from './support/fixture.js';
 
-// #162. `shifts.e2e-spec.ts` › *ten simultaneous opens* 500'd locally and passed in CI, and
-// was filed as the request-wide-transaction pool limit (ADR-0003, `tx.4`). It was not a
-// limit: it was a pool **deadlock**. The global `TenantRateLimitGuard` looks the tenant's
-// plan up on a cold `t:{tid}:plan` cache, and it did so with `DataSource.query` — a SECOND
-// pool connection, taken while `RequestContextMiddleware` already held the request's first.
-// Measured on clean `main`, `DB_POOL_SIZE=8`, ten simultaneous opens with the cache reset:
+// What this guards since tx.4 (#153): **nothing may take a pool connection before the guards
+// run.** The global `TenantRateLimitGuard` and `TenantGuard` read `tenants` on the pool on a
+// cold cache; that is safe only because the request holds no other connection yet — the
+// handler's `runTx` takes it afterwards. A middleware, interceptor or earlier guard that
+// held a connection across the guards would bring back the deadlock below.
+//
+// History (#162). `shifts.e2e-spec.ts` › *ten simultaneous opens* 500'd locally and passed in
+// CI, and was filed as the request-wide-transaction pool limit. It was not a limit: it was a
+// pool **deadlock**. The rate-limit guard looked the plan up with `DataSource.query` — a
+// SECOND pool connection, taken while the (since deleted) request-wide middleware already
+// held the request's first. Measured on clean `main`, `DB_POOL_SIZE=8`, ten simultaneous
+// opens with the cache reset:
 //
 //   8 × plan lookup started within 6 ms
 //   8 × plan lookup FAILED after 10 000 ms: timeout exceeded when trying to connect

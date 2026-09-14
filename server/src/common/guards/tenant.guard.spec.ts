@@ -161,8 +161,66 @@ describe('TenantGuard', () => {
         unnamed = err;
       }
     });
-    expect(unnamed).toBeInstanceOf(Error);
+    expect(String(unnamed)).toMatch(/No tenant on this request/);
     expect(dsMock.query).not.toHaveBeenCalled();
+  });
+
+  // tx.4 (#153) moved the cold-cache status read to the pool. Every way that read can refuse
+  // must still leave the scope unnamed, so no `runTx` can open a transaction for the shop.
+  describe('cold cache: the pool read fails closed', () => {
+    const coldCtx = () => {
+      jwtVerifierMock.verify.mockReturnValue({ aud: 'tenant', sub: 'u1', tid: 't1' });
+      reflectorMock.getAllAndOverride.mockReturnValue(undefined);
+      redisCacheMock.get.mockResolvedValue(null);
+      return createMockContext('Bearer valid-token');
+    };
+
+    /** Runs the guard in a scope; returns what it threw and why the scope refused a tenant. */
+    const refused = async () => {
+      const ctx = coldCtx();
+      let thrown: any;
+      let unnamed: unknown;
+      await runInTenantScope(async () => {
+        try {
+          await guard.canActivate(ctx);
+        } catch (err) {
+          thrown = err;
+        }
+        try {
+          authorisedTenantId();
+        } catch (err) {
+          unnamed = err;
+        }
+      });
+      return { thrown, unnamed: String(unnamed) };
+    };
+
+    it.each(['suspended', 'archived'])('status %s → 403 TENANT_SUSPENDED, tenant not named', async (s) => {
+      dsMock.query.mockResolvedValue([{ status: s }]);
+      const { thrown, unnamed } = await refused();
+      expect(thrown).toBeInstanceOf(HttpException);
+      expect(thrown.getStatus()).toBe(HttpStatus.FORBIDDEN);
+      expect(thrown.getResponse().code).toBe('TENANT_SUSPENDED');
+      expect(unnamed).toMatch(/No tenant on this request/);
+    });
+
+    it('no tenants row → 403 Tenant not found, tenant not named', async () => {
+      dsMock.query.mockResolvedValue([]);
+      const { thrown, unnamed } = await refused();
+      expect(thrown).toBeInstanceOf(HttpException);
+      expect(thrown.getStatus()).toBe(HttpStatus.FORBIDDEN);
+      expect(thrown.getResponse()).toEqual({ code: 'FORBIDDEN', message: 'Tenant not found' });
+      expect(redisCacheMock.set).not.toHaveBeenCalled();
+      expect(unnamed).toMatch(/No tenant on this request/);
+    });
+
+    it('the pool read rejects → the error propagates, tenant not named', async () => {
+      const boom = new Error('connection terminated');
+      dsMock.query.mockRejectedValue(boom);
+      const { thrown, unnamed } = await refused();
+      expect(thrown).toBe(boom);
+      expect(unnamed).toMatch(/No tenant on this request/);
+    });
   });
 
   it('throws TENANT_SUSPENDED (403) with Thai message if tenant is not active', async () => {

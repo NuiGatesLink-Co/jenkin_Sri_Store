@@ -3,7 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 import type { Logger } from 'pino';
 import {
-  hasRequestContext,
+  hasOpenTransaction,
   onTransactionCommit,
 } from '../common/request-context.js';
 import { LOGGER } from './logger.provider.js';
@@ -200,7 +200,7 @@ export class TenantCache {
    * reader in between cache the old rows under the new generation.
    */
   invalidateAfterCommit(tenantId: string, ns: CacheNamespace): void {
-    if (!hasRequestContext()) {
+    if (!hasOpenTransaction()) {
       throw new Error(
         'TenantCache.invalidateAfterCommit needs an open transaction (TenantService.runTx). Outside one, ' +
           'await your own transaction and then call TenantCache.invalidate().',

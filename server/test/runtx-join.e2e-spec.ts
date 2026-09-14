@@ -28,9 +28,9 @@ import {
 //     up to the point the request is parked at.
 //   - a spy on the app pool's `createQueryRunner`: counts every connection the whole
 //     request asked for, including the nested reads after the lock (`byId`, `close()`).
-// And two shapes: over HTTP, where the outer transaction is still the middleware's until
-// tx.4, and called directly with no request transaction at all — the tx.4 shape, where
-// the OUTER `runTx` opens the transaction and only the nested ones can join it.
+// And two shapes: over HTTP, where (since tx.4 #153) the route's `runIdempotent` opens the
+// outer transaction, and called directly with no HTTP at all, where the service's OUTER
+// `runTx` opens it. In both only the nested calls can join it.
 describe('runTx joins the open transaction instead of taking a second connection (e2e, #151)', () => {
   const TENANT = '15115115-2222-4222-8222-151151151151';
   const PIN = '1511';

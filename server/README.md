@@ -339,8 +339,11 @@ handler, not around the request. The migration that got here is recorded in
   outside `runTx`, it throws — there is no commit to wait for, and running the hook at once (the
   old outside-a-request behaviour) or parking it on a scope nothing ends would be silently wrong.
   `TenantCache.invalidateAfterCommit` checks the same thing with its own message.
-- **A guard-refused request costs no connection.** A 401/403 from the guard never reaches a
-  `runTx`; `/health/live` takes no connection and `/health/ready` one (`SELECT 1`).
+- **A guard-refused request opens no transaction.** A 401 (no or bad token) takes no
+  connection at all. A 403 on a cold cache takes at most two short pool reads (the rate
+  limiter's `SELECT plan`, the guard's `SELECT status`), each returned at once, and never a
+  `runTx` or a `set_config` (`test/tenant-scope.e2e-spec.ts` counts them exactly).
+  `/health/live` takes no connection and `/health/ready` one (`SELECT 1`).
 - **The footgun that is easier to reach for is an injected `DataSource`.** Forgetting `runTx`
   and calling `currentRequestContext()` throws (a loud 500). Querying through a bare
   `DataSource` answers **200 with zero rows**, and an `UPDATE` reports success having changed
@@ -354,7 +357,10 @@ handler, not around the request. The migration that got here is recorded in
   rolls back a transaction; and `purgeQuotes` enqueues its job inside the transaction, so a
   rollback after the enqueue (a failed idempotency `complete`) still leaves the job queued —
   harmless because the job id is deterministic and the purge is idempotent, whereas moving it to
-  `onTransactionCommit` would make a lost enqueue after a committed 202 silent.
+  `onTransactionCommit` would make a lost enqueue after a committed 202 silent. And the cached
+  reads (`ProductsService.list`, `CategoriesService.listCached`, `SettingsService.getSettingsCached`)
+  open their `runTx` before checking Redis, so a hit still costs a transaction and a
+  `singleFlight` waiter idles in one — #173.
 
 **How the tenant is named: `SELECT set_config('app.tenant_id', $1, true)`, never
 `SET LOCAL app.tenant_id = $1`.** `SET` is a utility statement — Postgres does not plan
@@ -693,7 +699,7 @@ Not audited: the PIN is already proven, like the other business-rule refusals.
 
 Refusals are audited too (`sale.void.denied`, with the reason). This is a four-digit PIN
 with no per-user rate limit until #44; brute-forcing it must not be invisible. That row is
-written on its own connection because the 403 rolls the request transaction back — an
+written on its own connection because the 403 rolls `runIdempotent`'s transaction back — an
 audit row written on it would vanish along with the attempt it was recording. The
 connection comes from `AUDIT_DATA_SOURCE`, a two-connection pool of its own; taking it
 from the request pool made a denial a request queuing for a second connection, which

@@ -67,7 +67,7 @@ export function runInRequestContext<T>(
  * กับ ใครลงมือ"*). `TenantScopeMiddleware` calls it for every request; the guard names the
  * tenant later and `TenantService.runTx` publishes the manager later still.
  */
-export function runInTenantScope<T>(fn: () => Promise<T>): Promise<T> {
+export function runInTenantScope<T>(fn: () => T): T {
   return storage.run({ tenantId: null, manager: null }, fn);
 }
 
@@ -132,7 +132,7 @@ export function currentTransaction(): EntityManager | null {
  * wait for. False outside any scope, and (since tx.4 #153) false in a request scope outside
  * `TenantService.runTx`.
  */
-export function hasRequestContext(): boolean {
+export function hasOpenTransaction(): boolean {
   return (storage.getStore()?.manager ?? null) !== null;
 }
 
