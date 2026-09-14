@@ -35,7 +35,7 @@ GitHub ยังไม่ได้ตั้ง** — คำสั่งจริ
 | Package / Storage | Docker + **GHCR** (public) | job build image ทั้งสอง workflow → `ghcr.io/nuimanlp/srisurart-pos-server`, `…-web` | server: PR #70 (#61, tarball artefact ถูกยกเลิก) · web: PR #69 (#62) |
 | Config & Deploy (CD) | **Ansible** ผ่าน SSH | `deploy/ansible/`, `.github/workflows/deploy.yml` | ยังไม่มี |
 | KV Storage | **etcd** | service ใน compose + `RuntimeConfigService` ฝั่ง NestJS | ยังไม่มี |
-| Monitoring & Operate | Node Exporter + Prometheus + Grafana | `deploy/compose/monitoring.yml`, dashboard JSON | ยังไม่มี |
+| Monitoring & Operate | Node Exporter + Prometheus + Grafana | `deploy/compose/monitoring.yml`, `deploy/prometheus/`, `deploy/grafana/` | overlay พร้อม — #63 `ops.1` (ยังไม่ได้ต่อเข้า deploy playbook — #67 `cd.2` merge ไปแล้วโดยไม่ได้ทำส่วนนี้ ยังไม่มี ticket ใหม่เป็นเจ้าของ) |
 
 **สิ่งที่ตั้งใจไม่ทำ:** Jenkins (มีเครื่องยนต์อยู่แล้ว), Kubernetes (VM เดียว), Alertmanager,
 exporter ของ Postgres/Redis, image signing, WAF, DB backup อัตโนมัติ (ADR-0005 มี export job),
@@ -266,13 +266,50 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
 
 ---
 
-## 10. Monitoring
+## 10. Monitoring (#63 `ops.1` — shipped as a compose overlay)
 
-* `deploy/compose/monitoring.yml`: `node-exporter` (host metrics), `prometheus` (scrape node-exporter +
-  `api-1..3` ที่ `/api/v1/metrics` เมื่อ #34/#35 ทำ `/metrics` เสร็จ — ก่อนหน้านั้น scrape `/health/ready` ได้แค่ up/down),
-  `grafana` (provisioning จาก `deploy/grafana/` — datasource + dashboard JSON 1 อัน)
-* dashboard เดียว: CPU / RAM / disk ของ VM + **SLI จาก `02_API_SCREENS §9`**: success rate และ p95
-* ไม่มี Alertmanager · ทุกอย่างผูก `127.0.0.1` เข้าผ่าน SSH tunnel (§7)
+`docker compose -f server/docker-compose.yml -f deploy/compose/monitoring.yml up -d` (บน VM
+เพิ่ม `-f deploy/compose/vm.override.yml` — ลำดับ `-f` ต้องขึ้นต้นด้วย `docker-compose.yml`
+เสมอ เพราะ path สัมพัทธ์ในทุกไฟล์ที่ compose เอามารวมกันอิงกับ *project directory* = โฟลเดอร์ของ
+ไฟล์ `-f` ตัวแรก คือ `server/` ไม่ใช่โฟลเดอร์ของไฟล์ override เอง):
+
+* `deploy/compose/monitoring.yml`: `node-exporter` (host metrics, ไม่มี `ports:` เลย — ถูก scrape
+  ผ่าน compose network เท่านั้น), `prometheus` (config ที่ `deploy/prometheus/prometheus.yml`,
+  ผูก `127.0.0.1:9090`), `grafana` (provisioning จาก `deploy/grafana/` — datasource + dashboard
+  JSON 1 อัน ที่ `deploy/grafana/dashboards/pos-overview.json`, ผูก `127.0.0.1:3000`) — ทั้งสามมี
+  `mem_limit` (64m / 512m / 256m ตาม §5) และ `healthcheck` แบบเดียวกับ service อื่นในสแต็ก
+* Prometheus scrape สอง job: `node` (node-exporter, ให้ 3 panel แรกของ dashboard) และ
+  `api-readiness` (`/health/ready` บน `api-1..3:3000` ตรง ๆ ไม่ผ่าน Nginx — endpoint ยังไม่มี
+  prefix `api/v1` เหมือน `/health/live`) — job ที่สาม `api-metrics` (`/metrics`, unprefixed ตาม
+  `02_API_SCREENS.md` แถว `GET /metrics | internal`) คอมเมนต์ไว้รอ #34/#35
+  🔴 **พบระหว่างสร้างไฟล์นี้ (วัดจริงกับ Prometheus container):** `up` ของ Prometheus วัดจากว่า
+  parse body เป็น Prometheus text-exposition format ได้ไหม ไม่ใช่แค่ HTTP 200 — `/health/ready`
+  ตอบ JSON ซึ่ง parse ไม่ผ่าน ทำให้ target ทั้งสามขึ้น **DOWN ใน Prometheus UI ตลอดเวลา แม้ API จะ
+  รันอยู่จริง** จนกว่า job `api-metrics` จะเปิดใช้งาน — เป็นข้อจำกัดที่รับทราบแล้ว ไม่ใช่บั๊กของ
+  overlay นี้ (ตั้งใจไม่เพิ่ม `blackbox_exporter` หรือ exporter อื่นเพื่อแก้ ตามสโคปของ #63)
+* dashboard เดียว (provisioned, ห้า panel): CPU / RAM / disk ของ VM (query จาก node-exporter,
+  มีค่าจริงทันทีที่ stack รัน) + **SLI จาก `02_API_SCREENS §9`**: success rate และ p95 —
+  สอง panel นี้ตั้งใจให้อ่าน "no data" จนกว่า #34/#35 จะทำ `/metrics` เสร็จ (query ที่ผูกไว้เป็น
+  ชื่อ metric ทั่วไปตามธรรมเนียม prom-client — `http_requests_total` / `http_request_duration_seconds_bucket`
+  — ให้ #34/#35 ยืนยันหรือแก้ชื่อจริงตอนต่อ)
+* ไม่มี Alertmanager · ทุกอย่างผูก `127.0.0.1` เข้าผ่าน SSH tunnel (§7) · Grafana admin password
+  ต้องมาจาก `GRAFANA_ADMIN_PASSWORD` ใน `.env` (`.env.example` มีตัวอย่าง) — stack fail fast ถ้าไม่ตั้ง
+  เหมือน secret ของ datastore ตัวอื่น
+* `deploy/scripts/validate.sh` เช็ค overlay นี้ด้วย (`docker compose config` ของ base + vm.override
+  + monitoring, และ `promtool check config` ของ `prometheus.yml`)
+* 🔴 **ยังไม่ได้ต่อเข้า Ansible และยังไม่มี ticket เป็นเจ้าของ** — `#67` `cd.2` (PR #108) merge/closed
+  ไปแล้วโดย**ไม่ได้**ทำส่วนนี้: `deploy/ansible/deploy.yml` มี `compose_files: "-f docker-compose.yml
+  -f vm.override.yml"` เท่านั้น ไม่มี `monitoring.yml`, และไม่ copy ทั้ง `deploy/prometheus/` หรือ
+  `deploy/grafana/` ไปที่ `/opt/pos/` เลย — ต้องเปิด issue ใหม่ (07 §6 ขั้นที่ 2 และ 6 ยังเป็นแค่แผน
+  ไม่ใช่ของที่ทำแล้ว) · ticket #63 นี้แค่ทำให้ overlay ถูกต้องเมื่อ compose คู่กับสแต็กหลักจาก repo
+  เท่านั้น — ไม่ได้แตะ Ansible
+* 🔴 **กับดักที่รอ ticket ถัดไป:** บน VM ไฟล์ compose ทุกไฟล์ถูกวางแบนราบที่ `/opt/pos/*.yml`
+  (`docker-compose.yml`, `vm.override.yml`) — ถ้า copy `monitoring.yml` ไปวางแบนราบแบบเดียวกัน
+  path สัมพัทธ์ `../deploy/prometheus/…` และ `../deploy/grafana/…` ในไฟล์นี้จะเด้งไปหา
+  `/opt/deploy/prometheus/…` ซึ่งไม่มีอยู่จริง (project directory = `/opt/pos/`, ไม่ใช่ repo root) —
+  ใครต่อเรื่องนี้ต้อง copy `deploy/prometheus/` และ `deploy/grafana/` ไปไว้ที่ path สัมพัทธ์เดียวกัน
+  (คือ `/opt/deploy/prometheus/`, `/opt/deploy/grafana/` ถ้า `/opt/pos/` แทน `server/`) หรือใช้
+  `--project-directory` บังคับ ไม่ใช่แค่ copy ไฟล์ `monitoring.yml` ไฟล์เดียวแล้วคาดว่าจะทำงาน
 
 ---
 

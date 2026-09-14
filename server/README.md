@@ -858,3 +858,56 @@ for s in api-1 api-2 api-3; do docker compose up -d --no-deps $s; sleep 5; done
 ```
 
 Each instance keeps its static address (`172.30.0.11–13`), so Nginx needs no reload.
+
+## Monitoring overlay (#63 `ops.1`)
+
+Node Exporter + Prometheus + Grafana as a separate compose overlay, so it can sit next to the
+stack above without touching it:
+
+```
+cd server
+docker compose -f docker-compose.yml -f ../deploy/compose/monitoring.yml up -d
+```
+
+(On the VM, `vm.override.yml` goes in between.) **`GRAFANA_ADMIN_PASSWORD` is required** in
+`.env`, the same way `POS_APP_PASSWORD`/`REDIS_PASSWORD`/`BULL_BOARD_PASSWORD` already are —
+the stack fails fast if it's unset.
+
+🔴 **Not wired into the deploy playbook, and no open ticket owns that wiring.** `#67` `cd.2`
+merged (PR #108) without adding this overlay: `deploy/ansible/deploy.yml`'s `compose_files` is
+still `-f docker-compose.yml -f vm.override.yml` only, and the playbook copies neither
+`deploy/prometheus/` nor `deploy/grafana/` to `/opt/pos/`. Whoever picks this up next needs a
+new issue, and a trap to avoid: on the VM every compose file lands flat at `/opt/pos/*.yml`, so
+if `monitoring.yml` is copied there the same way, its relative `../deploy/prometheus/…` and
+`../deploy/grafana/…` paths resolve against `/opt/pos/` and land on `/opt/deploy/…`, which
+won't exist — `deploy/prometheus/` and `deploy/grafana/` have to be mirrored to that same
+relative location (or the compose invocation needs `--project-directory`), not just the one
+`monitoring.yml` file.
+
+**Nothing new is reachable from outside the host.** `node-exporter` publishes no port at all
+(Prometheus reaches it on the compose network); `prometheus` (`127.0.0.1:9090`) and `grafana`
+(`127.0.0.1:3000`) are loopback-only, same pattern as Bull-Board:
+
+```
+ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -L 3100:127.0.0.1:3100 deploy@<vm>
+```
+
+Grafana's datasource and its one dashboard (`deploy/grafana/dashboards/pos-overview.json`) are
+provisioned from files under `deploy/grafana/provisioning/` — nothing to click, and a rebuilt
+Grafana volume comes back identical. The dashboard has the VM's CPU/memory/disk (live from
+node-exporter) plus two SLI panels — success rate and p95 — that read "no data" until #34/#35
+add a real `/metrics` endpoint; `deploy/prometheus/prometheus.yml` has that scrape job
+commented out, ready to enable.
+
+🔴 **Prometheus's `up` reflects whether the response body parses as its text format, not just
+the HTTP status.** `/health/ready` answers 200 with a JSON body, which fails that parse, so the
+interim `api-readiness` job (scraping `/health/ready` directly on `api-1..3:3000`) shows all
+three instances as DOWN in the Prometheus UI even while the API is actually up — confirmed
+against a real `prom/prometheus` container while building this overlay. This is a known,
+accepted gap (adding `blackbox_exporter` to work around it would be scope beyond what #63
+asks for) that closes itself once the commented `api-metrics` job above is turned on.
+
+Every relative path in `monitoring.yml` is written against `server/`, not against
+`deploy/compose/` where the file itself lives — Compose resolves bind-mount paths against the
+*project directory*, which defaults to the directory of the **first** `-f` file. Always list
+`docker-compose.yml` first.

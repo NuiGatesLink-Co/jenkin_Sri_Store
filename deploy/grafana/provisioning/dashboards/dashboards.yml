@@ -1,0 +1,15 @@
+# Provisioned dashboard provider for the `grafana` service in ../../compose/monitoring.yml
+# (#63 `ops.1`). Points at ../../dashboards, which holds the one dashboard JSON this ticket
+# ships (pos-overview.json) — file-based so a rebuilt Grafana volume comes back identical.
+apiVersion: 1
+
+providers:
+  - name: default
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
