@@ -480,8 +480,10 @@ called a hook nobody had set, so a refused refresh left the app in a signed-in s
 later request 401'd against. `main.dart` now wires it to `AuthCubit.sessionExpired`, which keeps the
 device token (ADR-0004 — the machine is still enrolled, only the person is signed out) and emits
 `Unauthenticated` with **no** `errorMessage`: at 04:00 the counter needs the login form, not a
-dialog about token lifetimes. **There is still no login screen and no router redirect**, so #54's
-AC3 and AC5 cannot be closed by this — that UI is unticketed work.
+dialog about token lifetimes. **The login screen and router redirect landed with #143 (PR #155)**,
+active only with `USE_API_WRITES`. 🔴 Only a 401/403 from `/auth/refresh` ends the session (#161, PR #164).
+This file lags `CLAUDE.md`; for status after 2026-09-14 read `CLAUDE.md` and
+`docs/handoff_log/orchestrated-round-2026-09-14.md`.
 
 **#83 is open** (`team/3`): `ServerErrorResolver` prefers *any* server message containing a Thai
 codepoint over its own canonical string, so `returns.service.ts`'s English

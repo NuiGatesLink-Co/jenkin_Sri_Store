@@ -505,20 +505,21 @@ called a hook nobody had set, so a refused refresh left the app in a signed-in s
 later request 401'd against. `main.dart` now wires it to `AuthCubit.sessionExpired`, which keeps the
 device token (ADR-0004 — the machine is still enrolled, only the person is signed out) and emits
 `Unauthenticated` with **no** `errorMessage`: at 04:00 the counter needs the login form, not a
-dialog about token lifetimes. **There is still no login screen and no router redirect**, so #54's
-AC3 and AC5 cannot be closed by this — that UI is unticketed work.
+dialog about token lifetimes. **The login screen and router redirect landed with #143 (PR #155)** —
+`/login` outside the shell, `?from=` return path, active only with `USE_API_WRITES`; the Drift-only
+build keeps the plain `appRouter`.
 🔴 **Only a 401/403 from `/auth/refresh` ends the session (#161).** A transport failure, 5xx, 429
 or unreadable 200 keeps both tokens and fails the original request as a connection error — the
 server keeps no refresh denylist (ADR-0009), so the kept token still works after a lost reply. The
 old catch-all also parsed the refresh reply flat, missing `EnvelopeInterceptor`'s `data`, so every
 *successful* refresh against the real server signed the cashier out.
 
-**#83 is open** (`team/3`): `ServerErrorResolver` prefers *any* server message containing a Thai
+**#83 is closed** (`team/3`, 2026-09-14 status check; see `docs/handoff_log/ticket-83-server-error-resolver.md`). It was: `ServerErrorResolver` prefers *any* server message containing a Thai
 codepoint over its own canonical string, so `returns.service.ts`'s English
 `Refund method 'หักจากเครดิต' needs a bill with a mechanic.` wins and the mapped Thai never fires.
 Three idempotency codes are unmapped too.
 
-**#24 `p5.7` is built (branch `feat/p5.7-credit-payments`, 2026-09-13, not yet merged).**
+**#24 `p5.7` is merged — PR #92 (credit payments) + PR #93 (shift guards), 2026-09-13.**
 `POST /mechanics/:id/credit-payments` — `pos` only, idempotent, a CP number, and migration
 `1788652800005` adding `credit_payments.payment_method` + `.shift_id` (nullable, **no default**:
 an imported row is neither of our shifts nor necessarily cash). 🔴 **An overpayment is refused,
@@ -596,11 +597,8 @@ the void path or the returns path.
 - 🔴 **Quote convert** locks the quote, then runs `SalesService.create` in the same transaction, so a refusal
   rolls back the quote and the idempotency claim. Owner questions are recorded in 02 §3.8: convert is
   all-or-nothing while Checkout edits the cart, and deleting a converted quote is still allowed.
-- **Still open:**
-  - #32 is built on a local branch but not pushed. It uses per-tenant generation tokens with no `KEYS`, and
-    must be rebased onto #116's `SettingsService`.
-  - #39 (PR #110) and #63 (PR #111) are merged, but branch protection is not set yet (the command is
-    in 07 §4). PR #113 (#64) is open and needs `ETCD_ROOT_PASSWORD` in the `DEMO_ENV_FILE` secret first.
+- **Since then:** #32 merged as PR #125 (per-tenant generation tokens, no `KEYS`); #64 merged as PR #113.
+  #39 (PR #110) and #63 (PR #111) are merged, but branch protection is still not set (07 §4).
 - 🔴 **Stacked PRs don't retarget themselves when their base merges** unless the base branch is deleted. Retarget
   them to `main` before merging, or they land on the dead feature branch.
 - 🔴 **Parallel agents against one dev database:**
@@ -658,11 +656,21 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   🔴 **#156 changes the base compose network (`ip_range` + `gateway`)**: an existing host's network must be
   recreated once — `deploy.yml` stops at a pre-flight check and 07 §7 has the `down --remove-orphans` step
   (never `-v`); dev machines need one `docker compose down` in `server/` too.
-- **Still open:** #67 (needs the owner's go-ahead); #142 → slices #149–#154 (tx.0–tx.5; #151/#152 scope needs a
-  decision); #145 Thai wording for `SALE_NOT_IN_OPEN_SHIFT` (owner); #160 intermittent e2e worker crash
-  (0xC0000409); #161 a network failure during refresh signs the user out; #162 `ten simultaneous opens` local
-  pool timeout; #163 device-management decisions (owner); branch protection on `main` (owner runs 07 §4).
-  The repo's only long-lived branches are `main` and `POC_sample_offline_first`.
+- **Merged 2026-09-14 (second round):** #161 → PR #164, #162 → PR #165, #160 → PR #166. Read
+  `docs/handoff_log/orchestrated-round-2026-09-14.md`.
+  🔴 **Guards count as "inside a request" (#162):** a global guard that takes a second pool connection while the
+  middleware holds the first deadlocks the pool at `DB_POOL_SIZE` concurrent requests (10 s stall, then 500s).
+  `RateLimitService.getTenantPlan` does that on a cold plan cache (every 5 min in production); it now reads on the
+  request transaction inside a savepoint. That — not a machine limit — was `200 concurrent bills`.
+  🔴 **Node 24.15.0 on Windows crashes e2e workers (#160)** — `0xC0000409` in libuv's `uv__tcp_try_connect`
+  (libuv#5107). Use Node **≥ 24.16.0** on Windows dev machines; e2e setup warns. CI (Linux) is unaffected.
+  🔴 **Never edit files under `node_modules` for debugging** — pnpm hard-links them from one store, so the edit
+  leaks into every worktree and the main checkout (it did, during #160).
+- **Still open:** #67 (needs the owner's go-ahead); #142 → slices #149–#154 (tx.0–tx.5, only #149 unblocked;
+  #151/#152 scope needs a decision — plan predates ~20 request-context users); #145 Thai wording for
+  `SALE_NOT_IN_OPEN_SHIFT` (owner); #163 device-management decisions (owner); branch protection on `main`
+  (owner runs 07 §4); `ApiClient` has no request timeout (unticketed). The repo's only long-lived branches are
+  `main` and `POC_sample_offline_first`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
