@@ -625,6 +625,65 @@ the CP number → the row → the reduced balance.
   patch them from a stale read. `mechanics.updated_at` also moves and is not returned;
   the client stamps its own, as it does after every write.
 
+## The catalogue (#16)
+
+`src/products/` — products, categories, suppliers, `movements`, ported from
+`products_repository.dart` / `suppliers_repository.dart` / `movements_repository.dart`.
+Reads are open to any tenant token; every write is `manager`/`owner`, both device roles,
+`Idempotency-Key` mandatory (`02_API_SCREENS.md §4`). `test/catalogue.e2e-spec.ts` replays
+every case of `frontend/test/products_repository_test.dart` at the HTTP seam.
+
+- **Products are soft-deleted** (`01_DATABASE.md §10`); every read hides tombstones except
+  `?updatedSince=`, which is the sync read and must carry them.
+- 🔴 **`?updatedSince=` is keyset-paged on `(updated_at, id)`.** Many rows share one
+  `updated_at` (a sale stamps every line with the transaction's `now()`; the platform import
+  stamps a catalogue at once), and `updatedAt` on the wire is millisecond-truncated, so a
+  reader that paged with `updated_at > max(updatedAt)` skipped the rest of a tie cut by a page
+  boundary — or, with a tie larger than a page, was served the same page forever. The response
+  carries `meta.nextCursor: { updatedSince, afterId }` (microsecond precision, or `null` on an
+  empty page); the reader sends both back and always asks for the first page after it
+  (`page>1` with `updatedSince` is a 400; `afterId` without it is a 400). `updatedSince` alone
+  still answers `updated_at > $ts`, as specified. A pass is done when a page is shorter than
+  `limit`; its last `nextCursor` is where the next refresh starts. Proved by *a keyset sync pass
+  over a tie larger than a page* (nine rows, one microsecond, limit 3).
+- 🔴 **Not solved here — late commits.** A write stamped with its transaction's start time
+  (`now()`) can commit after a reader has already moved its cursor past that time, and is then
+  never read. Recorded as #55's read-back-window question under ADR-0010 *ยังไม่เคาะ*. **Until
+  #55 decides that window, a client must start each refresh a safety margin before its stored
+  cursor** (an `updatedSince` some seconds earlier, no `afterId`), otherwise the protocol above
+  loses late-committing writes; the rows it reads again are upserts by id, so re-reading is harmless.
+- **`?partNo=` is one product, trimmed and case-insensitive** (`lower(part_no) = lower($n)`,
+  served by `uq_products_partno_ci`) — the same comparison uniqueness uses. A `partNo` that is
+  present but blank answers an empty page, never catalogue page 1.
+- **The platform import pre-flights case-duplicate part numbers** (`tenant-import.service.ts`):
+  a snapshot whose products share a part number ignoring case is a 400 naming the ids, before
+  the transaction, like the negative-stock pre-flight. It compares with JS `toLowerCase()`; a
+  non-ASCII pair that JS and Postgres `lower()` fold differently would still reach the index as a 500.
+- **`?search=`** puts the predicate on `SEARCH_EXPRESSION` — the exact expression
+  `idx_products_search` is built on — then rechecks `part_no`/`name`/`name_th` so matching stays
+  what the screens do (no `compat`). 🔴 **Under RLS the trigram index is not used:** as
+  `pos_app`, `LIKE` (`textlike`) is not LEAKPROOF, so the planner will not run it inside the index
+  ahead of the tenant policy and the search is a tenant index scan plus a filter. The e2e pins
+  both plans (owner: the index; `pos_app`: not the index). Open design question
+  (`01_DATABASE.md §5.2`) — do not "fix" it by marking functions LEAKPROOF or bypassing RLS.
+- **A part number is unique case-insensitively among live products**, enforced by the database:
+  `uq_products_partno_ci (tenant_id, lower(part_no)) WHERE deleted_at IS NULL` (migration
+  `1788652800007`), so the platform import cannot bypass it. A `23505` on it maps to
+  `409 DUPLICATE_PART_NO` / `รหัสอะไหล่นี้มีอยู่แล้ว`; two concurrent `BP-1`/`bp-1` creates give
+  exactly one 201. A tombstone's number is free to reuse.
+- **`adjust-stock` clamps at zero** (`01_DATABASE.md §7.6`) **after** validating the body: an
+  integer `delta`, a `type` of `adjustment-in`/`adjustment-out` whose direction matches the sign,
+  and a result that fits `INT`. The `movements` row keeps the requested `delta` beside the clamped
+  `stock_after`, as the Dart repository does. One `stock.adjust` audit row (#43). It locks one
+  product row and nothing else, so it cannot join the sale path's lock order.
+- **Categories are hard-deleted with no foreign key** from `products.category`; the product
+  keeps the name. `GET /categories` answers `[{name, color}]` for listed names from one query,
+  and stands the five seed names in when the table is empty, as the Dart repository. **The
+  colour of an orphaned name is the client's** — its hash fallback (`catColor` in
+  `products_repository.dart` / `AppColors.catColor`); the API adds no colour to products.
+- `PATCH /products/:id` never reads `stock` — stock moves only through writes that log a movement.
+- Product money is now a string on the wire (`price`/`cost`, §1.1); it was a number before #16.
+
 ## Conventions these slices set
 
 - **Pagination lives in `meta`, not in `data`** (§1.2). A handler returns
