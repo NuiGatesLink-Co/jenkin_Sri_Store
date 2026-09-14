@@ -278,10 +278,12 @@ endpoint must call it, and that wiring is the part no test covers today.
 🔴 **A local DB one migration behind reads as a code bug:** this round began with 14 red returns
 cases, all 500s, because the dev Postgres had never been given `1788652800004` (#22's
 `return_items.cost_at_sale`) — `pnpm db:migrate:status` said *"up to date"* because `dist/` was
-stale too. Rebuild before believing it. The `200 concurrent bills` case is still the known
-machine limit, now with its cause measured: every 500 is `pg-pool`'s *"timeout exceeded when
-trying to connect"* raised in `request-context.middleware.ts` **before routing** — the
-request-wide transaction ADR-0003's `tx.*` slices remove, not a fault on the sale path.
+stale too. Rebuild before believing it. ~~The `200 concurrent bills` case is the known machine
+limit~~ — **falsified by #162:** those 500s (and *ten simultaneous opens*') were a pool
+**deadlock**, not a limit. `RateLimitService` (a global guard) read `tenants.plan` on a cold cache
+with a second pool connection while the middleware held the first; successes equalled
+`DB_POOL_SIZE` exactly. It now reads on the request transaction (savepoint), both cases pass
+locally at pool 8, and `test/rate-limit-pool.e2e-spec.ts` pins it — see `server/README.md` rule 1.
 Read `docs/handoff_log/p6.3-shifts-drawer.md` before #30 or a device slice.
 
 🔴 **ADR-0003 was amended 2026-09-10 — the transaction is handler-scoped, not request-wide.** The

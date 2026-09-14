@@ -322,6 +322,33 @@ handing a live query queue to whichever request took that connection next.
    knowing a PIN. `test/void-denial-pool.e2e-spec.ts` holds the measurement. The next
    denial path to be written follows that shape: its own pool, its own `set_config`, and
    a `catch` that keeps a failed audit from turning a 403 into a 500.
+
+   🔴 **Guards count as "inside a request" (#162).** The global `TenantRateLimitGuard` runs
+   after the middleware has taken the request's connection, and `RateLimitService` looked
+   up `tenants.plan` on a cold `t:{tid}:plan` cache with `DataSource.query` — a second
+   pool connection. Since #75 that read as a "local machine limit" of the request-wide
+   transaction: `sales.e2e-spec.ts` › *200 concurrent bills* and `shifts.e2e-spec.ts` ›
+   *ten simultaneous opens* failed on dev machines and passed in CI. It was this deadlock.
+   Its signature is that **successes equal `DB_POOL_SIZE` exactly** (8→8, 20→20, 50→50 was
+   measured and misread as starvation) after a full `connectionTimeoutMillis`: `DB_POOL_SIZE`
+   requests each hold one connection and wait for a second, the rest time out in the
+   middleware, and the holders fail open to `'basic'` and finish. Starvation would drain —
+   each bill holds a connection for milliseconds. Whether it trips depends on every
+   middleware connecting before any guard runs, which slow connection setup on Windows
+   guarantees and a Linux runner usually dodged. Production's plan cache goes cold every
+   five minutes, so any burst of `DB_POOL_SIZE` requests at that moment stalled an
+   instance for ten seconds.
+
+   | clean `main`, cache reset | before | after |
+   |---|---|---|
+   | ten simultaneous opens, pool 8 | 8 plan lookups fail at 10 000 ms, two `500` | all `200` |
+   | 200 concurrent bills, pool 8 | 8 bills in 10.5 s | 50 bills, test body ~1.8 s |
+   | 6 opens + 6 reads, pool 2 | `200,200,500×10` in 5065 ms | all `200` |
+
+   The plan is now read on the request's own transaction, inside a savepoint so a failed
+   lookup still fails open without aborting the transaction; `test/rate-limit-pool.e2e-spec.ts`
+   forces the burst at pool 2 with a cold cache. Neither case is a pool-size limit, and the
+   `tx.*` slices (#149–#154) were never needed to make them pass.
 2. **An async Express middleware must never reject.** Express does not await it, so a
    rejection is an unhandled rejection, which Node answers by killing the worker. Both
    `RequestContextMiddleware` failure paths write a response instead.
