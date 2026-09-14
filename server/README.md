@@ -296,7 +296,12 @@ The addendum separates **who decides** the tenant from **who executes** `set_con
   the 2026-09-10 plan does not name must be carried across by then:
   `onTransactionCommit` / `TenantCache.invalidateAfterCommit` (post-commit hooks that
   `TransactionInterceptor` runs today) and `RateLimitService.readPlan` (reads on the request
-  transaction inside a savepoint, #162).
+  transaction inside a savepoint, #162). 🔴 Also, once no request transaction exists,
+  `Promise.all([runTx(a), runTx(b)])` takes **two** connections at once (siblings do not
+  join each other) — the #162 pool-deadlock shape under a burst. Today both join the
+  middleware's transaction, so any such call site must be folded into one `runTx` by `tx.4`.
+  And a joined `runTx` never rolls back on its own: catching its error does not undo its
+  writes (a Postgres error leaves the owner aborted, 25P02).
 
 #### In force until `tx.4`: middleware → guard → interceptor
 

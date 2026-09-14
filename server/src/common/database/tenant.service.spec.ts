@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   currentRequestContext,
+  currentTransaction,
   onTransactionCommit,
   runInRequestContext,
   runInTenantScope,
@@ -41,12 +42,23 @@ function fakePool() {
           events.push('release');
         }),
       };
-      qr.manager = { queryRunner: qr, name: `manager-${runners.length}` };
+      qr.manager = {
+        queryRunner: qr,
+        name: `manager-${runners.length}`,
+        query: (sql: string, params: unknown[]) => qr.query(sql, params),
+      };
       runners.push(qr);
       return qr;
     }),
   };
-  return { tenants: new TenantService(ds as any), ds, runners, events };
+  const logger = { warn: vi.fn() };
+  return {
+    tenants: new TenantService(ds as any, logger as any),
+    ds,
+    runners,
+    events,
+    logger,
+  };
 }
 
 /** A scope the way TenantGuard leaves it in `tx.4`: tenant named, no transaction open. */
@@ -184,6 +196,106 @@ describe('TenantService.runTx (tx.1, #150)', () => {
       'outer hook',
       'inner hook',
     ]);
+  });
+
+  it('a joined runTx that throws never rolls back: the owner catches, and the inner writes commit', async () => {
+    const { tenants, runners, events } = fakePool();
+
+    await authorised(() =>
+      tenants.runTx(async (m) => {
+        try {
+          await tenants.runTx(async (inner) => {
+            await inner.query('INSERT inner', []);
+            throw new Error('inner refused');
+          });
+        } catch {
+          /* the owner swallows it */
+        }
+        await m.query('INSERT outer', []);
+      }),
+    );
+
+    expect(runners).toHaveLength(1);
+    expect(runners[0].rollbackTransaction).not.toHaveBeenCalled();
+    expect(events.slice(-4)).toEqual([
+      'query INSERT inner []',
+      'query INSERT outer []',
+      'commit',
+      'release',
+    ]);
+  });
+
+  it('runs hooks outside the transaction scope, so a hook never sees or joins the released manager', async () => {
+    const { tenants, runners, logger } = fakePool();
+    const err = new Error('hook down');
+    let seenByHook: unknown = 'unset';
+
+    await authorised(() =>
+      tenants.runTx(async () => {
+        onTransactionCommit(async () => {
+          seenByHook = currentTransaction();
+          await tenants.runTx(async () => undefined);
+        });
+        onTransactionCommit(() => {
+          throw err;
+        });
+      }),
+    );
+
+    expect(seenByHook).toBeNull();
+    // The hook's own runTx opened a fresh runner instead of joining the released one.
+    expect(runners).toHaveLength(2);
+    expect(runners[0].isReleased).toBe(true);
+    expect(runners[1].commitTransaction).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(
+      { err },
+      'post-commit hook failed',
+    );
+  });
+
+  it('a failed COMMIT releases the connection, rethrows and runs no hooks', async () => {
+    const { tenants, ds, runners } = fakePool();
+    const hook = vi.fn();
+    const boom = new Error('commit failed');
+    const make = ds.createQueryRunner.getMockImplementation() as () => any;
+    ds.createQueryRunner.mockImplementationOnce(() => {
+      const qr = make();
+      qr.commitTransaction = vi.fn(async () => {
+        throw boom;
+      });
+      return qr;
+    });
+
+    await expect(
+      authorised(() =>
+        tenants.runTx(async () => {
+          onTransactionCommit(hook);
+        }),
+      ),
+    ).rejects.toBe(boom);
+
+    expect(runners[0].rollbackTransaction).toHaveBeenCalledTimes(1);
+    expect(runners[0].release).toHaveBeenCalledTimes(1);
+    expect(hook).not.toHaveBeenCalled();
+  });
+
+  it('a failed connect releases the runner, rethrows and never runs the work', async () => {
+    const { tenants, ds, runners } = fakePool();
+    const work = vi.fn();
+    const boom = new Error('pool exhausted');
+    const make = ds.createQueryRunner.getMockImplementation() as () => any;
+    ds.createQueryRunner.mockImplementationOnce(() => {
+      const qr = make();
+      qr.connect = vi.fn(async () => {
+        throw boom;
+      });
+      return qr;
+    });
+
+    await expect(authorised(() => tenants.runTx(work))).rejects.toBe(boom);
+
+    expect(work).not.toHaveBeenCalled();
+    expect(runners[0].release).toHaveBeenCalledTimes(1);
   });
 
   it("a joined runTx leaves the owner's hooks to the owner", async () => {

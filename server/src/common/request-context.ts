@@ -124,8 +124,9 @@ export function authorisedTenantId(): string {
 }
 
 /**
- * The transaction already open in this scope, or null. `TenantService.runTx` uses it to
- * join rather than take a second pooled connection while the first is still held.
+ * The transaction already open in this scope, or null. `TenantService.runTx` only: it
+ * joins this rather than take a second pooled connection while the first is still held.
+ * The guard, the interceptor and `RateLimitService` use `currentRequestTransaction()`.
  */
 export function currentTransaction(): EntityManager | null {
   return storage.getStore()?.manager ?? null;
@@ -134,10 +135,12 @@ export function currentTransaction(): EntityManager | null {
 /**
  * The request's transaction before a tenant is known — for the two components that
  * run either side of the guard: the guard itself (which needs the manager to do
- * `SET LOCAL`) and the interceptor that commits it. Nothing else may use it, because
- * a query through it before the guard runs sees no tenant at all under RLS.
+ * `SET LOCAL`) and the interceptor that commits it. Nothing else may use it except
+ * `RateLimitService` below and `TenantService.runTx`, which reads the same store through
+ * `currentTransaction()` — because a query through it before the guard runs sees no
+ * tenant at all under RLS.
  *
- * One exception, for the same reason the guard reads `tenants.status` here:
+ * The rate-limit exception, for the same reason the guard reads `tenants.status` here:
  * `RateLimitService` reads `tenants.plan` (no RLS) on it, because any global guard that
  * reaches for a second pool connection while the request holds this one deadlocks the
  * pool under a burst (#162).
@@ -160,8 +163,8 @@ function requireScope(): MutableRequestContext {
   const ctx = storage.getStore();
   if (!ctx) {
     throw new Error(
-      'No request context. Tenant-scoped work must run inside runInRequestContext(), ' +
-        'which RequestContextMiddleware establishes; this route ran without it.',
+      'No request context. Tenant-scoped work must run inside runInRequestContext() ' +
+        '(RequestContextMiddleware) or runInTenantScope(); this route ran without either.',
     );
   }
   return ctx;
@@ -185,14 +188,26 @@ export function onTransactionCommit(hook: () => Promise<void> | void): void {
   store.postCommitHooks.push(hook);
 }
 
-/** Executes all registered post-commit hooks safely. Called ONLY by TransactionInterceptor. */
+/**
+ * Removes and returns the hooks registered on the current scope. `TenantService.runTx`
+ * takes them inside its transaction's child scope so it can run them outside it, where
+ * the released manager is no longer visible.
+ */
+export function takePostCommitHooks(): Array<() => Promise<void> | void> {
+  const store = storage.getStore();
+  const hooks = store?.postCommitHooks ?? [];
+  if (store) store.postCommitHooks = [];
+  return hooks;
+}
+
+/**
+ * Executes post-commit hooks safely — the current scope's, or `hooks` if given. Called
+ * ONLY by `TransactionInterceptor` and `TenantService.runTx`, after their commit.
+ */
 export async function executePostCommitHooks(
   onError?: (err: unknown) => void,
+  hooks: Array<() => Promise<void> | void> = takePostCommitHooks(),
 ): Promise<void> {
-  const store = storage.getStore();
-  if (!store?.postCommitHooks || store.postCommitHooks.length === 0) return;
-  const hooks = store.postCommitHooks;
-  store.postCommitHooks = [];
   for (const hook of hooks) {
     try {
       await hook();
