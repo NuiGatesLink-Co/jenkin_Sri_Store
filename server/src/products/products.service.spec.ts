@@ -20,6 +20,11 @@ describe('ProductsService Caching & Reads', () => {
         return 'OK';
       }),
       keys: vi.fn(),
+      eval: vi.fn(async (_script: string, _n: number, k: string, token: string) => {
+        if (store.get(k) !== token) return 0;
+        store.delete(k);
+        return 1;
+      }),
     };
     managerMock = {
       query: vi.fn(),
@@ -149,5 +154,16 @@ describe('ProductsService Caching & Reads', () => {
     const next = await service.list({ page: 1, limit: 10 });
     expect(next.fromCache).toBe(false);
     expect(next.items[0].stock).toBe(9);
+  });
+
+  it('a loader whose query throws frees its stampede lock at once (#124)', async () => {
+    managerMock.query.mockRejectedValueOnce(new Error('connection reset'));
+    await expect(service.list({ page: 1, limit: 10 })).rejects.toThrow('connection reset');
+    const locks = [...redisMock.store.keys()].filter((k: string) => k.endsWith(':lock'));
+    expect(locks).toEqual([]);
+
+    // The next miss becomes the loader straight away instead of waiting on a dead lock.
+    managerMock.query.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
+    expect((await service.list({ page: 1, limit: 10 })).fromCache).toBe(false);
   });
 });

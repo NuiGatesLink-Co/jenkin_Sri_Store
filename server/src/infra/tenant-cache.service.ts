@@ -46,7 +46,7 @@ const LOCK_TTL_MS = 5000;
  * the whole time, so a loader that died must not idle a pool for five seconds.
  */
 const LOCK_WAIT_MS = 1000;
-const LOCK_POLL_MS = 20;
+const LOCK_POLL_MS = 5;
 
 /** Deletes the lock only if it still holds our token, so a late loader never frees another's. */
 const RELEASE_LOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
@@ -141,9 +141,9 @@ export class TenantCache {
    * invalidation moves later readers to a new key and a new lock.
    *
    * Never fails a request: a Redis error, or no value within `LOCK_WAIT_MS`, answers a
-   * no-op `release` and the caller reads Postgres as it would without a lock. A loader
-   * that throws before `release` leaves the lock to expire after `LOCK_TTL_MS`; its
-   * waiters stop waiting at `LOCK_WAIT_MS`.
+   * no-op `release` and the caller reads Postgres as it would without a lock. The caller
+   * must `release` in a `finally`, so a loader that throws frees the lock at once;
+   * `LOCK_TTL_MS` only covers a loader whose process died.
    */
   async singleFlight<T>(key: string): Promise<Flight<T>> {
     const lockKey = `${key}:lock`;
@@ -155,13 +155,15 @@ export class TenantCache {
       const deadline = Date.now() + LOCK_WAIT_MS;
       let locked = await tryLock();
       while (!locked) {
-        if (Date.now() >= deadline) return noop;
-        await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
         // The value first: a loader stores it before releasing, so a waiter that
         // took the freed lock first would query Postgres for a value already cached.
+        // Checked before the first sleep too — the list query is 1–7 ms.
         const value = await this.get<T>(key);
         if (value !== null) return { value };
         locked = await tryLock();
+        if (locked) break;
+        if (Date.now() >= deadline) return noop;
+        await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
       }
       return {
         release: async () => {

@@ -99,6 +99,20 @@ describe('TenantCache.singleFlight (#124)', () => {
     expect(redis.store.has(`${KEY}:lock`)).toBe(false);
   });
 
+  it('a waiter answers a value that is already stored without sleeping first', async () => {
+    vi.useFakeTimers();
+    const redis = fakeRedis();
+    const { cache } = cacheWith(redis);
+    await cache.singleFlight(KEY);
+    // The loader stored its value but has not released yet.
+    redis.store.set(KEY, JSON.stringify({ total: 3 }));
+
+    // No timer is advanced: a sleep before the first read would never resolve.
+    await expect(cache.singleFlight<{ total: number }>(KEY)).resolves.toEqual({
+      value: { total: 3 },
+    });
+  });
+
   it('a waiter whose loader never stores a value reads Postgres itself after a bounded wait', async () => {
     vi.useFakeTimers();
     const redis = fakeRedis();
