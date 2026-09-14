@@ -20,6 +20,11 @@ describe('ProductsService Caching & Reads', () => {
         return 'OK';
       }),
       keys: vi.fn(),
+      eval: vi.fn(async (_script: string, _n: number, k: string, token: string) => {
+        if (store.get(k) !== token) return 0;
+        store.delete(k);
+        return 1;
+      }),
     };
     managerMock = {
       query: vi.fn(),
@@ -57,7 +62,9 @@ describe('ProductsService Caching & Reads', () => {
     // Populate through a miss first, then prove the second read never queries.
     managerMock.query.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
     await service.list({ page: 1, limit: 10 });
-    const listKey = [...redisMock.store.keys()].find((k: string) => k.includes(':list:'))!;
+    const listKey = [...redisMock.store.keys()].find(
+      (k: string) => k.includes(':list:') && !k.endsWith(':lock'),
+    )!;
     redisMock.store.set(listKey, JSON.stringify(cachedData));
     managerMock.query.mockClear();
 
@@ -98,7 +105,7 @@ describe('ProductsService Caching & Reads', () => {
     expect(result.items[0].price).toBe('800.00');
     expect(result.items[0].cost).toBe('500.00');
     const call = redisMock.set.mock.calls.find((c: unknown[]) =>
-      String(c[0]).includes(':list:'),
+      String(c[0]).includes(':list:') && !String(c[0]).endsWith(':lock'),
     );
     expect(call[0]).toMatch(
       /^t:00000000-0000-4000-8000-000000000001:products:g:[0-9a-f]{16}:list:/,
@@ -147,5 +154,16 @@ describe('ProductsService Caching & Reads', () => {
     const next = await service.list({ page: 1, limit: 10 });
     expect(next.fromCache).toBe(false);
     expect(next.items[0].stock).toBe(9);
+  });
+
+  it('a loader whose query throws frees its stampede lock at once (#124)', async () => {
+    managerMock.query.mockRejectedValueOnce(new Error('connection reset'));
+    await expect(service.list({ page: 1, limit: 10 })).rejects.toThrow('connection reset');
+    const locks = [...redisMock.store.keys()].filter((k: string) => k.endsWith(':lock'));
+    expect(locks).toEqual([]);
+
+    // The next miss becomes the loader straight away instead of waiting on a dead lock.
+    managerMock.query.mockResolvedValueOnce([{ n: 0 }]).mockResolvedValueOnce([]);
+    expect((await service.list({ page: 1, limit: 10 })).fromCache).toBe(false);
   });
 });

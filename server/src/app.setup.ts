@@ -21,6 +21,13 @@ export async function configureApp(
   logger: Logger,
 ): Promise<void> {
   app.getHttpAdapter().getInstance().disable('x-powered-by');
+  // Exactly one trusted hop: nginx, which appends $remote_addr to X-Forwarded-For. Without
+  // this `req.ip` is nginx's container address for every client, so the per-IP login
+  // limit was one bucket for everyone. Never `true` — that trusts the leftmost entry,
+  // which the client writes. If another proxy (CDN, TLS terminator) is ever put in front of
+  // nginx, `req.ip` becomes that proxy's address and #134 comes back: raise the hop count or
+  // use nginx `real_ip` instead.
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
 
   // Security headers via Helmet (OWASP A05)
   app.use(

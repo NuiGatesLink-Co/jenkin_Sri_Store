@@ -35,7 +35,7 @@ GitHub ยังไม่ได้ตั้ง** — คำสั่งจริ
 | Package / Storage | Docker + **GHCR** (public) | job build image ทั้งสอง workflow → `ghcr.io/nuimanlp/srisurart-pos-server`, `…-web` | server: PR #70 (#61, tarball artefact ถูกยกเลิก) · web: PR #69 (#62) |
 | Config & Deploy (CD) | **Ansible** ผ่าน SSH | `deploy/ansible/`, `.github/workflows/deploy.yml` | ยังไม่มี |
 | KV Storage | **etcd** | service ใน compose + `RuntimeConfigService` ฝั่ง NestJS | ✅ service etcd + auth (#64) · `RuntimeConfigService` merge มาก่อนแล้ว (#66, PR #109; watch แก้ใน #120, PR #129) |
-| Monitoring & Operate | Node Exporter + Prometheus + Grafana | `deploy/compose/monitoring.yml`, `deploy/prometheus/`, `deploy/grafana/` | overlay พร้อม — #63 `ops.1` (ยังไม่ได้ต่อเข้า deploy playbook — #121 `ops.5` เป็นเจ้าของ) |
+| Monitoring & Operate | Node Exporter + Prometheus + Grafana | `deploy/compose/monitoring.yml`, `deploy/prometheus/`, `deploy/grafana/` | overlay #63 `ops.1` · ต่อเข้า `deploy/ansible/deploy.yml` แล้วใน #121 `ops.5` (ยังไม่ได้รันจริงบน VM) |
 
 **สิ่งที่ตั้งใจไม่ทำ:** Jenkins (มีเครื่องยนต์อยู่แล้ว), Kubernetes (VM เดียว), Alertmanager,
 exporter ของ Postgres/Redis, image signing, WAF, DB backup อัตโนมัติ (ADR-0005 มี export job),
@@ -184,7 +184,10 @@ Prometheus (9090), Grafana (3000), node-exporter — ทั้งหมดผู
 5. `docker compose run --rm migrate` — **schema ก่อนโค้ด** ครั้งเดียว
 6. rolling: `up -d --no-deps api-1` → รอ healthy → `api-2` → `api-3` → `worker`, `bull-board`, etcd, monitoring
 7. seed key etcd ที่ยังไม่มี (§8) — ไม่ทับค่าที่มีอยู่
-8. `GET /health/ready` ต้อง 200 จาก Nginx ไม่งั้น playbook fail (สีแดงใน Actions)
+8. `GET /health/ready` ต้อง 200 จาก Nginx ไม่งั้น playbook fail (สีแดงใน Actions) → บันทึก SHA ลง `.current_sha`
+9. monitoring overlay (#121) **หลัง**ข้อ 8 เสมอ และ **ไม่ทำให้ deploy fail** — Grafana/Prometheus
+   ช้าหรือพังแค่พิมพ์ WARNING (`block`/`rescue`) เพราะ release ของ POS ผ่าน gate และถูกบันทึกไปแล้ว
+   (ตัดสินใจรอบ review PR #135: monitoring ไม่ใช่ gate ของเคาน์เตอร์)
 
 **กติกา migration ที่ตามมา (expand/contract):** เพราะ migrate รันก่อน restart และ**ไม่มี down-migration**
 โค้ดเวอร์ชันเก่าต้องยังรันบน schema ใหม่ได้ระหว่าง rolling — เพิ่มคอลัมน์ได้ ลบ/rename ต้องแยกเป็น
@@ -299,6 +302,11 @@ merge มาก่อนตามแผนใน PR #109) มาบรรจบ�
 และต้องเพิ่ม `include /etc/nginx/mime.types; default_type application/octet-stream;` ใน `http {}` —
 conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ของ Flutter จะถูกส่งเป็น `text/plain` และแอปไม่ boot
 
+🔴 **Nginx ต้องเป็น proxy ตัวเดียวหน้า API (#134):** `configureApp` ตั้ง `trust proxy` = 1 ให้ `req.ip` คือ
+ค่าขวาสุดของ `X-Forwarded-For` ที่ Nginx ต่อท้ายจาก `$remote_addr` — rate limit ของ login (`auth:ip:*`) และ IP ใน
+`audit_log` พึ่งค่านี้ · ถ้าวาง proxy อีกตัวหน้า Nginx (CDN, TLS terminator ของคณะ) ค่านั้นจะกลายเป็น IP ของ proxy
+ทุก client ใช้ bucket เดียวกันอีก = บั๊ก #134 กลับมา → ต้องเพิ่มจำนวน hop หรือใช้ `real_ip` ของ Nginx ก่อนเปิดใช้
+
 หน้า web บน VM คือ **build Drift ตัวปัจจุบัน** — POS เดี่ยวที่คุยกับใครไม่ได้ ใช้สาธิต pipeline
 เท่านั้น ไม่มีข้อมูลร้าน · จะเปลี่ยนเมื่อ `q1` ต่อ `ApiRepository` เสร็จ (#52)
 
@@ -335,19 +343,22 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
   เหมือน secret ของ datastore ตัวอื่น
 * `deploy/scripts/validate.sh` เช็ค overlay นี้ด้วย (`docker compose config` ของ base + vm.override
   + monitoring, และ `promtool check config` ของ `prometheus.yml`)
-* 🔴 **ยังไม่ได้ต่อเข้า Ansible และยังไม่มี ticket เป็นเจ้าของ** — `#67` `cd.2` (PR #108) merge/closed
-  ไปแล้วโดย**ไม่ได้**ทำส่วนนี้: `deploy/ansible/deploy.yml` มี `compose_files: "-f docker-compose.yml
-  -f vm.override.yml"` เท่านั้น ไม่มี `monitoring.yml`, และไม่ copy ทั้ง `deploy/prometheus/` หรือ
-  `deploy/grafana/` ไปที่ `/opt/pos/` เลย — ต้องเปิด issue ใหม่ (07 §6 ขั้นที่ 2 และ 6 ยังเป็นแค่แผน
-  ไม่ใช่ของที่ทำแล้ว) · ticket #63 นี้แค่ทำให้ overlay ถูกต้องเมื่อ compose คู่กับสแต็กหลักจาก repo
-  เท่านั้น — ไม่ได้แตะ Ansible
-* 🔴 **กับดักที่รอ ticket ถัดไป:** บน VM ไฟล์ compose ทุกไฟล์ถูกวางแบนราบที่ `/opt/pos/*.yml`
-  (`docker-compose.yml`, `vm.override.yml`) — ถ้า copy `monitoring.yml` ไปวางแบนราบแบบเดียวกัน
-  path สัมพัทธ์ `../deploy/prometheus/…` และ `../deploy/grafana/…` ในไฟล์นี้จะเด้งไปหา
-  `/opt/deploy/prometheus/…` ซึ่งไม่มีอยู่จริง (project directory = `/opt/pos/`, ไม่ใช่ repo root) —
-  ใครต่อเรื่องนี้ต้อง copy `deploy/prometheus/` และ `deploy/grafana/` ไปไว้ที่ path สัมพัทธ์เดียวกัน
-  (คือ `/opt/deploy/prometheus/`, `/opt/deploy/grafana/` ถ้า `/opt/pos/` แทน `server/`) หรือใช้
-  `--project-directory` บังคับ ไม่ใช่แค่ copy ไฟล์ `monitoring.yml` ไฟล์เดียวแล้วคาดว่าจะทำงาน
+* **ต่อเข้า Ansible แล้ว (#121):** `deploy/ansible/deploy.yml` ใส่ `-f monitoring.yml` ในทุกคำสั่ง
+  compose, copy `monitoring.yml` ไป `/opt/pos/` และ copy `deploy/prometheus/` + `deploy/grafana/`
+  ไป `/opt/pos/deploy/` (ไฟล์ที่ถูกลบ/rename ใน repo ถูกลบบน VM ด้วย), `up -d` ทั้งสาม service
+  **หลัง** `/health/ready` ผ่านและบันทึก SHA แล้ว · config เปลี่ยน → `--force-recreate prometheus grafana`
+  (bind mount ไฟล์เดี่ยวยึด inode เก่าหลัง copy และ config hash ของ compose ไม่เปลี่ยน) · probe
+  `127.0.0.1:9090/-/healthy` + `127.0.0.1:3000/api/health` ไม่ผ่าน = **WARNING ไม่ fail** (§6 ข้อ 9) ·
+  ปิดได้ด้วย `-e enable_monitoring=false` (หรือ `ENABLE_MONITORING=false`) ซึ่ง `rm -sf` container
+  monitoring ที่ค้างจาก deploy ก่อน · สลับ flag บน VM ที่รัน SHA นั้นอยู่แล้วไม่มีผลจน release ถัดไป
+  (§6 ข้อ 1 จบ play ก่อน)
+* 🔴 **ก่อน merge/deploy ครั้งแรกหลัง #121:** เพิ่ม `GRAFANA_ADMIN_PASSWORD` ใน secret `DEMO_ENV_FILE`
+  แล้วรัน `provision.yml` ใหม่ (`.env` บน VM มาจาก secret นี้ทางเดียว) ไม่งั้นคำสั่ง compose แรก (pull)
+  fail ก่อนเปลี่ยนอะไร — คู่กับ `ETCD_ROOT_PASSWORD` ของ PR #113
+* 🔴 **path ของ bind mount คือ `${MONITORING_CONFIG_DIR:-../deploy}/…`** — path สัมพัทธ์ resolve กับ
+  project directory ซึ่งจาก repo คือ `server/` แต่บน VM คือ `/opt/pos/` แบนราบ (`../deploy/…` จะเป็น
+  `/opt/deploy/…` และ Docker สร้างโฟลเดอร์ว่างให้เงียบ ๆ) — playbook ตั้ง `MONITORING_CONFIG_DIR=./deploy`
+  ให้ ถ้ารัน compose **ด้วยมือบน VM** ต้องตั้งตัวแปรนี้เองด้วย
 
 ---
 

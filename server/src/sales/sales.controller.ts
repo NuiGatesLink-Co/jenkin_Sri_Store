@@ -14,6 +14,7 @@ import {
 import type { Request } from 'express';
 import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
+import { clientIp } from '../common/client-ip.js';
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
 import { Paginated, pageParams } from '../common/paginated.js';
@@ -122,7 +123,7 @@ export class SalesController {
       role: req.user.role,
       deviceId: req.user.deviceId,
       pin: typeof pin === 'string' ? pin : '',
-      ip: req.ip,
+      ip: clientIp(req) ?? undefined,
     });
   }
 }

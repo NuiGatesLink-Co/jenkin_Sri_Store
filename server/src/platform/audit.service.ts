@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DataSource, EntityManager } from 'typeorm';
-import * as net from 'node:net';
+import { toInet } from '../common/client-ip.js';
 
 export interface AuditLogInput {
   tenantId: string;
@@ -19,15 +19,7 @@ export interface AuditLogInput {
 export class AuditService {
   /** Pass the business transaction's manager so a failed audit rolls the write back (#123). */
   async log(runner: EntityManager | DataSource, input: AuditLogInput): Promise<void> {
-    let cleanIp: string | null = null;
-    if (input.ip) {
-      const candidate = input.ip.split(',')[0].trim();
-      // Node accepts an IPv6 zone id (`fe80::1%eth0`); Postgres `inet` does not, and a
-      // failed insert here rolls the whole platform write back.
-      if (candidate && !candidate.includes('%') && net.isIP(candidate) !== 0) {
-        cleanIp = candidate;
-      }
-    }
+    const cleanIp = toInet(input.ip);
 
     await runner.query(
       `INSERT INTO audit_log (tenant_id, platform_admin_id, user_id, device_id, action, entity, entity_id, before, after, ip)

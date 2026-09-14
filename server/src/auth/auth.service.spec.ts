@@ -395,6 +395,145 @@ describe('AuthService', () => {
         }),
       ).rejects.toThrow('Invalid credentials');
     });
+
+    describe('brute-force keys and audit ip', () => {
+      const hash = (token: string) =>
+        (new AuthService({} as any, {} as any, {} as any, rateLimitMock as any) as any).hashDeviceToken(
+          token,
+        ) as Promise<string>;
+
+      const build = (passHash: string, tenantByHash: Record<string, string> = {}) => {
+        const auditMock = { log: vi.fn() };
+        const qrMock = {
+          connect: vi.fn(),
+          startTransaction: vi.fn(),
+          commitTransaction: vi.fn(),
+          rollbackTransaction: vi.fn(),
+          release: vi.fn(),
+          query: vi.fn().mockImplementation((sql: string, params: any[]) => {
+            if (sql.includes('auth_lookup_device_by_token')) {
+              const tid = tenantByHash[params[0]];
+              return tid ? [{ tenant_id: tid, id: `d-${tid}`, role: 'pos', retired_at: null }] : [];
+            }
+            if (sql.includes('auth_lookup_user_for_login')) {
+              return [
+                {
+                  id: 'u1',
+                  tenant_id: params[1] ?? 't1',
+                  username: 'owner',
+                  password_hash: passHash,
+                  role: 'owner',
+                  display_name: 'Store Owner',
+                  is_active: true,
+                  tenant_status: 'active',
+                  timezone: 'Asia/Bangkok',
+                },
+              ];
+            }
+            return [];
+          }),
+          manager: {},
+          isTransactionActive: false,
+        };
+        const service = new AuthService(
+          { createQueryRunner: () => qrMock } as any,
+          { sign: vi.fn().mockReturnValue('tok') } as any,
+          auditMock as any,
+          rateLimitMock as any,
+        );
+        return { auditMock, service };
+      };
+
+      const checkedKeys = (prefix: string) =>
+        rateLimitMock.getFailureStatus.mock.calls
+          .map((c: any[]) => c[0] as string)
+          .filter((k) => k.startsWith(prefix));
+
+      it('scopes the username bucket by the device tenant', async () => {
+        const { service } = build('not-an-argon2-hash', {
+          [await hash('tokA')]: 'tenant-a',
+          [await hash('tokB')]: 'tenant-b',
+        });
+        rateLimitMock.getFailureStatus.mockClear();
+
+        for (const deviceToken of ['tokA', 'tokB']) {
+          await expect(
+            service.login({ username: 'owner', password: 'x', deviceToken }, '10.0.0.5'),
+          ).rejects.toThrow('Invalid credentials');
+        }
+
+        expect(checkedKeys('auth:user:')).toEqual([
+          'auth:user:tenant-a:owner',
+          'auth:user:tenant-b:owner',
+        ]);
+      });
+
+      it('keys the ip bucket by the client address it is given', async () => {
+        const { service } = build('not-an-argon2-hash');
+        rateLimitMock.getFailureStatus.mockClear();
+
+        for (const ip of ['10.0.0.5', '10.0.0.6']) {
+          await expect(service.login({ username: 'owner', password: 'x' }, ip)).rejects.toThrow(
+            'Invalid credentials',
+          );
+        }
+
+        expect(checkedKeys('auth:ip:')).toEqual(['auth:ip:10.0.0.5', 'auth:ip:10.0.0.6']);
+      });
+
+      it('refuses a locked-out ip before taking a database connection', async () => {
+        const createQueryRunner = vi.fn();
+        const service = new AuthService(
+          { createQueryRunner } as any,
+          {} as any,
+          {} as any,
+          rateLimitMock as any,
+        );
+        rateLimitMock.getFailureStatus.mockResolvedValueOnce({ allowed: false, retryAfter: 42 });
+
+        try {
+          await expect(
+            service.login({ username: 'owner', password: 'x', deviceToken: 'tokA' }, '10.0.0.9'),
+          ).rejects.toMatchObject({ status: 429 });
+          expect(createQueryRunner).not.toHaveBeenCalled();
+        } finally {
+          // A pre-fix service throws before consuming the Once value; don't leak it into the next test.
+          rateLimitMock.getFailureStatus.mockReset();
+          rateLimitMock.getFailureStatus.mockResolvedValue({ allowed: true });
+        }
+      });
+
+      it('counts an invalid device token against the ip bucket', async () => {
+        const { service } = build('not-an-argon2-hash');
+        rateLimitMock.recordFailure.mockClear();
+
+        await expect(
+          service.login({ username: 'owner', password: 'x', deviceToken: 'unknown' }, '10.0.0.10'),
+        ).rejects.toThrow('Invalid device token');
+        expect(rateLimitMock.recordFailure).toHaveBeenCalledWith('auth:ip:10.0.0.10', 60);
+      });
+
+      it('records the client ip on auth.login_failed and auth.login', async () => {
+        const argon2 = await import('argon2');
+        const good = await argon2.hash('password123');
+
+        const failed = build(good);
+        await expect(
+          failed.service.login({ username: 'owner', password: 'wrong' }, '10.0.0.7'),
+        ).rejects.toThrow('Invalid credentials');
+        expect(failed.auditMock.log.mock.calls[0][1]).toMatchObject({
+          action: 'auth.login_failed',
+          ip: '10.0.0.7',
+        });
+
+        const ok = build(good);
+        await ok.service.login({ username: 'owner', password: 'password123' }, '10.0.0.8');
+        expect(ok.auditMock.log.mock.calls[0][1]).toMatchObject({
+          action: 'auth.login',
+          ip: '10.0.0.8',
+        });
+      });
+    });
   });
 });
 

@@ -38,6 +38,22 @@ export const CACHE_TTL: Record<CacheNamespace, { base: number; jitter: number }>
 const GENERATION_TTL_SEC = 3600;
 const GENERATION_JITTER_SEC = 300;
 
+/** How long a loader may hold a key's stampede lock (02_API_SCREENS.md §5: `SET key NX PX 5000`). */
+const LOCK_TTL_MS = 5000;
+/**
+ * How long a waiter polls for the loader's value before it reads Postgres itself. Kept
+ * well under `LOCK_TTL_MS` on purpose: the waiter holds its request's pooled connection
+ * the whole time, so a loader that died must not idle a pool for five seconds.
+ */
+const LOCK_WAIT_MS = 1000;
+const LOCK_POLL_MS = 5;
+
+/** Deletes the lock only if it still holds our token, so a late loader never frees another's. */
+const RELEASE_LOCK = `if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end`;
+
+/** What a miss gets from `singleFlight`: the value another request loaded, or the right to load it. */
+export type Flight<T> = { value: T } | { release: () => Promise<void> };
+
 /** `base ± jitter` seconds (02_API_SCREENS.md §5: every key gets TTL + jitter). */
 export function ttlWithJitter(baseSec: number, jitterSec: number): number {
   return baseSec - jitterSec + randomInt(2 * jitterSec + 1);
@@ -110,6 +126,56 @@ export class TenantCache {
       return raw === null ? null : (JSON.parse(raw) as T);
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Stampede lock for a cache miss on `key` (02_API_SCREENS.md §5, #124). Call it right
+   * after `get` missed. It answers either:
+   *
+   * - `{ release }`: this request loads the value, `set`s it, then calls `release`; or
+   * - `{ value }`: another request loaded it while this one waited.
+   *
+   * The lock is keyed on the full cache key, generation included, so a waiter can only
+   * ever receive a value stored under the generation it read before its miss — an
+   * invalidation moves later readers to a new key and a new lock.
+   *
+   * Never fails a request: a Redis error, or no value within `LOCK_WAIT_MS`, answers a
+   * no-op `release` and the caller reads Postgres as it would without a lock. The caller
+   * must `release` in a `finally`, so a loader that throws frees the lock at once;
+   * `LOCK_TTL_MS` only covers a loader whose process died.
+   */
+  async singleFlight<T>(key: string): Promise<Flight<T>> {
+    const lockKey = `${key}:lock`;
+    const token = newToken();
+    const noop: Flight<T> = { release: async () => {} };
+    const tryLock = async () =>
+      (await this.redis.set(lockKey, token, 'PX', LOCK_TTL_MS, 'NX')) !== null;
+    try {
+      const deadline = Date.now() + LOCK_WAIT_MS;
+      let locked = await tryLock();
+      while (!locked) {
+        // The value first: a loader stores it before releasing, so a waiter that
+        // took the freed lock first would query Postgres for a value already cached.
+        // Checked before the first sleep too — the list query is 1–7 ms.
+        const value = await this.get<T>(key);
+        if (value !== null) return { value };
+        locked = await tryLock();
+        if (locked) break;
+        if (Date.now() >= deadline) return noop;
+        await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+      }
+      return {
+        release: async () => {
+          try {
+            await this.redis.eval(RELEASE_LOCK, 1, lockKey, token);
+          } catch {
+            // Fail-open: the lock expires on its own.
+          }
+        },
+      };
+    } catch {
+      return noop;
     }
   }
 

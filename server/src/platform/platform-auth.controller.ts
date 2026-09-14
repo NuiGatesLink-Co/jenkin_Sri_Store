@@ -1,6 +1,7 @@
 import { Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import { PlatformAuthService } from './platform-auth.service.js';
+import { clientIp } from '../common/client-ip.js';
 
 @Controller('platform/auth')
 export class PlatformAuthController {
@@ -15,7 +16,7 @@ export class PlatformAuthController {
     if (!body.username || !body.password) {
       throw new Error('Username and password are required');
     }
-    const ip = (req.headers['x-forwarded-for'] as string) || req.ip;
+    const ip = clientIp(req) ?? undefined;
     return this.authService.login(body.username, body.password, ip);
   }
 }
