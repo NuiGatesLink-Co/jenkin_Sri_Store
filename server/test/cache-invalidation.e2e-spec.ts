@@ -21,6 +21,7 @@ import {
 import {
   generationKey,
   TenantCache,
+  type CacheNamespace,
 } from '../src/infra/tenant-cache.service.js';
 import { TenantImportService } from '../src/platform/tenant-import.service.js';
 import { ProductsService } from '../src/products/products.service.js';
@@ -30,7 +31,9 @@ import {
   resetTenant,
   seedMechanic,
   seedOpenShift,
+  seedCustomer,
   seedProduct,
+  seedSettings,
   type TenantFixture,
 } from './support/fixture.js';
 
@@ -51,7 +54,9 @@ class RollbackProbeController {
       `UPDATE products SET stock = 0 WHERE tenant_id = $1::uuid AND id = 'p1'`,
       [tenantId],
     );
-    this.cache.invalidateAfterCommit(tenantId, 'products');
+    for (const ns of ['products', 'settings', 'customers', 'mechanics'] as const) {
+      this.cache.invalidateAfterCommit(tenantId, ns);
+    }
     throw new HttpException({ code: 'PROBE', message: 'rolled back' }, HttpStatus.CONFLICT);
   }
 }
@@ -98,7 +103,22 @@ describe('cache invalidation after commit (e2e, #32)', () => {
   const get = (path: string, t = token): Promise<Response> =>
     http().get(`/api/v1${path}`).set('Authorization', `Bearer ${t}`);
 
-  const generation = (tid = TENANT) => cache.get(generationKey(tid, 'products'));
+  const generation = (tid = TENANT, ns: CacheNamespace = 'products') =>
+    cache.get(generationKey(tid, ns));
+
+  /** GET `path` twice so the second answer is a HIT. */
+  const primePath = async (path: string) => {
+    await get(path);
+    expect((await get(path)).headers['x-cache']).toBe('HIT');
+  };
+  /** The next read of `path` is a MISS; returns it. */
+  const miss = async (path: string) => {
+    const res = await get(path);
+    expect(res.headers['x-cache']).toBe('MISS');
+    return res;
+  };
+  const row = <T extends { id: string }>(res: Response, id: string) =>
+    (res.body.data as T[]).find((r) => r.id === id);
 
   /** Reads list and item until both are HITs, so a later MISS can only be an invalidation. */
   const prime = async (t = token, id = 'p1') => {
@@ -156,6 +176,15 @@ describe('cache invalidation after commit (e2e, #32)', () => {
       });
     }
     await seedOpenShift(admin, TENANT, fixture.posDeviceId, { userId: fixture.userId });
+    await seedSettings(admin, TENANT, { shopName: 'ร้านเดิม' });
+    await seedCustomer(admin, TENANT, { id: 'c1', code: 'CUS001', name: 'Somchai' });
+    await seedMechanic(admin, TENANT, {
+      id: 'm1',
+      code: 'M001',
+      name: 'Lung Manop',
+      creditLimit: 10000,
+      creditBalance: 500,
+    });
     token = accessToken({
       tenantId: TENANT,
       userId: fixture.userId,
@@ -286,17 +315,184 @@ describe('cache invalidation after commit (e2e, #32)', () => {
         [PLATFORM_ADMIN, `admin-${PLATFORM_ADMIN}`],
       );
       await prime();
+      for (const path of ['/settings', '/customers', '/mechanics']) await primePath(path);
       await app.get(TenantImportService).importSnapshot(
         TENANT,
         {
           __meta: { version: 2 },
           sa_products: [{ id: 'imp-1', partNo: 'IMP-1', name: 'Imported', stock: 9 }],
+          sa_customers: [{ id: 'imp-c', code: 'CUS900', name: 'Imported Customer' }],
+          sa_mechanics: [{ id: 'imp-m', code: 'M900', name: 'Imported Mechanic' }],
+          sa_settings: { shopName: 'ร้านนำเข้า', shopNameEN: 'Imported Shop' },
         },
         PLATFORM_ADMIN,
       );
       const list = await get('/products');
       expect(list.headers['x-cache']).toBe('MISS');
       expect(listed(list, 'imp-1')?.stock).toBe(9);
+      expect(row(await miss('/customers'), 'imp-c')).toBeDefined();
+      expect(row(await miss('/mechanics'), 'imp-m')).toBeDefined();
+      expect((await miss('/settings')).body.data.shopName).toBe('ร้านนำเข้า');
+    });
+  });
+
+  describe('settings, customers and mechanics: read → write → the next read is fresh', () => {
+    type CustomerOut = { id: string; name: string; points: number; totalSpend: string };
+    type MechanicOut = { id: string; name: string; creditBalance: string; totalSales: string };
+
+    const creditSale = (id: string) =>
+      sale(id, 2, {
+        paymentMethod: 'เครดิตช่าง',
+        customerId: 'c1',
+        customerName: 'Somchai',
+        mechanicId: 'm1',
+        mechanicName: 'Lung Manop',
+      });
+
+    it('PATCH /settings', async () => {
+      await primePath('/settings');
+      const res = await http()
+        .patch('/api/v1/settings')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', key())
+        .send({ shopName: 'ร้านใหม่' });
+      expect(res.status).toBe(200);
+      expect((await miss('/settings')).body.data.shopName).toBe('ร้านใหม่');
+    });
+
+    it('POST · PATCH · DELETE /customers', async () => {
+      await primePath('/customers');
+      const created = await post('/customers', { name: 'New', nameTH: 'ใหม่' });
+      expect(created.status).toBe(201);
+      const id = created.body.data.id as string;
+      expect(row<CustomerOut>(await miss('/customers'), id)?.name).toBe('New');
+
+      await primePath('/customers');
+      expect((await http()
+        .patch(`/api/v1/customers/${id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', key())
+        .send({ name: 'Renamed' })).status).toBe(200);
+      expect(row<CustomerOut>(await miss('/customers'), id)?.name).toBe('Renamed');
+
+      await primePath('/customers');
+      expect((await http()
+        .delete(`/api/v1/customers/${id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', key())).status).toBe(200);
+      expect(row<CustomerOut>(await miss('/customers'), id)).toBeUndefined();
+    });
+
+    it('POST · PATCH · DELETE /mechanics', async () => {
+      await primePath('/mechanics');
+      const created = await post('/mechanics', { name: 'New Mechanic' });
+      expect(created.status).toBe(201);
+      const id = created.body.data.id as string;
+      expect(row<MechanicOut>(await miss('/mechanics'), id)?.name).toBe('New Mechanic');
+
+      await primePath('/mechanics');
+      expect((await http()
+        .patch(`/api/v1/mechanics/${id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', key())
+        .send({ name: 'Renamed Mechanic' })).status).toBe(200);
+      expect(row<MechanicOut>(await miss('/mechanics'), id)?.name).toBe('Renamed Mechanic');
+
+      await primePath('/mechanics');
+      expect((await http()
+        .delete(`/api/v1/mechanics/${id}`)
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', key())).status).toBe(200);
+      expect(row<MechanicOut>(await miss('/mechanics'), id)).toBeUndefined();
+    });
+
+    it('POST /mechanics/:id/credit-payments', async () => {
+      await primePath('/mechanics');
+      const res = await post('/mechanics/m1/credit-payments', {
+        amount: '200.00',
+        paymentMethod: 'เงินสด',
+      });
+      expect(res.status).toBe(201);
+      expect(row<MechanicOut>(await miss('/mechanics'), 'm1')?.creditBalance).toBe('300.00');
+    });
+
+    it('POST /sales naming a customer and a mechanic', async () => {
+      await primePath('/customers');
+      await primePath('/mechanics');
+      expect((await creditSale('s32-ledger')).status).toBe(201);
+      expect(row<CustomerOut>(await miss('/customers'), 'c1')).toMatchObject({
+        points: 20,
+        totalSpend: '200.00',
+      });
+      expect(row<MechanicOut>(await miss('/mechanics'), 'm1')).toMatchObject({
+        creditBalance: '700.00',
+        totalSales: '200.00',
+      });
+    });
+
+    it('POST /sales with no customer or mechanic leaves those caches alone', async () => {
+      await primePath('/customers');
+      await primePath('/mechanics');
+      expect((await sale('s32-walkin', 1)).status).toBe(201);
+      expect((await get('/customers')).headers['x-cache']).toBe('HIT');
+      expect((await get('/mechanics')).headers['x-cache']).toBe('HIT');
+    });
+
+    it('POST /sales/:id/void reverses the ledger', async () => {
+      expect((await creditSale('s32-ledger-void')).status).toBe(201);
+      await primePath('/customers');
+      await primePath('/mechanics');
+      expect((await post('/sales/s32-ledger-void/void', { pin: PIN })).status).toBe(200);
+      expect(row<CustomerOut>(await miss('/customers'), 'c1')).toMatchObject({
+        points: 0,
+        totalSpend: '0.00',
+      });
+      expect(row<MechanicOut>(await miss('/mechanics'), 'm1')?.creditBalance).toBe('500.00');
+    });
+
+    it('POST /returns reverses the ledger', async () => {
+      expect((await creditSale('s32-ledger-return')).status).toBe(201);
+      await primePath('/customers');
+      await primePath('/mechanics');
+      const res = await post('/returns', {
+        saleId: 's32-ledger-return',
+        refundMethod: 'หักจากเครดิต',
+        items: [{ productId: 'p1', name: 'Brake Pad', qty: 1, price: '100.00' }],
+      });
+      expect(res.status).toBe(201);
+      expect(row<CustomerOut>(await miss('/customers'), 'c1')?.totalSpend).toBe('100.00');
+      expect(row<MechanicOut>(await miss('/mechanics'), 'm1')?.creditBalance).toBe('600.00');
+    });
+
+    it('409 CREDIT_LIMIT_EXCEEDED on a bill naming a customer and a mechanic: no invalidation', async () => {
+      await admin.query(
+        `UPDATE mechanics SET credit_limit = 100 WHERE tenant_id = $1::uuid AND id = 'm1'`,
+        [TENANT],
+      );
+      await primePath('/customers');
+      await primePath('/mechanics');
+      const before = [await generation(TENANT, 'customers'), await generation(TENANT, 'mechanics')];
+      const res = await creditSale('s32-ledger-refused');
+      expect(res.status).toBe(409);
+      expect(res.body.error.code).toBe('CREDIT_LIMIT_EXCEEDED');
+      expect([await generation(TENANT, 'customers'), await generation(TENANT, 'mechanics')])
+        .toEqual(before);
+      expect((await get('/customers')).headers['x-cache']).toBe('HIT');
+      const mechanics = await get('/mechanics');
+      expect(mechanics.headers['x-cache']).toBe('HIT');
+      expect(row<MechanicOut>(mechanics, 'm1')?.creditBalance).toBe('500.00');
+    });
+
+    it('409 CREDIT_PAYMENT_EXCEEDS_BALANCE: no invalidation', async () => {
+      await primePath('/mechanics');
+      const before = await generation(TENANT, 'mechanics');
+      const res = await post('/mechanics/m1/credit-payments', {
+        amount: '900.00',
+        paymentMethod: 'เงินสด',
+      });
+      expect(res.status).toBe(409);
+      expect(await generation(TENANT, 'mechanics')).toBe(before);
+      expect((await get('/mechanics')).headers['x-cache']).toBe('HIT');
     });
   });
 
@@ -335,12 +531,17 @@ describe('cache invalidation after commit (e2e, #32)', () => {
 
     it('a transaction that registered the invalidation and then rolled back performs none', async () => {
       await prime();
-      const before = await generation();
+      for (const path of ['/settings', '/customers', '/mechanics']) await primePath(path);
+      const namespaces = ['products', 'settings', 'customers', 'mechanics'] as const;
+      const before = await Promise.all(namespaces.map((ns) => generation(TENANT, ns)));
       const res = await http()
         .post('/api/v1/test-cache-rollback')
         .set('Authorization', `Bearer ${token}`);
       expect(res.status).toBe(409);
-      expect(await generation()).toBe(before);
+      expect(await Promise.all(namespaces.map((ns) => generation(TENANT, ns)))).toEqual(before);
+      for (const path of ['/settings', '/customers', '/mechanics']) {
+        expect((await get(path)).headers['x-cache']).toBe('HIT');
+      }
       // The stock write rolled back, and the cached page (still 50) is still the truth.
       const [row] = await admin.query(
         `SELECT stock FROM products WHERE tenant_id = $1::uuid AND id = 'p1'`,
