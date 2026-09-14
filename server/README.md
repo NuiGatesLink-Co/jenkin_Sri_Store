@@ -20,16 +20,18 @@ curl -k https://localhost/health/ready    # checks Postgres + both Redis
 ```
 
 That is the whole stack: Nginx (TLS, self-signed) → `api-1..3` → PostgreSQL, `redis-cache`,
-`redis-queue`, plus the BullMQ `worker` and `bull-board` (http://127.0.0.1:3100, basic auth).
-The one-shot `migrate` job applies the schema as the owner role before any `api-*` starts.
-Secrets are required via `server/.env` (see `.env.example`); `docker-compose.yml` fails fast
-if `POSTGRES_PASSWORD`, `POS_APP_PASSWORD`, `REDIS_PASSWORD` or `BULL_BOARD_PASSWORD` is unset.
+`redis-queue`, `etcd`, plus the BullMQ `worker` and `bull-board` (http://127.0.0.1:3100, basic
+auth). The one-shot `migrate` job applies the schema as the owner role before any `api-*`
+starts. Secrets are required via `server/.env` (see `.env.example`); `docker-compose.yml` fails
+fast if `POSTGRES_PASSWORD`, `POS_APP_PASSWORD`, `REDIS_PASSWORD`, `BULL_BOARD_PASSWORD` or
+`ETCD_ROOT_PASSWORD` is unset.
 
-**Only Nginx (80/443) and Bull-Board (loopback 3100) are reachable from the host.** Postgres
-and both Redis publish no port at all in `docker-compose.yml` — they are reachable only over
-the compose network, and both Redis require `AUTH` (`--requirepass`, password carried in
-`REDIS_*_URL`). Tools that run outside Docker need the dev overlay, which publishes
-5432 / 6379 / 6380 on `127.0.0.1`:
+**Only Nginx (80/443) and Bull-Board (loopback 3100) are reachable from the host.** Postgres,
+both Redis and `etcd` publish no port at all in `docker-compose.yml` — they are reachable only
+over the compose network, and both Redis and `etcd` require auth (Redis: `--requirepass`,
+password carried in `REDIS_*_URL`; etcd: RBAC with a root user, password in
+`ETCD_ROOT_PASSWORD` — see *Dynamic config (etcd, #64/#66)* below). Tools that run outside
+Docker need the dev overlay, which publishes 5432 / 6379 / 6380 on `127.0.0.1`:
 
 ```
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait postgres redis-cache redis-queue
@@ -103,6 +105,77 @@ passes only `success`/`skipped` and fails on anything else. `flutter.yml` has th
 `down`, append the class to `MIGRATIONS` in `src/db/data-source.ts`, and if it adds a table put
 the name in `TENANT_SCOPED_TABLES` (RLS + grants are asserted per table by `test/schema.e2e-spec.ts`,
 so a missing entry fails the suite). Run `pnpm build && pnpm db:migrate`, then rebuild the image.
+
+## Dynamic config (etcd, #64/#66)
+
+One key, `/pos/config/log_level`, and nothing else — no business data, no secrets. PostgreSQL
+stays the source of truth for anything a shop's day depends on (ADR-0013, `07_CICD_DEPLOY.md`
+§8). This is the store side (#64); `src/config/runtime-config.service.ts` (#66, merged first)
+is the consumer that reads it at boot and watches it live.
+
+- `etcd` runs on the compose network only — no `ports:`, same as Postgres/Redis. `x-app-env`
+  gives every api/worker instance `ETCD_URL=http://etcd:2379` (not a secret — an internal
+  compose DNS name) and `ETCD_ROOT_PASSWORD` (from `.env`, fails fast if unset, exactly like
+  the other datastore passwords) so `RuntimeConfigService` can authenticate.
+- **The app must boot without etcd.** `RuntimeConfigService` logs one warning and keeps the
+  `LOG_LEVEL` environment value if etcd is unreachable — there is no `depends_on` from any
+  `api-*`/`worker` service onto `etcd` or `etcd-init`, deliberately, so a slow or crashed store
+  can never hold up the app.
+- Image: `gcr.io/etcd-development/etcd:v3.6.12` — the etcd project's own official image, tag-
+  pinned like every other image in this file, so a CVE is answered by bumping the tag (the
+  repo's "bump, never suppress" rule) rather than by a frozen vendor rebuild with nothing to
+  bump to. It still serves the v3 gRPC-gateway HTTP API `RuntimeConfigService` talks to with
+  plain `fetch` (`/v3/kv/range`, `/v3/watch`; ADR-0013 rules out the `etcd3` package — CJS +
+  grpc-js on an ESM build) — verified directly against this exact tag with `curl`, since the
+  gateway's removal only affects some later etcd releases and guessing which ones from a
+  changelog is exactly how this file got it wrong once already.
+- This official image ships no shell — just the `etcd`/`etcdctl`/`etcdutl` binaries — and etcd
+  has no `docker-entrypoint-initdb.d`-style hook the way `docker/postgres/init/` uses, so
+  bootstrapping the root user and enabling RBAC is a separate one-shot `etcd-init` job
+  (`docker/etcd/etcd-init.sh`, image `curlimages/curl`), the same shape as `certgen`
+  bootstrapping the TLS cert. It drives etcd's HTTP API directly (`/v3/auth/user/add`,
+  `/v3/auth/role/add`, `/v3/auth/user/grant`, `/v3/auth/enable`), then **asserts** the result —
+  root authenticates, an anonymous request is refused — rather than trusting the bootstrap
+  calls succeeded. It is idempotent: re-run against an already-bootstrapped volume (a restart,
+  not a fresh one) short-circuits at the first authenticate call.
+- `etcdctl endpoint health` needs credentials once auth is enabled (it performs a linearizable
+  read) — the healthcheck sets `ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD` as an environment
+  variable so the password never lands in a process argument, same reasoning as
+  `REDISCLI_AUTH` for Redis. This is harmless before `etcd-init` has run (auth disabled: etcd
+  does not check credentials it isn't enforcing yet).
+- 🔴 **The root password is applied only once, when `etcd-init` first bootstraps the volume.**
+  `ETCD_ROOT_PASSWORD` in `.env` is not kept in sync with what etcd actually holds — changing
+  it later does **not** rotate the stored password. Tested directly: with a changed
+  `ETCD_ROOT_PASSWORD` and the same `etcd-data` volume, `etcd`'s own healthcheck starts failing
+  auth (`"authentication failed, invalid user ID or password"` in its health log) since the
+  healthcheck now presents the new value against the old stored one, and a subsequent
+  `etcd-init` run correctly fails loud (`root cannot authenticate`, exit 1) rather than
+  papering over it — but nothing depends on `etcd-init` succeeding, so this is visible in
+  `docker compose ps`/logs, never in the API's own health check. Meanwhile
+  `RuntimeConfigService` also cannot authenticate with the new value and fails open exactly as
+  it does with no etcd at all: one warning, `LOG_LEVEL` from the environment, then retries with
+  backoff (1–30 s, logged at debug after the first warning — #120) that keep failing until the password matches.
+  To actually rotate it: `etcdctl user passwd root` against the running store (out of scope
+  here — no ticket owns it yet), or reset the `etcd-data` volume and let `etcd-init` re-bootstrap.
+- Verify by hand — write and read with root credentials **on the etcd container** (its
+  environment already carries `ETCDCTL_USER`), then prove the refusal from a **separate**
+  container on the compose network so it starts with no credentials of its own (`docker compose
+  exec etcd etcdctl …` would inherit the first container's `ETCDCTL_USER` and wrongly succeed):
+  ```
+  docker compose exec etcd etcdctl --endpoints=http://127.0.0.1:2379 put /pos/config/log_level debug
+  docker compose exec etcd etcdctl --endpoints=http://127.0.0.1:2379 get /pos/config/log_level
+
+  docker run --rm --network <project>_default --entrypoint etcdctl \
+    gcr.io/etcd-development/etcd:v3.6.12 --endpoints=http://etcd:2379 get /pos/config/log_level
+  # → refused: "rpc error: code = InvalidArgument desc = etcdserver: user name is empty"
+  ```
+  (`<project>_default` is `srisurart-pos_default` for this stack's own network; `docker compose
+  exec -e ETCDCTL_USER= etcd etcdctl …` is an equivalent one-liner if a second container isn't
+  convenient — both were verified to refuse identically.) Then watch the running API's logs
+  pick up the change within a few seconds (#66).
+- Seeding the key on a fresh deploy is `cd.2`'s job, not this one's — this ships an empty,
+  working store; `RuntimeConfigService` simply keeps the environment `LOG_LEVEL` until a value
+  is written.
 
 ## Layout
 
@@ -1048,18 +1121,24 @@ Redis, mints access tokens from a per-run RSA key pair, and resets one tenant pe
 
 - `redis-cache` = `allkeys-lru`, no persistence. `redis-queue` = `noeviction` + AOF. Two processes.
 - Both Redis run with `--requirepass`; an unauthenticated client cannot read a cache entry or
-  `FLUSHALL` the queue even from inside the compose network.
-- Postgres and both Redis publish **no** host port; only `docker-compose.dev.yml` (dev/CI) does.
+  `FLUSHALL` the queue even from inside the compose network. `etcd` runs with RBAC auth on
+  (`ETCD_ROOT_PASSWORD`); an unauthenticated client is refused (#64).
+- Postgres, both Redis and `etcd` publish **no** host port; only `docker-compose.dev.yml`
+  (dev/CI) does.
 - Bull-Board requires basic auth and is bound to host loopback only (Nginx does not proxy it —
   on the VM reach it over an SSH tunnel); `/platform/*` is refused by Nginx from any non-private
   source address.
 - `/health/live` does no I/O. `/health/ready` returns `503 NOT_READY` naming the failed
-  dependency. Nginx fails over only on connection errors, never on the app's own 5xx.
+  dependency — Postgres and both Redis only. `etcd` is deliberately **not** part of that check:
+  the whole point of `RuntimeConfigService`'s fail-open design (#66) is that an unreachable
+  store degrades logging, not availability, and health/readiness must not say otherwise.
+  Nginx fails over only on connection errors, never on the app's own 5xx.
 - `SIGTERM` drains: Nest closes the listener, in-flight requests finish, then pools close.
   Nginx retries idempotent requests on the next instance (`proxy_next_upstream error timeout`).
 - Every request carries `X-Correlation-ID` (client's, else Nginx `$request_id`) into the JSON
   log line and back out in the response. Request bodies are never logged.
-- `mem_limit` per container totals ≈ 3.0 GB; `max_connections=100`, pools 3×15 + 5 = 50.
+- `mem_limit` per container totals ≈ 3.3 GB (includes `etcd`'s 256m); `max_connections=100`,
+  pools 3×15 + 5 = 50.
 - The app connects as `pos_app` (`NOSUPERUSER NOBYPASSRLS`, not the table owner) so RLS
   cannot be bypassed by accident. Migrations run as `postgres`, once, before the app starts.
 

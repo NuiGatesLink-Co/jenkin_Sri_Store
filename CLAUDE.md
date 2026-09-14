@@ -611,7 +611,7 @@ the void path or the returns path.
   resets only on a delivered event. The first cut reset on HTTP 200 and broke out on `done`, which looped
   2,001 watches in 50 ms in a probe. The watch resumes at the last seen revision + 1.
 - **Still open:** the audited IP is the client-controlled leftmost `X-Forwarded-For` entry; PR #113 (#64)
-  still conflicts with `main`; #121 and #124 are unstarted.
+  was merged up to `main` on 2026-09-14 but still needs `ETCD_ROOT_PASSWORD` in `DEMO_ENV_FILE`; #121 and #124 are unstarted.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
