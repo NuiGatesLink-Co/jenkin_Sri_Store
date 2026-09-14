@@ -8,6 +8,11 @@ export interface AppConfig {
   dbPoolSize: number;
   redisCacheUrl: string;
   redisQueueUrl: string;
+  /**
+   * ioredis `commandTimeout` for the app's own Redis clients (#140). A timed-out command
+   * fails open exactly like a dropped connection. Not applied to BullMQ's connections.
+   */
+  redisCommandTimeoutMs: number;
   jwtPlatformSecret: string;
   jwtTenantSecret: string;
   /** Required only for API instances handling /auth/* (ADR-0009). */
@@ -30,6 +35,20 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
   if (!v) throw new Error(`Missing required environment variable ${name}`);
   return v;
+}
+
+/**
+ * A positive integer, or `fallback` when unset. Refuses `0` and garbage outright: ioredis
+ * takes any number as a timeout, so `0` or `NaN` would time every command out at once.
+ */
+function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw new Error(`${name} must be a positive integer (milliseconds), got '${raw}'`);
+  }
+  return n;
 }
 
 function parsePublicKeys(raw: string): string[] {
@@ -65,6 +84,7 @@ export function loadConfig(env = process.env): AppConfig {
     dbPoolSize: Number(env.DB_POOL_SIZE ?? 5),
     redisCacheUrl: required(env, 'REDIS_CACHE_URL'),
     redisQueueUrl: required(env, 'REDIS_QUEUE_URL'),
+    redisCommandTimeoutMs: positiveInt(env, 'REDIS_COMMAND_TIMEOUT_MS', 1000),
     jwtPlatformSecret: env.JWT_PLATFORM_SECRET ?? 'dev-only-platform-secret',
     jwtTenantSecret: env.JWT_TENANT_SECRET ?? 'dev-only-tenant-secret',
     jwtPrivateKey: isApi ? required(env, 'JWT_PRIVATE_KEY') : undefined,

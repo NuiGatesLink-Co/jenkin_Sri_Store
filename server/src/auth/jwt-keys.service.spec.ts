@@ -31,6 +31,7 @@ describe('JwtSigner & JwtVerifier', () => {
       dbPoolSize: 5,
       redisCacheUrl: 'redis://dummy',
       redisQueueUrl: 'redis://dummy',
+      redisCommandTimeoutMs: 200,
       jwtPlatformSecret: 'dummy-platform-secret',
       jwtTenantSecret: 'dummy-tenant-secret',
       jwtPrivateKey: privateKeyPem,
