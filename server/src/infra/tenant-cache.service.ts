@@ -14,7 +14,12 @@ import { REDIS_CACHE } from './redis.module.js';
  * each. `02_API_SCREENS.md §4.2/§5` name the reads: `GET /products` (+ `/:id`),
  * `GET /settings`, `GET /customers`, `GET /mechanics`.
  */
-export type CacheNamespace = 'products' | 'settings' | 'customers' | 'mechanics';
+export type CacheNamespace =
+  | 'products'
+  | 'categories'
+  | 'settings'
+  | 'customers'
+  | 'mechanics';
 
 /**
  * TTL per namespace: §5 for products (300 s ± 60 s) and settings (3600 s), §4.2 for
@@ -23,6 +28,7 @@ export type CacheNamespace = 'products' | 'settings' | 'customers' | 'mechanics'
  */
 export const CACHE_TTL: Record<CacheNamespace, { base: number; jitter: number }> = {
   products: { base: 300, jitter: 60 },
+  categories: { base: 3600, jitter: 360 },
   settings: { base: 3600, jitter: 360 },
   customers: { base: 60, jitter: 6 },
   mechanics: { base: 60, jitter: 6 },
