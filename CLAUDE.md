@@ -677,6 +677,16 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   (libuv#5107). Use Node **≥ 24.16.0** on Windows dev machines; e2e setup warns. CI (Linux) is unaffected.
   🔴 **Never edit files under `node_modules` for debugging** — pnpm hard-links them from one store, so the edit
   leaks into every worktree and the main checkout (it did, during #160).
+- **Merged 2026-09-15 (tx.* migration, #142 closed):** #149 → PR #167, #150 → PR #168, #151 → PR #170,
+  #152 → PR #171, #153 → PR #172, #154 → PR #174. Handler-scoped transactions are in force (ADR-0003 addendum
+  **Accepted**); the longest void transaction went ~112 ms → 13–24 ms, flat latency. Read
+  `docs/handoff_log/tx-migration-2026-09-15.md` before touching `common/request-context.ts`, `TenantService`,
+  `idempotency/` or the void path. 🔴 Three architecture specs now gate the seam — `tenant-door.spec.ts` (who may
+  hold a pool / name a tenant), `tenant-wrapper.spec.ts` (every public context reader goes through `runTx`) and
+  `idempotency-routes.spec.ts` (the 38 pinned claiming routes, claim first, `successCode` = `@HttpCode`); change
+  them deliberately, never to get green. 🔴 A new write route with **no** claim at all is still invisible to them.
+  Follow-ups filed: #169 (`idem.cleanup` without a tenant deletes 0 rows under RLS), #173 (cached reads open a
+  transaction before checking Redis), #175 (role/no-PIN void-denial audit rows can drop in a burst).
 - **Still open:** #67 (needs the owner's go-ahead); #145 Thai wording for
   `SALE_NOT_IN_OPEN_SHIFT` (owner); #163 device-management decisions (owner); branch protection on `main`
   (owner runs 07 §4); `ApiClient` has no request timeout (unticketed). The repo's only long-lived branches are
