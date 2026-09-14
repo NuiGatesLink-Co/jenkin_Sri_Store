@@ -1,10 +1,19 @@
 import { createHash } from 'node:crypto';
-import { Inject, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  ServiceUnavailableException,
+} from '@nestjs/common';
+import type { Response } from 'express';
 import type { Redis } from 'ioredis';
 import type { Logger } from 'pino';
 import type { EntityManager } from 'typeorm';
+import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { LOGGER } from '../infra/logger.provider.js';
 import { REDIS_CACHE } from '../infra/redis.module.js';
+import type { IdempotencyParams } from './idempotency.runner.js';
 
 /** Express lower-cases header names. */
 export const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
@@ -82,7 +91,69 @@ export class IdempotencyService {
   constructor(
     @Inject(REDIS_CACHE) private readonly cache: Redis,
     @Inject(LOGGER) private readonly logger: Logger,
+    private readonly tenants: TenantService,
   ) {}
+
+  /**
+   * Makes one write idempotent (02_API_SCREENS.md §1.4): claims `params.key`, runs `work`
+   * if this request owns it, and records the answer — claim, work and completion in ONE
+   * transaction, so the record and the work it describes commit together or not at all.
+   * A record committed without its work, or work committed without its record, is a bill
+   * charged twice with every response a 200.
+   *
+   * The controller calls it with the WHOLE handler body as `work`, which is exactly where
+   * `IdempotencyInterceptor` sat (tx.3, #152): after the guards, before the handler's
+   * first statement. `runTx` opens the transaction here — or, until tx.4, joins the
+   * middleware's — and every service `runTx` inside `work` joins it, so the claim is the
+   * transaction's first statement and nothing a service reads or locks comes before it.
+   * A service that calls another write path (`QuotesService.convert → SalesService.create`)
+   * therefore never claims twice: only controllers call this.
+   *
+   * A replay sets the stored status on `res` (the route's `@Res({ passthrough: true })`)
+   * and returns the stored body; the global `EnvelopeInterceptor` wraps both alike.
+   */
+  runIdempotent<T>(
+    params: IdempotencyParams,
+    res: Response,
+    work: () => T | Promise<T>,
+  ): Promise<T> {
+    return this.tenants.runTx(() => this.runIdempotentIn(params, res, work));
+  }
+
+  private async runIdempotentIn<T>(
+    params: IdempotencyParams,
+    res: Response,
+    work: () => T | Promise<T>,
+  ): Promise<T> {
+    const { tenantId, manager } = currentRequestContext();
+    const claim = await this.claim(manager, {
+      tenantId,
+      key: params.key,
+      endpoint: params.endpoint,
+      requestHash: params.requestHash,
+    });
+
+    if (claim.outcome === 'reused') {
+      throw new ConflictException({
+        code: 'IDEMPOTENCY_KEY_REUSED',
+        message: 'Idempotency-Key already used for a different request',
+      });
+    }
+
+    if (claim.outcome === 'replay') {
+      res.status(claim.response.code);
+      return claim.response.body as T;
+    }
+
+    const body = await work();
+    // Same manager, same transaction as the claim and the work, before it commits.
+    await this.complete(manager, {
+      tenantId,
+      key: params.key,
+      response: { code: params.successCode, body },
+    });
+    return body;
+  }
 
   /**
    * A stable fingerprint of the request body, so the same key against a changed
