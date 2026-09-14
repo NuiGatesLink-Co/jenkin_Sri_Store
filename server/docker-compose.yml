@@ -1,14 +1,15 @@
 # Phase-1 stack (03_ARCHITECTURE.md §8, done-criterion 1):
-#   Nginx → NestJS ×3 → PostgreSQL, redis-cache, redis-queue; + worker + Bull-Board.
+#   Nginx → NestJS ×3 → PostgreSQL, redis-cache, redis-queue, etcd; + worker + Bull-Board.
 # One command from a clean clone:  cp .env.example .env && docker compose up -d --build
 # Secrets must be defined in server/.env (see .env.example).
 #
-# No datastore port is published to the host here: Postgres and both Redis talk only over
-# the compose network. Local dev and CI add the loopback ports with the dev overlay:
+# No datastore port is published to the host here: Postgres, both Redis and etcd talk only
+# over the compose network. Local dev and CI add the loopback ports with the dev overlay:
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 # Never add that overlay on the VM.
 #
-# Memory budget (faculty VM 4 vCPU / 6 GB): 1024 + 2×256 + 3×384 + 256 + 128 + 64 ≈ 3.0 GB.
+# Memory budget (faculty VM 4 vCPU / 6 GB): 1024 + 2×256 + 3×384 + 256 + 128 + 64 + 256 (etcd)
+# ≈ 3.3 GB.
 # Connections: max_connections=100 → 3 api × 15 + worker × 5 = 50 ≤ 80 (80%).
 
 name: srisurart-pos
@@ -18,6 +19,11 @@ x-app-env: &app-env
   REDIS_CACHE_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis-cache:6379
   REDIS_QUEUE_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis-queue:6379
   LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Dynamic config (#64/#66, 07_CICD_DEPLOY.md §8): the URL is not a secret (internal
+  # compose DNS name), the root password is — same variable the `etcd` service below
+  # bootstraps auth with, so RuntimeConfigService authenticates against the same store.
+  ETCD_URL: http://etcd:2379
+  ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
 
 # Only api-1 carries `build:`; every other process reuses the image it produced
 # (parallel builds of one tag race on the name).
@@ -209,6 +215,41 @@ services:
       timeout: 3s
       retries: 10
 
+  # KV storage for dynamic, non-secret config only (ADR-0013, 07_CICD_DEPLOY.md §8) — today
+  # that is one key, `/pos/config/log_level` (RuntimeConfigService, #66). PostgreSQL stays the
+  # source of truth for anything a shop's day depends on; nothing business-shaped goes here.
+  # No `ports:` — reachable only inside the compose network, same as Postgres/Redis.
+  #
+  # Pinned to the etcd 3.5 line, not 3.6+: RuntimeConfigService talks to etcd's v3
+  # gRPC-gateway HTTP API (`/v3/kv/range`, `/v3/watch`), which later etcd releases drop.
+  # `bitnamilegacy/etcd` (not `bitnami/etcd`, discontinued 2025) is the still-pullable image
+  # with a built-in `ETCD_ROOT_PASSWORD` bootstrap (creates the root user + `auth enable` once
+  # against the data volume — idempotent across restarts); a bare etcd image ships no shell to
+  # script that bootstrap with, and no `docker-entrypoint-initdb.d`-style hook exists for it
+  # the way `../postgres/init/` uses for Postgres. It is frozen (no further security patches
+  # from upstream) — swap it for a maintained equivalent if one appears; see the PR notes.
+  etcd:
+    image: bitnamilegacy/etcd:3.5.21-debian-12-r0
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      ALLOW_NONE_AUTHENTICATION: "no"
+      ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
+      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
+      # `endpoint health` performs a linearizable read, which etcd's RBAC refuses
+      # anonymously once auth is enabled ("user name is empty") — ETCDCTL_USER (not a CLI
+      # arg) authenticates the healthcheck below without the password landing in a command
+      # line, same reasoning as REDISCLI_AUTH for Redis.
+      ETCDCTL_USER: root:${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
+    volumes:
+      - etcd-data:/bitnami/etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
 # Fixed subnet so the api instances can hold static addresses (see nginx.conf).
 networks:
   default:
@@ -219,4 +260,5 @@ networks:
 volumes:
   pgdata:
   redis-queue-data:
+  etcd-data:
   certs:

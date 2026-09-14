@@ -20,16 +20,18 @@ curl -k https://localhost/health/ready    # checks Postgres + both Redis
 ```
 
 That is the whole stack: Nginx (TLS, self-signed) → `api-1..3` → PostgreSQL, `redis-cache`,
-`redis-queue`, plus the BullMQ `worker` and `bull-board` (http://127.0.0.1:3100, basic auth).
-The one-shot `migrate` job applies the schema as the owner role before any `api-*` starts.
-Secrets are required via `server/.env` (see `.env.example`); `docker-compose.yml` fails fast
-if `POSTGRES_PASSWORD`, `POS_APP_PASSWORD`, `REDIS_PASSWORD` or `BULL_BOARD_PASSWORD` is unset.
+`redis-queue`, `etcd`, plus the BullMQ `worker` and `bull-board` (http://127.0.0.1:3100, basic
+auth). The one-shot `migrate` job applies the schema as the owner role before any `api-*`
+starts. Secrets are required via `server/.env` (see `.env.example`); `docker-compose.yml` fails
+fast if `POSTGRES_PASSWORD`, `POS_APP_PASSWORD`, `REDIS_PASSWORD`, `BULL_BOARD_PASSWORD` or
+`ETCD_ROOT_PASSWORD` is unset.
 
-**Only Nginx (80/443) and Bull-Board (loopback 3100) are reachable from the host.** Postgres
-and both Redis publish no port at all in `docker-compose.yml` — they are reachable only over
-the compose network, and both Redis require `AUTH` (`--requirepass`, password carried in
-`REDIS_*_URL`). Tools that run outside Docker need the dev overlay, which publishes
-5432 / 6379 / 6380 on `127.0.0.1`:
+**Only Nginx (80/443) and Bull-Board (loopback 3100) are reachable from the host.** Postgres,
+both Redis and `etcd` publish no port at all in `docker-compose.yml` — they are reachable only
+over the compose network, and both Redis and `etcd` require auth (Redis: `--requirepass`,
+password carried in `REDIS_*_URL`; etcd: RBAC with a root user, password in
+`ETCD_ROOT_PASSWORD` — see *Dynamic config (etcd, #64/#66)* below). Tools that run outside
+Docker need the dev overlay, which publishes 5432 / 6379 / 6380 on `127.0.0.1`:
 
 ```
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --wait postgres redis-cache redis-queue
@@ -85,6 +87,48 @@ Redis (with the dev overlay, so the runner can reach them) and applying the migr
 `down`, append the class to `MIGRATIONS` in `src/db/data-source.ts`, and if it adds a table put
 the name in `TENANT_SCOPED_TABLES` (RLS + grants are asserted per table by `test/schema.e2e-spec.ts`,
 so a missing entry fails the suite). Run `pnpm build && pnpm db:migrate`, then rebuild the image.
+
+## Dynamic config (etcd, #64/#66)
+
+One key, `/pos/config/log_level`, and nothing else — no business data, no secrets. PostgreSQL
+stays the source of truth for anything a shop's day depends on (ADR-0013, `07_CICD_DEPLOY.md`
+§8). This is the store side (#64); `src/config/runtime-config.service.ts` (#66, merged first)
+is the consumer that reads it at boot and watches it live.
+
+- `etcd` runs on the compose network only — no `ports:`, same as Postgres/Redis. Auth is on:
+  `ALLOW_NONE_AUTHENTICATION=no` + `ETCD_ROOT_PASSWORD` (from `.env`, fails fast if unset,
+  exactly like the other datastore passwords). `x-app-env` gives every api/worker instance
+  `ETCD_URL=http://etcd:2379` (not a secret — an internal compose DNS name) and the same
+  `ETCD_ROOT_PASSWORD` so `RuntimeConfigService` can authenticate.
+- **The app must boot without etcd.** `RuntimeConfigService` logs one warning and keeps the
+  `LOG_LEVEL` environment value if etcd is unreachable — there is no `depends_on` from any
+  `api-*`/`worker` service onto `etcd`, deliberately, so a slow or crashed store can never hold
+  up the app.
+- Image: `bitnamilegacy/etcd:3.5.21-debian-12-r0`, pinned to the **3.5** line — etcd 3.6+ drops
+  the v3 gRPC-gateway HTTP API (`/v3/kv/range`, `/v3/watch`) that `RuntimeConfigService` talks to
+  with plain `fetch` (ADR-0013 rules out the `etcd3` package: CJS + grpc-js on an ESM build).
+  `bitnami/etcd` (no image with that plain name) was discontinued in 2025; `bitnamilegacy/etcd`
+  is the still-pullable, but frozen (no further security patches), successor — it is the only
+  free image found that bootstraps RBAC auth from an env var the way both Redis containers do
+  from `REDIS_PASSWORD`. A bare etcd image ships no shell to script that bootstrap with by hand,
+  and etcd has no `docker-entrypoint-initdb.d`-style hook the way `docker/postgres/init/` uses.
+- `etcdctl endpoint health` needs credentials once auth is enabled (it performs a linearizable
+  read) — the healthcheck sets `ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD` as an environment
+  variable so the password never lands in a process argument, same reasoning as
+  `REDISCLI_AUTH` for Redis.
+- Verify by hand from the compose network:
+  ```
+  docker compose exec -e ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD etcd \
+    etcdctl --endpoints=http://127.0.0.1:2379 put /pos/config/log_level debug
+  docker compose exec -e ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD etcd \
+    etcdctl --endpoints=http://127.0.0.1:2379 get /pos/config/log_level
+  docker compose exec etcd etcdctl --endpoints=http://127.0.0.1:2379 get /pos/config/log_level
+  # → refused: "rpc error: code = InvalidArgument desc = etcdserver: user name is empty"
+  ```
+  and watch the running API's logs pick up the change within a few seconds (#66).
+- Seeding the key on a fresh deploy is `cd.2`'s job, not this one's — this ships an empty,
+  working store; `RuntimeConfigService` simply keeps the environment `LOG_LEVEL` until a value
+  is written.
 
 ## Layout
 
@@ -662,18 +706,24 @@ Redis, mints access tokens from a per-run RSA key pair, and resets one tenant pe
 
 - `redis-cache` = `allkeys-lru`, no persistence. `redis-queue` = `noeviction` + AOF. Two processes.
 - Both Redis run with `--requirepass`; an unauthenticated client cannot read a cache entry or
-  `FLUSHALL` the queue even from inside the compose network.
-- Postgres and both Redis publish **no** host port; only `docker-compose.dev.yml` (dev/CI) does.
+  `FLUSHALL` the queue even from inside the compose network. `etcd` runs with RBAC auth on
+  (`ETCD_ROOT_PASSWORD`); an unauthenticated client is refused (#64).
+- Postgres, both Redis and `etcd` publish **no** host port; only `docker-compose.dev.yml`
+  (dev/CI) does.
 - Bull-Board requires basic auth and is bound to host loopback only (Nginx does not proxy it —
   on the VM reach it over an SSH tunnel); `/platform/*` is refused by Nginx from any non-private
   source address.
 - `/health/live` does no I/O. `/health/ready` returns `503 NOT_READY` naming the failed
-  dependency. Nginx fails over only on connection errors, never on the app's own 5xx.
+  dependency — Postgres and both Redis only. `etcd` is deliberately **not** part of that check:
+  the whole point of `RuntimeConfigService`'s fail-open design (#66) is that an unreachable
+  store degrades logging, not availability, and health/readiness must not say otherwise.
+  Nginx fails over only on connection errors, never on the app's own 5xx.
 - `SIGTERM` drains: Nest closes the listener, in-flight requests finish, then pools close.
   Nginx retries idempotent requests on the next instance (`proxy_next_upstream error timeout`).
 - Every request carries `X-Correlation-ID` (client's, else Nginx `$request_id`) into the JSON
   log line and back out in the response. Request bodies are never logged.
-- `mem_limit` per container totals ≈ 3.0 GB; `max_connections=100`, pools 3×15 + 5 = 50.
+- `mem_limit` per container totals ≈ 3.3 GB (includes `etcd`'s 256m); `max_connections=100`,
+  pools 3×15 + 5 = 50.
 - The app connects as `pos_app` (`NOSUPERUSER NOBYPASSRLS`, not the table owner) so RLS
   cannot be bypassed by accident. Migrations run as `postgres`, once, before the app starts.
 

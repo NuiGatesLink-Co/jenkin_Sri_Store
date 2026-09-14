@@ -21,7 +21,7 @@ ticket ใต้ #10: #61 `ci.4` · #62 `ci.5` · #63 `ops.1` · #64 `ops.2` · 
 | Security Scan | Trivy (fs + **image**) · `pnpm audit` · OSV-Scanner | job `audit`, `deps-audit`, และ scan ใน job build image | fs ✅ · image ฝั่ง server: PR #70 (#61) |
 | Package / Storage | Docker + **GHCR** (public) | job build image ทั้งสอง workflow → `ghcr.io/nuimanlp/srisurart-pos-server`, `…-web` | server: PR #70 (#61, tarball artefact ถูกยกเลิก) · web: PR #69 (#62) |
 | Config & Deploy (CD) | **Ansible** ผ่าน SSH | `deploy/ansible/`, `.github/workflows/deploy.yml` | ยังไม่มี |
-| KV Storage | **etcd** | service ใน compose + `RuntimeConfigService` ฝั่ง NestJS | ยังไม่มี |
+| KV Storage | **etcd** | service ใน compose + `RuntimeConfigService` ฝั่ง NestJS | ✅ service etcd + auth (#64) · `RuntimeConfigService` merge มาก่อนแล้ว (#66, PR #109) |
 | Monitoring & Operate | Node Exporter + Prometheus + Grafana | `deploy/compose/monitoring.yml`, dashboard JSON | ยังไม่มี |
 
 **สิ่งที่ตั้งใจไม่ทำ:** Jenkins (มีเครื่องยนต์อยู่แล้ว), Kubernetes (VM เดียว), Alertmanager,
@@ -114,7 +114,7 @@ GitHub Environment `demo` ถือ secret ทั้งหมด (ไม่ม�
 | `DEMO_SSH_HOST`, `DEMO_SSH_USER`, `DEMO_SSH_KEY` | Ansible เข้าเครื่อง (user แรกต้องมี sudo — เจ้าของโปรเจกต์ใส่เอง) |
 | `DEMO_ENV_FILE` | เนื้อหา `server/.env` ทั้งไฟล์ (Postgres/Redis password, JWT keys, `CORS_ORIGINS`, Grafana admin, etcd root) — Ansible template ลง VM ด้วย mode 0600 |
 
-**งบ RAM บน VM** (mem_limit ปัจจุบันรวม 3,136 MB): เพิ่ม etcd 256m · Prometheus 512m
+**งบ RAM บน VM** (mem_limit ปัจจุบันรวม 3,392 MB — รวม etcd 256m แล้ว, #64): เพิ่ม Prometheus 512m
 (`--storage.tsdb.retention.time=7d --storage.tsdb.retention.size=2GB`) · Grafana 256m ·
 node-exporter 64m → **≈ 4.2 GB จาก 6 GB** — ทุกตัวต้องมี `mem_limit` ห้ามปล่อยว่าง
 
@@ -197,15 +197,29 @@ on:
 
 ## 8. etcd — dynamic config (ไม่ใช่ข้อมูล ไม่ใช่ความลับ)
 
-* service `etcd` บน compose network เท่านั้น, auth เปิด (root password จาก `.env`), `mem_limit 256m`
+สถานะ 2026-09-14: **ทั้งสองฝั่งอยู่บน `main` แล้ว** — service (#64) และ `RuntimeConfigService` (#66,
+merge มาก่อนตามแผนใน PR #109) มาบรรจบกันที่ `x-app-env` ใน `docker-compose.yml`
+
+* service `etcd` บน compose network เท่านั้น (ไม่มี `ports:`), auth เปิด
+  (`ALLOW_NONE_AUTHENTICATION=no` + root password จาก `.env` ตัวแปร `ETCD_ROOT_PASSWORD` — ตัว
+  เดียวกับที่ `x-app-env` ส่งให้ api/worker ทุกตัวใช้ authenticate), `mem_limit 256m`
+* image: `bitnamilegacy/etcd:3.5.21-debian-12-r0` — ปักหมุดสาย **3.5** เพราะ etcd 3.6+ ตัด
+  gRPC-gateway HTTP API ทิ้ง (ดูข้อถัดไป) · `bitnami/etcd` เฉย ๆ ถูกเลิกให้ดึงฟรีตั้งแต่ปี 2025,
+  `bitnamilegacy/etcd` คือตัวที่ยังดึงได้แต่ **frozen** (ไม่มี patch ความปลอดภัยเพิ่มแล้ว) — เลือกเพราะ
+  เป็น image ฟรีตัวเดียวที่ bootstrap RBAC ด้วย env var ได้แบบเดียวกับที่ทั้งสอง Redis ทำด้วย
+  `REDIS_PASSWORD`; image เปล่าของ etcd เองไม่มี shell ให้ script การสร้าง root user เอง และ etcd
+  ก็ไม่มี hook แบบ `docker-entrypoint-initdb.d` ที่ `docker/postgres/init/` ใช้
 * ฝั่ง NestJS: `RuntimeConfigService` อ่านตอน boot แล้ว **watch** ผ่าน gRPC-gateway HTTP ของ etcd v3
   (`/v3/kv/range`, `/v3/watch`) ด้วย `fetch` — ไม่ใช้แพ็กเกจ `etcd3` (CJS + grpc-js บน build ESM)
 * **ไม่มี etcd แอปต้อง boot ได้** — log เตือนครั้งเดียว ใช้ค่าจาก env · การเช็ค `required()` ของ env เดิม
-  ไม่เปลี่ยน (smoke ใน `server.yml` พึ่งพฤติกรรมนั้น)
+  ไม่เปลี่ยน (smoke ใน `server.yml` พึ่งพฤติกรรมนั้น) · ไม่มี `depends_on` จาก `api-*`/`worker` ไปยัง
+  `etcd` และ `/health/ready` **ไม่** เช็ค etcd ด้วยเหตุผลเดียวกัน (`server/README.md` *Invariants*)
 * key แรกและตัวเดียวในรอบนี้: **`/pos/config/log_level`** (`info`/`debug`) — service ต้องเรียก
-  `logger.level = …` ให้เห็นผลใน log ทันที (สาธิตได้: `etcdctl put` แล้วดู log เปลี่ยน)
+  `logger.level = …` ให้เห็นผลใน log ทันที (สาธิตได้: `etcdctl put` แล้วดู log เปลี่ยน — คำสั่งจริงอยู่ใน
+  `server/README.md` *Dynamic config (etcd, #64/#66)*)
 * **ไม่ทำ:** maintenance mode (ต้องมีข้อความไทยหน้าเคาน์เตอร์ใหม่ — `CLAUDE.md` ห้ามแต่งเอง),
-  ค่า rate limit (ไม่มีผู้ใช้ — ADR-0006 เก็บโควตาใน `tenants.plan`), อะไรก็ตามที่เป็นข้อมูลธุรกิจ
+  ค่า rate limit (ไม่มีผู้ใช้ — ADR-0006 เก็บโควตาใน `tenants.plan`), อะไรก็ตามที่เป็นข้อมูลธุรกิจ ·
+  seed key แรกตอน deploy ยังเป็นของ `cd.2` (#67) ไม่ใช่ของรอบนี้ — #64 ส่งมอบ store เปล่าที่ทำงานได้
 
 ---
 

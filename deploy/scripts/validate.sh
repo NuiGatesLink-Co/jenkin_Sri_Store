@@ -17,6 +17,7 @@ POSTGRES_PASSWORD="dummy_postgres_password" \
 JWT_PRIVATE_KEY="dummy_private_key" \
 JWT_PUBLIC_KEYS='{"dummy":"dummy"}' \
 BULL_BOARD_PASSWORD="dummy_bull_board_password" \
+ETCD_ROOT_PASSWORD="dummy_etcd_password" \
 docker compose -f server/docker-compose.yml -f deploy/compose/vm.override.yml config --quiet
 
 echo "  -> Compose override merges successfully with zero errors."
