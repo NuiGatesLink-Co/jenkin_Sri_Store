@@ -286,7 +286,7 @@ with a second pool connection while the middleware held the first; successes equ
 locally at pool 8, and `test/rate-limit-pool.e2e-spec.ts` pins it — see `server/README.md` rule 1.
 Read `docs/handoff_log/p6.3-shifts-drawer.md` before #30 or a device slice.
 
-🔴 **ADR-0003 was amended 2026-09-10 — the transaction is handler-scoped, not request-wide.** The
+🔴 **ADR-0003 was amended 2026-09-10 — the transaction is to move into the handler (not yet done).** The
 addendum's status is **Proposed** and takes effect only when slice `tx.4` lands; until then the
 middleware → guard → interceptor split that #75 shipped is the in-force mechanism (the 2026-09-11
 review found the first draft banned the very code the PR added).
@@ -303,7 +303,9 @@ is only safe because `runTx(fn)` cannot name a tenant the guard did not authoris
 `TenantService` in the tree today still has the `runTx(tid, fn)` signature, and following it would
 silently restore exactly what ADR-0003 banned, failing as a cross-tenant read that raises nothing.
 The proving prototype is commit `0feaf94` on `worktree-agent-a1756ff02f223b4eb` (never merge it).
-Until `tx.*` lands, `server/README.md` *The request-context seam* still describes the shipped code.
+The slices are tracked as issues #149 → #150 → #151 → #152 → #153 → #154 (parent #142).
+`server/README.md` *The request-context seam* describes both the target shape and the split in force
+until `tx.4` (#153); until then a new `TenantGuard` route must be covered by `TENANT_ROUTES` (the middleware matches by path).
 
 🔴 **The e2e suite cannot tolerate a second concurrent runner on the same database** —
 `test/schema.e2e-spec.ts` tears the schema down and re-applies it. CI is safe (one Postgres per job),

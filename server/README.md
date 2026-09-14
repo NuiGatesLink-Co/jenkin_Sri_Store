@@ -245,23 +245,70 @@ Three decisions the design docs do not cover, made here and recorded in
 
 ### The request-context seam
 
-`src/common/request-context.ts` holds the request's `{ tenantId, manager }`. **ADR-0003
-makes `TenantGuard` (#4) the one component allowed to check tenant status and
-`SET LOCAL app.tenant_id`** — but a guard cannot be the whole story, because
-`canActivate` returns before the handler runs, so it can neither hold that scope open
-across the handler nor commit afterwards. The wiring #4 has to build is a split, and
-ADR-0003 survives it intact because only the guard still touches the tenant:
+`src/common/request-context.ts` holds the request's `{ tenantId, manager }`, and ADR-0003
+makes `TenantGuard` the one component that decides which tenant a request acts as, after
+checking `tenants.status`. This section describes two shapes: the **target** the ADR-0003
+addendum *"ใครตัดสิน กับ ใครลงมือ"* (2026-09-10) chose, and the **split that is in force
+today**. The addendum is **Proposed** and takes effect only when slice `tx.4` (#153) lands.
+Until then the split below is the correct, shipped mechanism, not a deprecated one. The
+migration is sequenced in `docs/Backend_design/adr/0003-handler-scoped-migration-plan.md`
+and tracked as #149 → #150 → #151 → #152 → #153 → #154 (`tx.0`–`tx.5`, parent #142).
+
+#### Target: the transaction lives in the handler (from `tx.4`)
+
+The addendum separates **who decides** the tenant from **who executes** `set_config`:
+
+| | in force today | target |
+|---|---|---|
+| decides the tenant + checks `tenants.status` | `TenantGuard` | `TenantGuard` (unchanged) |
+| where the decision is kept | `app.tenant_id` on the middleware's transaction **and** `setRequestTenant()` | request scope (`AsyncLocalStorage`) via `setRequestTenant()` |
+| runs `set_config('app.tenant_id', …, true)` | `TenantGuard` | `TenantService.runTx(fn)`, reading the tenant from that scope |
+| opens and commits the transaction | middleware opens, interceptor commits | `TenantService.runTx(fn)`, inside the handler |
+
+- 🔴 **`runTx(fn)` never takes a `tid`.** It reads the tenant the guard put in scope and
+  throws if there is none. A `runTx(tid, fn)` shape lets any call site name another shop's
+  uuid and get its rows back with no error, which is the one thing ADR-0003 exists to
+  prevent. `src/common/database/tenant.service.ts` still has `run(tid, fn)` and
+  `runTx(tid, fn)` today, with no caller; `tx.1` (#150) replaces them. Do not add a call
+  site to either.
+- **`runTx` joins, it does not nest.** A `runTx` inside an open transaction (the
+  middleware's, until `tx.4`, or an outer `runTx`) reuses its manager. That is what lets
+  `tx.1`–`tx.3` land with no behaviour change, and it is what stops
+  `closeForRetirement → close()` or `VoidService → SaleReadsService.byId()` from asking
+  for a second connection.
+- **A suspended tenant is still never named.** The guard refuses before
+  `setRequestTenant()`, so `runTx` has no tenant to `set_config` and RLS shows nothing.
+  There is still no separate `TenantInterceptor`.
+- **The footgun that becomes easier to reach for is an injected `DataSource`** (it exists
+  today too: `AuthService` and `VoidService`'s audit hold their own, on purpose). Forgetting `runTx` and calling
+  `currentRequestContext()` still throws (a loud 500). Querying through a bare
+  `DataSource` answers **200 with zero rows**, and an `UPDATE` reports success having
+  changed nothing. `tx.1` adds `src/common/tenant-door.spec.ts`: a source scan that fails
+  when a file outside an allowlist injects `DataSource`, with a reason on each allowlist
+  line. The allowlist is built from today's tree, not from the plan's 12-file count.
+- `tx.4` deletes `RequestContextMiddleware`, `TransactionInterceptor`,
+  `OWNED_BY_INTERCEPTOR`, the `res.on('close')` backstop and `TENANT_ROUTES`, and **adds**
+  `TenantScopeMiddleware` (global, `forRoutes('*')`, touches no DB) so every request still
+  has a scope — without it `setRequestTenant()` throws, `onTransactionCommit` runs its hook
+  immediately instead of after commit, and `invalidateAfterCommit` throws. The guard's
+  status probe moves to a plain pool read (`tenants` has no RLS, and it is then the
+  request's first connection, not a second). Two users of today's request transaction that
+  the 2026-09-10 plan does not name must be carried across by then:
+  `onTransactionCommit` / `TenantCache.invalidateAfterCommit` (post-commit hooks that
+  `TransactionInterceptor` runs today) and `RateLimitService.readPlan` (reads on the request
+  transaction inside a savepoint, #162).
+
+#### In force until `tx.4`: middleware → guard → interceptor
+
+`canActivate` returns before the handler runs, so a guard can neither hold a transaction
+open across the handler nor commit afterwards. #75 therefore shipped a split, and ADR-0003
+holds because only the guard names the tenant:
 
 | stage | does |
 |---|---|
-| middleware | `runInRequestContext({ tenantId, manager }, next)` — opens the transaction and the scope |
-| `TenantGuard` | checks `tenants.status` and `SET LOCAL app.tenant_id` on that manager |
-| interceptor | commits on success, rolls back on error, before the response is sent |
-
-This shape is scheduled for replacement: the 2026-09-10 addendum to ADR-0003
-(*"ใครตัดสิน กับ ใครลงมือ"*) moves the transaction inside the handler, and
-`docs/Backend_design/adr/0003-handler-scoped-migration-plan.md` sequences that as
-`tx.0`–`tx.5` — the split above is what runs until `tx.4` lands.
+| `RequestContextMiddleware` | opens the transaction and the scope: `runInRequestContext({ manager }, next)` |
+| `TenantGuard` | checks `tenants.status` (Redis `t:{tid}:status` first; on a miss, read on that manager), then `set_config('app.tenant_id', …, true)` and `setRequestTenant()` |
+| `TransactionInterceptor` (global, after `EnvelopeInterceptor`) | commits on success, rolls back on error, before the response is sent; then runs `onTransactionCommit` hooks |
 
 **How the tenant is named: `SELECT set_config('app.tenant_id', $1, true)`, never
 `SET LOCAL app.tenant_id = $1`.** `SET` is a utility statement — Postgres does not plan
@@ -274,18 +321,21 @@ until it was covered by `test/auth-refresh.e2e-spec.ts`) and `TenantService.runT
 which `set_config(..., true)` is; `src/common/tenant-scope.spec.ts` scans `src/` so the
 literal form cannot come back.
 
-Nothing in `src/` populates it yet, and `currentRequestContext()` throws rather than
-defaulting — a route without the guard fails closed instead of reading someone's data.
-Built in #19's branch, because every write slice needs it: `RequestContextMiddleware`
-opens the transaction per controller listed in `TENANT_ROUTES` (not globally — a
-transaction per liveness probe is a pool slot spent on nothing), `TenantGuard` names the
-tenant on it *after* the status check, and the globally-bound `TransactionInterceptor`
-commits or rolls back before the response is sent. `currentRequestContext()` fails closed
-twice: outside the scope, and inside it before the guard has named a tenant.
+`currentRequestContext()` throws rather than defaulting, so a route without the guard
+fails closed instead of reading someone's data. It fails closed twice: outside the scope,
+and inside it before the guard has named a tenant. `RequestContextMiddleware` opens the
+transaction only for the routes covered by `TENANT_ROUTES` (`src/app.module.ts`), not
+globally: a transaction per liveness probe is a pool slot spent on nothing. `/auth/*` stays
+out except `GET /auth/me`, because ADR-0009 requires a failed login's audit row to survive
+the rollback (and `/auth/token` would otherwise hold an idle-in-transaction connection
+across its argon2 verify). **Until `tx.4`, a new `TenantGuard` route must be covered by
+`TENANT_ROUTES`**, or the guard finds no request transaction and answers 500. The middleware
+matches by path, not by class: `PurchasingController` is not listed but works, because it
+shares `purchase-orders` with `PurchaseOrdersController`.
 
 A guard that throws never reaches an interceptor, so the response's own `close` event is
 the backstop that rolls back and returns the connection to the pool. `TransactionInterceptor`
-claims the transaction (`qr.data`) as soon as it runs, and the backstop then stands aside:
+claims the transaction (`qr.data[OWNED_BY_INTERCEPTOR]`) as soon as it runs, and the backstop then stands aside:
 Nest does not cancel a handler when the client disconnects, so on a mid-sale abort an
 unclaimed backstop would roll back and release **underneath statements still in flight**,
 handing a live query queue to whichever request took that connection next.
@@ -297,8 +347,9 @@ handing a live query queue to whichever request took that connection next.
    for another is a pool deadlock — they all sit there until `connectionTimeoutMillis`
    fires and all return 500, and the 500s are *other people's requests*, not the one that
    misbehaved. Read through `currentRequestContext().manager`. (`tenants` and
-   `platform_admins` are the two tables with no RLS, so even a status probe can go
-   through it.)
+   `platform_admins` are the two tables with no RLS, so until `tx.4` even a status probe
+   goes through it; in the target the probe is a plain pool read, because it is then the
+   request's first connection.)
 
    Work that genuinely cannot run in the request transaction — today that is exactly one
    call site, `VoidService`'s refusal audit, which must survive the rollback the 403
