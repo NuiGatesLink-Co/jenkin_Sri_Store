@@ -1,12 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import {
   MOVEMENT_COLUMNS,
   movementOut,
   type MovementOut,
   type MovementRow,
 } from '../sales/sales.service.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 /**
  * `GET /movements?productId=&from=&to=` (02_API_SCREENS.md §3.2) — the stock ledger,

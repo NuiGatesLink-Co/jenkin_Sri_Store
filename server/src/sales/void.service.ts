@@ -7,6 +7,7 @@ import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { verifyPassword } from '../common/password.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import { RateLimitService } from '../rate-limit/rate-limit.service.js';
@@ -16,7 +17,6 @@ import {
   type SaleWithItems,
 } from './sale-reads.service.js';
 import { MECHANIC_CREDIT } from './sales.service.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 /** The bill under its own row lock — everything the void has to undo. */
 interface LockedSale {
@@ -70,7 +70,10 @@ export class VoidService {
     return this.tenants.runTx(() => this.voidIn(saleId, actor));
   }
 
-  private async voidIn(saleId: string, actor: VoidActor): Promise<SaleWithItems> {
+  private async voidIn(
+    saleId: string,
+    actor: VoidActor,
+  ): Promise<SaleWithItems> {
     const { tenantId, manager } = currentRequestContext();
 
     await this.assertManagerPin(manager, tenantId, actor, saleId);

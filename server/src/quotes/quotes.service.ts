@@ -8,6 +8,7 @@ import type { EntityManager } from 'typeorm';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import type { CreateSale, SaleParty } from '../sales/sales.dto.js';
@@ -18,7 +19,6 @@ import {
   type SaleActor,
 } from '../sales/sales.service.js';
 import type { QuoteCreate, QuoteFilter, QuotePatch } from './quotes.dto.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 /** A quote on the wire. Money is a string (02_API_SCREENS.md §1.1). */
 export interface Quote {

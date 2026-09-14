@@ -6,13 +6,13 @@ import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, pointsFor, satangOf } from '../common/money.js';
 import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import { JOB_SALE_CREATED, QUEUE_SALE_POST } from '../queue/queue.constants.js';
 import type { CreateSale, SaleLine } from './sales.dto.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 /** Who is ringing the bill up — read from the token, never from the body. */
 export interface SaleActor {
@@ -210,7 +210,10 @@ export class SalesService {
     return this.tenants.runTx(() => this.createIn(dto, actor));
   }
 
-  private async createIn(dto: CreateSale, actor: SaleActor): Promise<CreateSaleResult> {
+  private async createIn(
+    dto: CreateSale,
+    actor: SaleActor,
+  ): Promise<CreateSaleResult> {
     const { tenantId, manager } = currentRequestContext();
 
     // Arithmetic first: a 409 for a total that does not add up must not take

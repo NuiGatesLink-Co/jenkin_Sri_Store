@@ -2,10 +2,10 @@ import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import type { SupplierCreate, SupplierPatch } from './catalogue.dto.js';
 import { productNotFound } from './products.service.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 export interface Supplier {
   id: string;

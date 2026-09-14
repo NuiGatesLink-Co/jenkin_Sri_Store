@@ -21,6 +21,7 @@ import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { newId } from '../common/ids.js';
 import { Paginated, pageParams } from '../common/paginated.js';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
@@ -41,7 +42,6 @@ import {
   type ConvertQuoteResult,
   type Quote,
 } from './quotes.service.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 interface AuthenticatedRequest extends Request {
   user?: {

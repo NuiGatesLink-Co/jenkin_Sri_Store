@@ -4,12 +4,12 @@ import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import type { CreateCreditPayment } from './credit-payments.dto.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 /** Who took the money — from the token, never from the body (ADR-0004). */
 export interface CreditPaymentActor {

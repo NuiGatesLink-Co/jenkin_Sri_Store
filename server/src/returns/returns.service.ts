@@ -5,6 +5,7 @@ import type { EntityManager } from 'typeorm';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
@@ -22,7 +23,6 @@ import {
   type MovementRow,
 } from '../sales/sales.service.js';
 import type { CreateReturn, ReturnLine } from './returns.dto.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 /** Who is taking the goods back — read from the token, never from the body. */
 export interface ReturnActor {

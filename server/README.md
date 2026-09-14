@@ -274,7 +274,14 @@ The addendum separates **who decides** the tenant from **who executes** `set_con
   public method in it ("public wrapper + private `*In`"); until `tx.4` each of those calls
   joins the middleware's transaction, and `test/runtx-join.e2e-spec.ts` pins that a void
   or a device retirement holds one `pos_app` connection, not two. A new public method that
-  reads `currentRequestContext()` needs the same wrapper, or it 500s once `tx.4` lands.
+  reads `currentRequestContext()` needs the same wrapper, or it 500s once `tx.4` lands —
+  `src/common/tenant-wrapper.spec.ts` fails on one that lacks it (only
+  `IdempotencyInterceptor.intercept` is allowlisted, until `tx.3` #152). For `tx.4`: the
+  owner-role checks in `BackupController.exportTenantData` / `getJobStatus` and
+  `QuotesController.purgeQuotes` now run *inside* `runTx`, after `authorisedTenantId()`, and
+  those handlers touch no table (BullMQ only) — so after `tx.4` a 403 opens a transaction,
+  and `test/backup.spec.ts`'s pass-through stub tests an order production no longer has.
+  They are candidates for reading `authorisedTenantId()` directly instead of `runTx`.
 - **`runTx` joins, it does not nest.** A `runTx` inside an open transaction (the
   middleware's, until `tx.4`, or an outer `runTx`) reuses its manager. That is what lets
   `tx.1`–`tx.3` land with no behaviour change, and it is what stops

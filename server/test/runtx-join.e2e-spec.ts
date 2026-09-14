@@ -115,21 +115,30 @@ describe('runTx joins the open transaction instead of taking a second connection
     return res.body.data.id as string;
   };
 
-  /** `pos_app` backends with a transaction open, seen from the superuser pool. */
+  /**
+   * `pos_app` backends with a transaction open, seen from the superuser pool (so the
+   * observer never counts itself). The app pool sets no `application_name` to filter on:
+   * this counts every `pos_app` transaction in the database, so a compose `worker` running
+   * a job against the same Postgres during the sample would read as a false red. Run the
+   * e2e suite without the compose `worker` up (CI starts only Postgres and both Redis).
+   */
   const posAppTransactions = async () =>
     (await admin.query(
       `SELECT pid, state, wait_event_type FROM pg_stat_activity
         WHERE usename = 'pos_app' AND datname = current_database()
-          AND xact_start IS NOT NULL AND pid <> pg_backend_pid()`,
+          AND xact_start IS NOT NULL`,
     )) as { pid: number; state: string; wait_event_type: string | null }[];
+
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   /**
    * Holds `lockSql` in a superuser transaction, runs `fire`, waits until a `pos_app`
    * backend is parked on that lock, and returns the most `pos_app` transactions seen
-   * over a few samples while it stays parked. The lock is released before returning;
-   * the request is handed back unawaited, so the count is asserted first — a broken join
-   * on the retire chain self-deadlocks after the lock (a second connection waiting on the
-   * row the first holds) and would otherwise surface only as a test timeout.
+   * over a few samples while it stays parked. The lock is released and the request given
+   * a short while to finish before returning; it is handed back as `pending` so the count
+   * is asserted first — a broken join on the retire chain self-deadlocks after the lock (a
+   * second connection waiting on the row the first holds) and would otherwise surface only
+   * as a test timeout.
    */
   const whileParked = async <T>(
     lockSql: string,
@@ -138,25 +147,48 @@ describe('runTx joins the open transaction instead of taking a second connection
   ): Promise<{ most: number; pending: Promise<T> }> => {
     const holder = admin.createQueryRunner();
     await holder.connect();
+    let pending: Promise<T> | undefined;
     try {
       await holder.startTransaction();
       await holder.query(lockSql, params);
-      const pending = fire();
-      pending.catch(() => undefined);
+      pending = fire();
+      let settled: { value: unknown } | undefined;
+      pending.then(
+        (value) => (settled = { value }),
+        (value) => (settled = { value }),
+      );
       const deadline = Date.now() + 10_000;
-      while (!(await posAppTransactions()).some((r) => r.wait_event_type === 'Lock')) {
-        if (Date.now() > deadline) throw new Error('the request never parked on the lock');
-        await new Promise((r) => setTimeout(r, 20));
+      while (
+        !(await posAppTransactions()).some((r) => r.wait_event_type === 'Lock')
+      ) {
+        // A request refused before it reaches the lock (a 4xx) must say so, not wait out
+        // the deadline and report "never parked".
+        if (settled) {
+          const r = settled.value as { status?: number; body?: unknown };
+          throw new Error(
+            `the request finished before it parked on the lock: ${r?.status ?? ''} ${JSON.stringify(r?.body ?? r)}`,
+          );
+        }
+        if (Date.now() > deadline)
+          throw new Error('the request never parked on the lock');
+        await sleep(20);
       }
       let most = 0;
       for (let i = 0; i < 5; i++) {
         most = Math.max(most, (await posAppTransactions()).length);
-        await new Promise((r) => setTimeout(r, 20));
+        await sleep(20);
       }
       return { most, pending };
     } finally {
-      if (holder.isTransactionActive) await holder.commitTransaction();
-      await holder.release();
+      try {
+        if (holder.isTransactionActive) await holder.commitTransaction();
+      } finally {
+        await holder.release();
+      }
+      // Let the request finish before any assertion can fail, so its connection is back in
+      // the pool for the next hooks. Bounded: a self-deadlocked request never finishes.
+      if (pending)
+        await Promise.race([pending.catch(() => undefined), sleep(2_000)]);
     }
   };
 
@@ -169,12 +201,16 @@ describe('runTx joins the open transaction instead of taking a second connection
     let calls = 0;
     return vi
       .spyOn(ds, 'createQueryRunner')
-      .mockImplementation((...args: Parameters<DataSource['createQueryRunner']>) => {
-        if (++calls > 1) {
-          throw new Error('a second query runner was requested while the first is held');
-        }
-        return original(...args);
-      });
+      .mockImplementation(
+        (...args: Parameters<DataSource['createQueryRunner']>) => {
+          if (++calls > 1) {
+            throw new Error(
+              'a second query runner was requested while the first is held',
+            );
+          }
+          return original(...args);
+        },
+      );
   };
 
   /** A tenant scope with no transaction — what `TenantScopeMiddleware` + the guard give tx.4. */
@@ -191,7 +227,10 @@ describe('runTx joins the open transaction instead of taking a second connection
     const { most, pending } = await whileParked(
       `SELECT id FROM sales WHERE tenant_id = $1::uuid AND id = $2 FOR UPDATE`,
       [TENANT, saleId],
-      () => post(`/sales/${saleId}/void`, { pin: PIN }, managerToken).then((r) => r),
+      () =>
+        post(`/sales/${saleId}/void`, { pin: PIN }, managerToken).then(
+          (r) => r,
+        ),
     );
     expect(most).toBe(1);
 

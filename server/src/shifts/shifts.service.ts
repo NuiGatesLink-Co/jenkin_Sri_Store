@@ -4,8 +4,8 @@ import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.ex
 import { newId } from '../common/ids.js';
 import { fromSatang } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
-import { returning } from '../common/sql.js';
 import { TenantService } from '../common/database/tenant.service.js';
+import { returning } from '../common/sql.js';
 
 /** Who is at the drawer — from the token, never from the body. */
 export interface Actor {
@@ -130,10 +130,7 @@ export class ShiftsService {
    * button twice. A new day archives the previous shift **first**, flagged
    * `auto_archived` if it was never closed, so a day's takings are never lost.
    */
-  open(
-    actor: Actor,
-    startingCashSatang: number,
-  ): Promise<ShiftWithEntries> {
+  open(actor: Actor, startingCashSatang: number): Promise<ShiftWithEntries> {
     return this.tenants.runTx(() => this.openIn(actor, startingCashSatang));
   }
 

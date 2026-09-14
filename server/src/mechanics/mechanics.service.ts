@@ -1,12 +1,12 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { newId } from '../common/ids.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { returning } from '../common/sql.js';
 import type { SaleWithItems } from '../sales/sale-reads.service.js';
 import { SaleReadsService } from '../sales/sale-reads.service.js';
 import type { MechanicCreate, MechanicPatch } from '../people/people.dto.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 export interface Mechanic {
   id: string;
@@ -229,7 +229,15 @@ export class MechanicsService {
     return { id, deleted: true };
   }
 
-  async sales(
+  sales(
+    id: string,
+    page: number,
+    limit: number,
+  ): Promise<{ items: SaleWithItems[]; total: number }> {
+    return this.tenants.runTx(() => this.salesIn(id, page, limit));
+  }
+
+  private async salesIn(
     id: string,
     page: number,
     limit: number,

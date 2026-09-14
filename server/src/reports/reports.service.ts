@@ -1,7 +1,7 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
-import type { ReportDateRange } from './reports.dto.js';
 import { TenantService } from '../common/database/tenant.service.js';
+import type { ReportDateRange } from './reports.dto.js';
 
 export interface ReportSummary {
   totalRevenue: string;
@@ -456,10 +456,7 @@ export class ReportsService {
     };
   }
 
-  topProducts(
-    range: ReportDateRange,
-    limit: number,
-  ): Promise<ProductSales[]> {
+  topProducts(range: ReportDateRange, limit: number): Promise<ProductSales[]> {
     return this.tenants.runTx(() => this.topProductsIn(range, limit));
   }
 

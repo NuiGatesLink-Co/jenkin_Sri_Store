@@ -8,6 +8,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf, toSatang } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ProductsService } from '../products/products.service.js';
@@ -19,7 +20,6 @@ import {
   ReceivePOResult,
   UpdatedProductItem,
 } from './purchasing.dto.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 interface PORow {
   id: string;
@@ -141,9 +141,9 @@ export class PurchasingService {
   }
 
   private async listIn(
-    status?: string,
-    page = 1,
-    limit = 50,
+    status: string | undefined,
+    page: number,
+    limit: number,
   ): Promise<{ items: PurchaseOrderOut[]; total: number }> {
     const { tenantId, manager } = currentRequestContext();
 

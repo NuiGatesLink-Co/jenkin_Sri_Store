@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { SEED_CATEGORIES } from '../db/seed.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 export interface Category {
   name: string;
@@ -57,7 +57,10 @@ export class CategoriesService {
     return this.tenants.runTx(() => this.listCachedIn());
   }
 
-  private async listCachedIn(): Promise<{ categories: Category[]; fromCache: boolean }> {
+  private async listCachedIn(): Promise<{
+    categories: Category[];
+    fromCache: boolean;
+  }> {
     const { tenantId } = currentRequestContext();
     const prefix = await this.cache.prefix(tenantId, 'categories');
     const key = prefix === null ? null : `${prefix}list`;
@@ -128,7 +131,9 @@ export class CategoriesService {
     return this.tenants.runTx(() => this.deleteIn(name));
   }
 
-  private async deleteIn(name: string): Promise<{ name: string; deleted: true }> {
+  private async deleteIn(
+    name: string,
+  ): Promise<{ name: string; deleted: true }> {
     const { tenantId, manager } = currentRequestContext();
     await manager.query(
       `DELETE FROM categories WHERE tenant_id = $1::uuid AND name = $2`,

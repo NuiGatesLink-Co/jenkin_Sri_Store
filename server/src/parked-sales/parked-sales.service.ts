@@ -6,8 +6,8 @@ import {
 } from '@nestjs/common';
 import { newId } from '../common/ids.js';
 import { currentRequestContext } from '../common/request-context.js';
-import { returning } from '../common/sql.js';
 import { TenantService } from '../common/database/tenant.service.js';
+import { returning } from '../common/sql.js';
 
 /** A parked bill on the wire. */
 export interface ParkedSale {

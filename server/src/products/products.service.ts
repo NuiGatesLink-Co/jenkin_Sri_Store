@@ -8,6 +8,7 @@ import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import {
@@ -21,7 +22,6 @@ import type {
   ProductPatch,
   StockAdjustment,
 } from './catalogue.dto.js';
-import { TenantService } from '../common/database/tenant.service.js';
 
 export interface Product {
   id: string;
@@ -256,7 +256,9 @@ export class ProductsService {
     return this.tenants.runTx(() => this.byIdIn(id));
   }
 
-  private async byIdIn(id: string): Promise<{ product: Product; fromCache: boolean }> {
+  private async byIdIn(
+    id: string,
+  ): Promise<{ product: Product; fromCache: boolean }> {
     const { tenantId, manager } = currentRequestContext();
     const prefix = await this.cache.prefix(tenantId, 'products');
     const key = prefix === null ? null : `${prefix}item:${id}`;
