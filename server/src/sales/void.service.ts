@@ -141,9 +141,11 @@ export class VoidService {
     await this.lockMechanic(manager, tenantId, sale.mechanic_id);
 
     await this.restoreStock(manager, tenantId, saleId);
-    // #32: the void put stock back — drop the cached product pages after commit.
-    this.cache.invalidateAfterCommit(tenantId, 'products');
     await this.reverseLedger(manager, tenantId, sale);
+    // #32: stock put back and the ledger reversed — drop those cached pages after commit.
+    this.cache.invalidateAfterCommit(tenantId, 'products');
+    if (sale.customer_id !== null) this.cache.invalidateAfterCommit(tenantId, 'customers');
+    if (sale.mechanic_id !== null) this.cache.invalidateAfterCommit(tenantId, 'mechanics');
 
     const voided = returning<{ voided_at: Date }>(
       await manager.query(

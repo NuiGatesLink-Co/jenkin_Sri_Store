@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import type { Customer } from '../customers/customers.service.js';
 import type { Mechanic } from '../mechanics/mechanics.service.js';
 import type { Settings, SettingsPatch } from './settings.dto.js';
@@ -100,6 +101,27 @@ interface MechanicRow {
 
 @Injectable()
 export class SettingsService {
+  constructor(private readonly cache: TenantCache) {}
+
+  /**
+   * `GET /settings` through `t:{tid}:settings:g:{token}:row` (#32).
+   * `getSettings()` stays a plain read: `updateSettings()` reads it inside
+   * its write transaction, and `/bootstrap` hashes a fresh body for its ETag,
+   * neither of which may touch the cache.
+   */
+  async getSettingsCached(): Promise<{ settings: Settings; fromCache: boolean }> {
+    const { tenantId } = currentRequestContext();
+    const prefix = await this.cache.prefix(tenantId, 'settings');
+    const key = prefix === null ? null : `${prefix}row`;
+    if (key !== null) {
+      const cached = await this.cache.get<Settings>(key);
+      if (cached) return { settings: cached, fromCache: true };
+    }
+    const settings = await this.getSettings();
+    if (key !== null) await this.cache.set(key, settings, 'settings');
+    return { settings, fromCache: false };
+  }
+
   async getSettings(): Promise<Settings> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
@@ -164,6 +186,7 @@ export class SettingsService {
       [tenantId, shopName, shopNameEn, taxRate, quoteValidDays, address, phone, cashierName, taxId, branchNo],
     )) as SettingsRow[];
 
+    this.cache.invalidateAfterCommit(tenantId, 'settings');
     return toSettings(rows[0]);
   }
 

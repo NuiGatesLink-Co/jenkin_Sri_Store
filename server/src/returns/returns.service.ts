@@ -298,8 +298,11 @@ export class ReturnsService {
 
     const saleVoided = await this.autoVoid(manager, tenantId, dto.saleId, sold);
 
-    // #32: the credit note put stock back — drop the cached product pages after commit.
+    // #32: the credit note put stock back and reversed the customer/mechanic ledger —
+    // drop those cached pages after commit.
     this.cache.invalidateAfterCommit(tenantId, 'products');
+    if (sale.customer_id !== null) this.cache.invalidateAfterCommit(tenantId, 'customers');
+    if (sale.mechanic_id !== null) this.cache.invalidateAfterCommit(tenantId, 'mechanics');
 
     if (this.salePostQueue) {
       const queue = this.salePostQueue;

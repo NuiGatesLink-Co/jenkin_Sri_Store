@@ -300,9 +300,12 @@ export class SalesService {
       });
     }
 
-    // #32: every line's stock moved, so every cached product page is stale — once this
-    // commits. A refusal above (409) or a rollback below never runs the hook.
+    // #32: every line's stock moved, and the customer's spend/points and the mechanic's
+    // totals/tab with it — stale once this commits. A refusal above (409) or a rollback
+    // below never runs the hooks.
     this.cache.invalidateAfterCommit(tenantId, 'products');
+    if (dto.customerId !== null) this.cache.invalidateAfterCommit(tenantId, 'customers');
+    if (dto.mechanicId !== null) this.cache.invalidateAfterCommit(tenantId, 'mechanics');
 
     if (this.salePostQueue) {
       const queue = this.salePostQueue;

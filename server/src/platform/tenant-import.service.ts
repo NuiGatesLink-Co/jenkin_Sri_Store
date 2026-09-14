@@ -562,7 +562,9 @@ export class TenantImportService {
     // a request transaction, so `invalidateAfterCommit` would not wait for it). A
     // throw inside it rejects before reaching this line, so a failed import
     // invalidates nothing.
-    await this.cache.invalidate(tenantId, 'products');
+    for (const ns of ['products', 'customers', 'mechanics', 'settings'] as const) {
+      await this.cache.invalidate(tenantId, ns);
+    }
 
     await this.auditService.log({
       tenantId,
