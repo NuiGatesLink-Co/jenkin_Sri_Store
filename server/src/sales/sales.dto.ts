@@ -29,8 +29,11 @@ export interface CreateSale {
   items: SaleLine[];
 }
 
-/** The most a single bill may carry — a guard against a body that is an attack. */
-const MAX_LINES = 200;
+/**
+ * The most a single bill may carry — a guard against a body that is an attack. Shared
+ * with quotes (#27), which convert into a bill.
+ */
+export const MAX_LINES = 200;
 
 /**
  * The exact three literals a sale can ever be created with. `checkout_screen.dart:2355`
@@ -55,12 +58,7 @@ const PAYMENT_METHODS = ['เงินสด', 'โอน/QR', 'เครดิ�
  */
 export function parseCreateSale(body: unknown): CreateSale {
   const b = asObject(body, 'body');
-  const items = Array.isArray(b.items) ? b.items : [];
-  if (items.length === 0)
-    throw new BadRequestException('items must not be empty');
-  if (items.length > MAX_LINES) {
-    throw new BadRequestException(`items must hold at most ${MAX_LINES} lines`);
-  }
+  const items = parseItemsArray(b.items);
 
   const sale: CreateSale = {
     subtotalSatang: toSatang(b.subtotal, 'subtotal'),
@@ -112,7 +110,11 @@ export function parseSaleParty(b: Record<string, unknown>): SaleParty {
  * A negative discount is the sharp one: nothing else rejects it, it inflates the
  * total, and `pointsGranted` is computed from the total that gets persisted.
  */
-function assertMoneyMakesSense(sale: CreateSale): void {
+export function assertMoneyMakesSense(sale: {
+  subtotalSatang: number;
+  discountSatang: number;
+  totalSatang: number;
+}): void {
   if (sale.discountSatang < 0)
     throw new BadRequestException('discount must not be negative');
   if (sale.subtotalSatang < 0)
@@ -126,6 +128,17 @@ function assertMoneyMakesSense(sale: CreateSale): void {
   // server redoes from the lines, and §1.3 gives it its own status and its own Thai
   // message (`409 TOTAL_MISMATCH`, in `SalesService.assertTotals`). Only values that
   // are malformed on their face belong in a 400.
+}
+
+/** `items` as an array of 1..MAX_LINES entries — the same bound on a bill and a quote. */
+export function parseItemsArray(value: unknown): unknown[] {
+  const items = Array.isArray(value) ? value : [];
+  if (items.length === 0)
+    throw new BadRequestException('items must not be empty');
+  if (items.length > MAX_LINES) {
+    throw new BadRequestException(`items must hold at most ${MAX_LINES} lines`);
+  }
+  return items;
 }
 
 /**
@@ -150,19 +163,7 @@ function parseLines(items: unknown[]): SaleLine[] {
 
 function parseLine(raw: unknown, index: number): SaleLine {
   const l = asObject(raw, `items[${index}]`);
-  const qty = l.qty;
-  // `products.stock` is an INT, so a qty past that range can only ever be refused —
-  // bounding it here makes it a 400 rather than an overflow deeper in.
-  if (
-    typeof qty !== 'number' ||
-    !Number.isInteger(qty) ||
-    qty <= 0 ||
-    qty > 1_000_000
-  ) {
-    throw new BadRequestException(
-      `items[${index}].qty must be a positive integer`,
-    );
-  }
+  const qty = parseLineQty(l.qty, index);
   if (
     l.lineNo !== undefined &&
     (typeof l.lineNo !== 'number' ||
@@ -173,13 +174,7 @@ function parseLine(raw: unknown, index: number): SaleLine {
       `items[${index}].lineNo must be a positive integer`,
     );
   }
-  // The same trap as a negative discount, one level down: `assertMoneyMakesSense`
-  // only ever sees the bill's three totals and `sale_items` only CHECKs `qty > 0`, so
-  // a line priced at -1000 nets a total of 0 while still deducting that line's stock.
-  const priceSatang = toSatang(l.price, `items[${index}].price`);
-  if (priceSatang < 0) {
-    throw new BadRequestException(`items[${index}].price must not be negative`);
-  }
+  const priceSatang = parseLinePrice(l.price, index);
   return {
     lineNo: (l.lineNo as number | undefined) ?? index + 1,
     productId: requiredString(l.productId, `items[${index}].productId`),
@@ -191,14 +186,49 @@ function parseLine(raw: unknown, index: number): SaleLine {
   };
 }
 
-function asObject(value: unknown, field: string): Record<string, unknown> {
+/**
+ * `products.stock` is an INT, so a qty past that range can only ever be refused —
+ * bounding it here makes it a 400 rather than an overflow deeper in.
+ */
+export function parseLineQty(qty: unknown, index: number): number {
+  if (
+    typeof qty !== 'number' ||
+    !Number.isInteger(qty) ||
+    qty <= 0 ||
+    qty > 1_000_000
+  ) {
+    throw new BadRequestException(
+      `items[${index}].qty must be a positive integer`,
+    );
+  }
+  return qty;
+}
+
+/**
+ * The same trap as a negative discount, one level down: `assertMoneyMakesSense` only
+ * ever sees the three totals and `sale_items` only CHECKs `qty > 0`, so a line priced
+ * at -1000 nets a total of 0 while still deducting that line's stock (#75). Shared with
+ * quotes (#27), which become bills.
+ */
+export function parseLinePrice(price: unknown, index: number): number {
+  const priceSatang = toSatang(price, `items[${index}].price`);
+  if (priceSatang < 0) {
+    throw new BadRequestException(`items[${index}].price must not be negative`);
+  }
+  return priceSatang;
+}
+
+export function asObject(
+  value: unknown,
+  field: string,
+): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new BadRequestException(`${field} must be an object`);
   }
   return value as Record<string, unknown>;
 }
 
-function requiredString(value: unknown, field: string): string {
+export function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new BadRequestException(`${field} is required`);
   }
@@ -222,7 +252,7 @@ function booleanOrFalse(value: unknown, field: string): boolean {
   return value;
 }
 
-function optionalString(value: unknown, field: string): string | null {
+export function optionalString(value: unknown, field: string): string | null {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string')
     throw new BadRequestException(`${field} must be a string`);

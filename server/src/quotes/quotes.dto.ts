@@ -1,6 +1,16 @@
 import { BadRequestException } from '@nestjs/common';
 import { toSatang } from '../common/money.js';
-import { parseSaleParty, type SaleParty } from '../sales/sales.dto.js';
+import {
+  asObject,
+  assertMoneyMakesSense,
+  optionalString,
+  parseItemsArray,
+  parseLinePrice,
+  parseLineQty,
+  parseSaleParty,
+  requiredString,
+  type SaleParty,
+} from '../sales/sales.dto.js';
 
 /**
  * Hand-validated quote bodies (#27), in the style of `sales.dto.ts`. Ported from
@@ -43,8 +53,6 @@ export interface QuotePatch {
 export const QUOTE_FILTERS = ['open', 'expired', 'converted'] as const;
 export type QuoteFilter = (typeof QUOTE_FILTERS)[number];
 
-/** The same line cap as a bill: a quote is converted into one. */
-const MAX_LINES = 200;
 /** A hundred years — past this the interval arithmetic is nonsense, not a quote. */
 const MAX_VALID_DAYS = 36_500;
 
@@ -55,31 +63,19 @@ export function parseQuoteCreate(body: unknown): QuoteCreate {
   if (b.status !== undefined && b.status !== null && b.status !== 'open') {
     throw new BadRequestException("status must be 'open' or absent");
   }
-  const items = Array.isArray(b.items) ? b.items : [];
-  if (items.length === 0)
-    throw new BadRequestException('items must not be empty');
-  if (items.length > MAX_LINES) {
-    throw new BadRequestException(`items must hold at most ${MAX_LINES} lines`);
-  }
+  // The same line cap as a bill: a quote is converted into one.
+  const items = parseItemsArray(b.items);
   const quote: QuoteCreate = {
     subtotalSatang: toSatang(b.subtotal, 'subtotal'),
     discountSatang: toSatang(b.discount ?? 0, 'discount'),
     totalSatang: toSatang(b.total, 'total'),
-    customerName: optionalString(b.customerName, 'customerName'),
-    customerPhone: optionalString(b.customerPhone, 'customerPhone'),
-    notes: optionalString(b.notes, 'notes'),
+    customerName: textKeepingEmpty(b.customerName, 'customerName'),
+    customerPhone: textKeepingEmpty(b.customerPhone, 'customerPhone'),
+    notes: textKeepingEmpty(b.notes, 'notes'),
     validDays: parseValidDays(b.validDays),
     items: items.map((raw, i) => parseLine(raw, i)),
   };
-  if (quote.discountSatang < 0)
-    throw new BadRequestException('discount must not be negative');
-  if (quote.subtotalSatang < 0)
-    throw new BadRequestException('subtotal must not be negative');
-  if (quote.totalSatang < 0)
-    throw new BadRequestException('total must not be negative');
-  if (quote.discountSatang > quote.subtotalSatang) {
-    throw new BadRequestException('discount must not exceed subtotal');
-  }
+  assertMoneyMakesSense(quote);
   return quote;
 }
 
@@ -114,10 +110,10 @@ export function parseQuotePatch(body: unknown): QuotePatch {
   }
   const out: QuotePatch = {};
   if (has(b, 'customerName'))
-    out.customerName = optionalString(b.customerName, 'customerName');
+    out.customerName = textKeepingEmpty(b.customerName, 'customerName');
   if (has(b, 'customerPhone'))
-    out.customerPhone = optionalString(b.customerPhone, 'customerPhone');
-  if (has(b, 'notes')) out.notes = optionalString(b.notes, 'notes');
+    out.customerPhone = textKeepingEmpty(b.customerPhone, 'customerPhone');
+  if (has(b, 'notes')) out.notes = textKeepingEmpty(b.notes, 'notes');
   return out;
 }
 
@@ -153,24 +149,12 @@ export function parseQuoteFilter(
 
 function parseLine(raw: unknown, index: number): QuoteLine {
   const l = asObject(raw, `items[${index}]`);
-  const qty = l.qty;
-  if (
-    typeof qty !== 'number' ||
-    !Number.isInteger(qty) ||
-    qty <= 0 ||
-    qty > 1_000_000
-  ) {
-    throw new BadRequestException(
-      `items[${index}].qty must be a positive integer`,
-    );
-  }
-  const priceSatang = toSatang(l.price, `items[${index}].price`);
-  if (priceSatang < 0) {
-    throw new BadRequestException(`items[${index}].price must not be negative`);
-  }
+  const qty = parseLineQty(l.qty, index);
+  const priceSatang = parseLinePrice(l.price, index);
   return {
     lineNo: index + 1,
-    productId: optionalString(l.productId, `items[${index}].productId`) || null,
+    // The sales helper maps '' to null: a blank product id names no product.
+    productId: optionalString(l.productId, `items[${index}].productId`),
     name: requiredString(l.name, `items[${index}].name`),
     qty,
     priceSatang,
@@ -192,26 +176,16 @@ function parseValidDays(value: unknown): number | null {
   return value;
 }
 
-function asObject(value: unknown, field: string): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new BadRequestException(`${field} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
 function has(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new BadRequestException(`${field} is required`);
-  }
-  return value;
-}
-
-/** `''` is kept: Checkout saves a quote with no customer as `customerName: ''`. */
-function optionalString(value: unknown, field: string): string | null {
+/**
+ * Unlike `sales.dto.ts` `optionalString`, `''` is kept rather than mapped to null:
+ * Checkout saves a quote with no customer as `customerName: ''` (`_handleSaveQuote`),
+ * and the Dart row stores that empty string, so the header text round-trips as sent.
+ */
+function textKeepingEmpty(value: unknown, field: string): string | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== 'string') {
     throw new BadRequestException(`${field} must be a string`);
