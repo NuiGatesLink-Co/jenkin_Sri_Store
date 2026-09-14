@@ -1033,9 +1033,31 @@ has a new key, so it gets a new lock and never waits on a pre-write loader.
   because every waiter holds its request's pooled connection while it waits (the request
   transaction opens before routing).
 - A loader whose process dies holding the lock leaves it to expire. Its waiters fall back at 1 s.
-- **Known limit:** the cache client sets no ioredis `commandTimeout`. "Redis down" fails fast only
-  while ioredis knows the connection dropped (`enableOfflineQueue: false`); a Redis that hangs with
-  the connection still open stalls each command, and a lock adds up to a few more commands per miss.
+- **A hung Redis is bounded too (#140).** `enableOfflineQueue: false` fails fast only while ioredis
+  knows the connection dropped; a Redis that stops answering on an open socket used to stall every
+  command. Both app clients (`createRedisClient` in `infra/redis.module.ts`) now set ioredis
+  `commandTimeout` = `REDIS_COMMAND_TIMEOUT_MS` (default **1000 ms**, positive integer, refused
+  otherwise). A timed-out command rejects like a dropped connection, so every existing fail-open
+  path takes it: `TenantGuard` reads status from Postgres, `TenantCache` answers no prefix / a miss,
+  a timed-out lock acquire is the no-op release (it does not wait out the 1 s poll), and a timed-out
+  release is swallowed. Worst case per request is one timeout per Redis call on the path — the
+  guard's read and write-back cost 2 × the timeout. `src/infra/redis-command-timeout.spec.ts` proves
+  it against a TCP server that completes the handshake and then never replies, and shows the same
+  server hangs a client built without the option.
+- 🔴 **Do not lower the timeout below the API's event-loop lag.** The ioredis timer starts when the
+  command is sent, so a blocked loop expires it even when Redis already replied. Measured with a
+  local probe (2,000 `GET`s, loop blocked 2 × timeout): at 200 ms, 61 % of commands Redis answered
+  were reported as timed out. Under load that sends the whole cache onto Postgres at the moment it
+  is busiest — the reason the default is 1 s and not the idempotency cache's 200 ms race.
+- 🔴 **Never give BullMQ's connections a `commandTimeout`.** ioredis applies it to blocking commands
+  as well, so a worker's `BZPOPMIN` (up to `drainDelay`, 5 s) and QueueEvents' `XREAD BLOCK` (10 s)
+  would reject on every idle poll. BullMQ 6 races those against its own watchdog and resets the
+  connection instead. `QueueModule` and `bull-board.ts` build their connections from options, not
+  from `REDIS_QUEUE` — that client only answers `/health/ready`'s `PING`, so it takes the timeout.
+- **Not covered by #140:** the BullMQ enqueues after commit run on BullMQ's own connection, so a hung
+  `redis-queue` still stalls them. `PlatformTenantsService` (`getTenantStatus`, the status `DEL`
+  after `updateStatus`) never caught a Redis error; on a hung `redis-cache` it now throws the timeout
+  instead of hanging, which is the same answer it already gave a dropped connection.
 
 **Why only the list.** Measured as `pos_app` under RLS on a 5,000-product tenant:
 
@@ -1190,6 +1212,21 @@ Redis, mints access tokens from a per-run RSA key pair, and resets one tenant pe
 - **`fileParallelism: false`.** Each file boots the whole application, so parallel files
   multiply the connection pools past `max_connections=100` and the run dies as "worker
   exited unexpectedly" rather than as a failed assertion.
+- **One run per Postgres (#141).** Every file shares the `pos` database and both Redis, and
+  `test/schema.e2e-spec.ts` drops `pos_schema_test` `WITH (FORCE)` — so a second concurrent
+  `pnpm test:e2e` against the same stack does not fail cleanly, it corrupts the first (a
+  migration dying with `terminating connection due to administrator command`, document
+  numbers starting mid-series). Vitest's `globalSetup` (`test/support/e2e-runner-lock.ts`)
+  therefore takes a session-level `pg_try_advisory_lock` on a dedicated connection before any
+  file starts, and a second run refuses at once with
+  `e2e runner lock: another \`pnpm test:e2e\` is already running against this Postgres; held by "e2e-lock pid=… host=…"`.
+  The lock lives in the maintenance database of `DATABASE_ADMIN_URL` (`postgres` by default),
+  never in a database a suite drops, and Postgres releases it when the connection closes — a
+  crashed or Ctrl+C'd run leaves nothing stale. It is refuse-not-wait: a waiting run would just
+  hide the collision. If the lock connection dies mid-run, the run is failed at teardown.
+  CI has one Postgres per job and always gets the lock. Per-run databases were not chosen:
+  the Redis ports, the `pos_app` URL in `fixture.ts` and the migrate step are all fixed, so
+  isolation would mean a database *and* two Redis per run.
 - `TEST_LOG_LEVEL=error pnpm test:e2e` is how you find out why a suite is getting a 500.
 
 ## Invariants this stack enforces (from #14 / #2)

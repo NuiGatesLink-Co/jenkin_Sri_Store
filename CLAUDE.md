@@ -312,7 +312,9 @@ Until `tx.*` lands, `server/README.md` *The request-context seam* still describe
 `test/schema.e2e-spec.ts` tears the schema down and re-applies it. CI is safe (one Postgres per job),
 two developers sharing a dev database are not; the symptom is a migration dying with
 `terminating connection due to administrator command` and document numbers starting mid-series.
-No ticket yet. `synchronize` is never
+**#141:** the e2e `globalSetup` (`server/test/support/e2e-runner-lock.ts`) now takes a Postgres session
+advisory lock and a second concurrent run **refuses to start**, naming the holder — it still cannot
+*share*, it just no longer corrupts silently (`server/README.md` *The e2e suite*). `synchronize` is never
 true anywhere, tests included. Phase-1 backend/CI tickets are assigned by lane: `NuimanLP`
 (Lane A), `LomerAlloys` (Lane B), `PattaraponKitcharoen` (Lane C) — see
 `handoff_log/merge-p1-p2-lane-assignments.md`. **No cutover is planned for phase 1** — the shop
@@ -644,7 +646,7 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   so 07 §2's "merge → deploy.yml" arrow is design, not fact. An agent building it was stopped by the Claude Code
   permission classifier ("Production Deploy") — it needs the owner's explicit go-ahead.
 - **Still open (2026-09-14 close-out, `docs/handoff_log/ops-closeout-138-deploy-tickets.md`):** #67; #140
-  Redis `commandTimeout`; #141 e2e runners sharing a DB; #142 ADR-0003 `tx.*` slices; #143 Flutter login
+  Redis `commandTimeout`; #141 e2e runners sharing a DB (runner lock, `fix/141-e2e-runner-lock`); #142 ADR-0003 `tx.*` slices; #143 Flutter login
   screen + redirect; #145 Thai wording for
   `SALE_NOT_IN_OPEN_SHIFT` (owner); #148 monitoring recovery gaps; branch protection on `main` (owner runs
   07 §4). The repo's only branches are `main` and `POC_sample_offline_first`.

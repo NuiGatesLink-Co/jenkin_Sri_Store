@@ -17,6 +17,7 @@ const mockConfig = {
   dbPoolSize: 5,
   redisCacheUrl: 'redis://localhost:6379',
   redisQueueUrl: 'redis://localhost:6379',
+  redisCommandTimeoutMs: 200,
   jwtPlatformSecret: 'test-platform-secret',
   jwtTenantSecret: 'test-tenant-secret',
 };
