@@ -26,6 +26,13 @@ describe('weightedAverageCostSatang', () => {
     expect(weightedAverageCostSatang(3, 10, 1, 20)).toBe(13);
   });
 
+  it('DELIBERATE divergence from Dart: 1@1.00 + 1@1.01 = 1.005 exactly → 1.01 (Dart float gives 1.00)', () => {
+    // Dart computes (1.00 + 1.01) / 2 * 100 in floats = 100.49999…, which rounds down.
+    // The true value is exactly half a satang, and money never follows float drift
+    // (01_DATABASE.md), so the server rounds it up. Do not "fix" this toward Dart.
+    expect(weightedAverageCostSatang(1, 100, 1, 101)).toBe(101);
+  });
+
   it('matches Dart round2 on a non-terminating average: (7×33.33 + 3×41.07)/10 = 35.652 → 35.65', () => {
     expect(weightedAverageCostSatang(7, 3_333, 3, 4_107)).toBe(3_565);
   });

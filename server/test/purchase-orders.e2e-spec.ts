@@ -605,6 +605,28 @@ describe('purchase orders (e2e)', () => {
       expect(await product('tp1', OTHER)).toEqual({ stock: 10, cost: '100.00' });
     });
 
+    it("a part number that exists only in another tenant is unmatched, and that tenant's stock stays put", async () => {
+      await seedProduct(admin, OTHER, {
+        id: 'ob1',
+        partNo: 'ONLY-B',
+        name: 'Other Shop Part',
+        price: 200,
+        cost: 100,
+        stock: 10,
+      });
+      const { id } = await openPo([{ partNo: 'ONLY-B', qty: 5, cost: '160.00' }]);
+      const res = await action(id, 'receive');
+      expect(res.status).toBe(200);
+      expect(res.body.data.unmatched).toEqual(['ONLY-B']);
+      expect(res.body.data.updated).toEqual([]);
+      expect(await product('ob1', OTHER)).toEqual({ stock: 10, cost: '100.00' });
+      const otherMoves = await admin.query(
+        `SELECT 1 FROM movements WHERE tenant_id = $1::uuid`,
+        [OTHER],
+      );
+      expect(otherMoves).toHaveLength(0);
+    });
+
     it('refuses malformed bodies with a 400 and writes nothing', async () => {
       const line = { partNo: 'TEST-1', name: 'Widget', qty: 1, cost: '1.00' };
       const bad: unknown[] = [

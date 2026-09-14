@@ -265,7 +265,7 @@ for the same mechanic sharing one product), then takes `FOR UPDATE` on every pro
 the bill, and only then bumps the counter. Any later path that writes
 stock **and** issues a number must take them in that same order. `POST /returns` (#22)
 does, with the parent bill's own `FOR UPDATE` ahead of all three: **sale → mechanic →
-products → `doc_counters`**. `POST /purchase-orders/:id/receive` (#26) still has to;
+products → `doc_counters`**. `POST /purchase-orders/:id/receive` (#26) takes the PO row `FOR UPDATE`, then every matched product in id order, and issues no number (the PO number was issued at create) — no other path locks a PO row, so it cannot close a cycle;
 `POST /sales/:id/void` (#23) does, taking the mechanic's row before the first product
 because it now reverses the tab. The drawer row that `POST /sales` and
 `POST /mechanics/:id/credit-payments` read first (before the mechanic on a sale, after it
