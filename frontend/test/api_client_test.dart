@@ -1,5 +1,6 @@
 // Unit tests for ApiClient, Bearer token injection, 401 auto-refresh, and error parsing.
 
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -312,5 +313,240 @@ void main() {
     expect(expired, 1, reason: 'the hook is what puts the app back on login');
     expect(tokenStorage.accessToken, isNull);
     expect(tokenStorage.refreshToken, isNull);
+  });
+
+  group('#161 a refresh whose fate is unknown keeps the session', () {
+    const connectionSentence = 'เกิดข้อผิดพลาดในการเชื่อมต่อกับเซิร์ฟเวอร์';
+
+    http.Response json(Object body, int status, {Map<String, String>? headers}) =>
+        http.Response.bytes(utf8.encode(jsonEncode(body)), status,
+            headers: {'content-type': 'application/json; charset=utf-8', ...?headers});
+
+    http.Response unauthenticated() => json({
+          'status': 'error',
+          'error': {'code': 'UNAUTHENTICATED', 'message': 'token expired'},
+        }, 401);
+
+    /// A client whose API answers 401 to anything but `Bearer fresh`, and whose
+    /// `/auth/refresh` is [refresh]. Counts refreshes and session expiries.
+    ({ApiClient client, int Function() refreshes, int Function() expiries}) build(
+      Future<http.Response> Function(http.Request req) refresh,
+    ) {
+      tokenStorage.accessToken = 'expired';
+      tokenStorage.refreshToken = 'refresh-1';
+      var refreshes = 0;
+      var expiries = 0;
+      final client = ApiClient(
+        baseUrl: 'http://server.test',
+        tokenStorage: tokenStorage,
+        httpClient: MockClient((req) async {
+          if (req.url.path.endsWith('/auth/refresh')) {
+            refreshes++;
+            return refresh(req);
+          }
+          if (req.headers['Authorization'] != 'Bearer fresh') return unauthenticated();
+          return json({'status': 'success', 'data': {'ok': true}}, 200);
+        }),
+      )..onSessionExpired = () => expiries++;
+      return (client: client, refreshes: () => refreshes, expiries: () => expiries);
+    }
+
+    void expectSessionKept(int expiries) {
+      expect(expiries, 0, reason: 'nothing refused the refresh token');
+      expect(tokenStorage.accessToken, 'expired');
+      expect(tokenStorage.refreshToken, 'refresh-1');
+    }
+
+    test('socket failure: the transport error reaches the caller, tokens kept', () async {
+      final t = build((_) async => throw http.ClientException('Connection reset'));
+
+      await expectLater(t.client.get('/api/v1/products'), throwsA(isA<http.ClientException>()));
+      expectSessionKept(t.expiries());
+    });
+
+    test('timeout: the TimeoutException reaches the caller, tokens kept', () async {
+      final t = build((_) async => throw TimeoutException('refresh'));
+
+      await expectLater(t.client.get('/api/v1/products'), throwsA(isA<TimeoutException>()));
+      expectSessionKept(t.expiries());
+    });
+
+    for (final status in [500, 502, 504]) {
+      test('$status from refresh: a non-verdict connection error, tokens kept', () async {
+        final t = build((_) async => http.Response('<html>Bad Gateway</html>', status));
+
+        await expectLater(
+          t.client.get('/api/v1/products'),
+          throwsA(isA<ApiException>()
+              .having((e) => e.statusCode, 'statusCode', status)
+              .having((e) => e.thaiMessage, 'thaiMessage', connectionSentence)),
+        );
+        expectSessionKept(t.expiries());
+      });
+    }
+
+    test('429 from refresh: RATE_LIMITED with Retry-After, tokens kept', () async {
+      final t = build((_) async => json({
+            'status': 'error',
+            'error': {'code': 'RATE_LIMITED', 'message': 'Too many requests'},
+          }, 429, headers: {'retry-after': '30'}));
+
+      await expectLater(
+        t.client.get('/api/v1/products'),
+        throwsA(isA<ApiException>()
+            .having((e) => e.statusCode, 'statusCode', 429)
+            .having((e) => e.retryAfterSeconds, 'retryAfterSeconds', 30)
+            .having((e) => e.thaiMessage, 'thaiMessage', 'ระบบกำลังทำงานหนัก กรุณารอสักครู่')),
+      );
+      expectSessionKept(t.expiries());
+    });
+
+    test('a 200 the client cannot read is not a refusal', () async {
+      final t = build((_) async => http.Response('<html>captive portal</html>', 200));
+
+      await expectLater(t.client.get('/api/v1/products'), throwsA(isA<http.ClientException>()));
+      expectSessionKept(t.expiries());
+    });
+
+    test('401 from refresh ends the session', () async {
+      final t = build((_) async => json({
+            'status': 'error',
+            'error': {'code': 'UNAUTHENTICATED', 'message': 'Device is retired'},
+          }, 401));
+
+      await expectLater(
+        t.client.get('/api/v1/products'),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 401)),
+      );
+      expect(t.expiries(), 1);
+      expect(tokenStorage.accessToken, isNull);
+      expect(tokenStorage.refreshToken, isNull);
+    });
+
+    test('403 from refresh (suspended shop) ends the session', () async {
+      final t = build((_) async => json({
+            'status': 'error',
+            'error': {'code': 'TENANT_SUSPENDED', 'message': 'ร้านนี้ถูกระงับการใช้งาน'},
+          }, 403));
+
+      await expectLater(t.client.get('/api/v1/products'), throwsA(isA<ApiException>()));
+      expect(t.expiries(), 1);
+      expect(tokenStorage.accessToken, isNull);
+      expect(tokenStorage.refreshToken, isNull);
+    });
+
+    test('the real server\'s enveloped refresh reply refreshes (not a sign-out)', () async {
+      // `EnvelopeInterceptor` wraps /auth/refresh like every route. Parsing it
+      // flat threw inside the old catch-all, which then cleared the tokens: every
+      // successful refresh against the real server signed the cashier out.
+      final t = build((_) async => json({
+            'status': 'success',
+            'data': {'accessToken': 'fresh', 'refreshToken': 'refresh-2'},
+          }, 200));
+
+      expect(await t.client.get('/api/v1/products'), {'ok': true});
+      expect(t.expiries(), 0);
+      expect(tokenStorage.accessToken, 'fresh');
+      expect(tokenStorage.refreshToken, 'refresh-2');
+    });
+
+    test('a lost reply after the server rotated: the kept token refreshes on retry', () async {
+      // ADR-0009: the server reissues a new jti with the same exp and keeps no
+      // denylist, so the old refresh token is still accepted. Model that.
+      var drop = true;
+      final t = build((req) async {
+        expect(jsonDecode(req.body)['refreshToken'], 'refresh-1');
+        if (drop) {
+          drop = false;
+          throw http.ClientException('reply lost');
+        }
+        return json({
+          'status': 'success',
+          'data': {'accessToken': 'fresh', 'refreshToken': 'refresh-2'},
+        }, 200);
+      });
+
+      await expectLater(t.client.get('/api/v1/products'), throwsA(isA<http.ClientException>()));
+      expect(await t.client.get('/api/v1/products'), {'ok': true});
+      expect(t.refreshes(), 2);
+      expect(t.expiries(), 0);
+      expect(tokenStorage.refreshToken, 'refresh-2');
+    });
+
+    test('concurrent callers share one failed refresh and all see the same error', () async {
+      final gate = Completer<void>();
+      final t = build((_) async {
+        await gate.future;
+        return http.Response('Bad Gateway', 502);
+      });
+
+      final calls = [
+        for (var i = 0; i < 5; i++)
+          t.client.get('/api/v1/products').then<Object?>((v) => v, onError: (Object e) => e),
+      ];
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      gate.complete();
+      final results = await Future.wait(calls);
+
+      expect(t.refreshes(), 1);
+      for (final r in results) {
+        expect(r, isA<ApiException>().having((e) => e.statusCode, 'statusCode', 502));
+      }
+      expectSessionKept(t.expiries());
+    });
+
+    test('concurrent callers share one refused refresh: one expiry, all 401', () async {
+      final gate = Completer<void>();
+      final t = build((_) async {
+        await gate.future;
+        return unauthenticated();
+      });
+
+      final calls = [
+        for (var i = 0; i < 5; i++)
+          t.client.get('/api/v1/products').then<Object?>((v) => v, onError: (Object e) => e),
+      ];
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      gate.complete();
+      final results = await Future.wait(calls);
+
+      expect(t.refreshes(), 1);
+      expect(t.expiries(), 1, reason: 'one refusal, one trip to the login form');
+      for (final r in results) {
+        expect(r, isA<ApiException>().having((e) => e.statusCode, 'statusCode', 401));
+      }
+    });
+
+    test('a 401 that lands after another caller refreshed retries without refreshing', () async {
+      tokenStorage.accessToken = 'expired';
+      tokenStorage.refreshToken = 'refresh-1';
+      var refreshes = 0;
+      final slow = Completer<void>();
+      final client = ApiClient(
+        baseUrl: 'http://server.test',
+        tokenStorage: tokenStorage,
+        httpClient: MockClient((req) async {
+          if (req.url.path.endsWith('/auth/refresh')) {
+            refreshes++;
+            return json({
+              'status': 'success',
+              'data': {'accessToken': 'fresh', 'refreshToken': 'refresh-$refreshes'},
+            }, 200);
+          }
+          if (req.url.path.endsWith('/slow') && req.headers['Authorization'] == 'Bearer expired') {
+            await slow.future;
+          }
+          if (req.headers['Authorization'] != 'Bearer fresh') return unauthenticated();
+          return json({'status': 'success', 'data': req.url.path}, 200);
+        }),
+      );
+
+      final slowCall = client.get('/slow');
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      expect(await client.get('/fast'), '/fast');
+      slow.complete();
+      expect(await slowCall, '/slow');
+      expect(refreshes, 1);
+    });
   });
 }

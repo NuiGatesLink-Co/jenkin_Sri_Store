@@ -505,6 +505,11 @@ device token (ADR-0004 — the machine is still enrolled, only the person is sig
 `Unauthenticated` with **no** `errorMessage`: at 04:00 the counter needs the login form, not a
 dialog about token lifetimes. **There is still no login screen and no router redirect**, so #54's
 AC3 and AC5 cannot be closed by this — that UI is unticketed work.
+🔴 **Only a 401/403 from `/auth/refresh` ends the session (#161).** A transport failure, 5xx, 429
+or unreadable 200 keeps both tokens and fails the original request as a connection error — the
+server keeps no refresh denylist (ADR-0009), so the kept token still works after a lost reply. The
+old catch-all also parsed the refresh reply flat, missing `EnvelopeInterceptor`'s `data`, so every
+*successful* refresh against the real server signed the cashier out.
 
 **#83 is open** (`team/3`): `ServerErrorResolver` prefers *any* server message containing a Thai
 codepoint over its own canonical string, so `returns.service.ts`'s English
