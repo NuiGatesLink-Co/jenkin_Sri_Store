@@ -349,25 +349,36 @@ web-asset assertion), committed 2026-09-04. Status per level:
    **Not built yet (teammates):** Ansible provision/deploy to the `demo` VM with rollback
    (#65 #67), monitoring overlay (#63), etcd + `RuntimeConfigService` (#64 #66). The *production*
    host is still unchosen (due before `q4`).
-   🔴 **#40's AC4 is being fixed by #39** (branch `feat/39-ci2-path-filters`, not yet merged):
-   `push.paths` meant a `server/`-only commit produced no web image and a `frontend/`-only
-   commit no server image, so a full release existed only for a commit touching both. Both
-   workflows now drop `paths:` from `push` entirely — every commit on `main` runs everything.
+   🔴 **#40's AC4 was fixed by #39:** `push.paths` meant a `server/`-only commit produced no
+   web image and a `frontend/`-only commit no server image, so a full release existed only
+   for a commit touching both. Both workflows drop `paths:` from `push` entirely — every
+   commit on `main` runs everything.
 
 `server/` and the Flutter client share this repo ([ADR-0011](docs/Backend_design/adr/0011-monorepo.md)),
 and their CI is still one-workflow-per-side (`flutter.yml`, `server.yml`) with per-job path
 filtering — see the next paragraph for how #39 keeps that from deadlocking a PR.
-🔴 **Known trap, fixed by #39** (branch `feat/39-ci2-path-filters`, not yet merged): workflow-level
-`paths:` meant a `server/`-only PR ran **no** Flutter jobs at all, so naming those jobs as required
-status checks on `main` would have blocked such a PR forever. Both `flutter.yml` and `server.yml`
-now trigger unfiltered on every `push`/`pull_request`; a `changes` job (`dorny/paths-filter@v4`,
-pull_request only) gates each workflow's own jobs internally, `integration` in `server.yml` is
-never gated (it carries the cross-tenant isolation tests — see `server/README.md` *Checks*), and
-each workflow ends in one always-reported status job (`flutter-ci-status`, `server-ci-status`,
-`!cancelled()` semantics — never `always()`, which would turn a cancelled run green) that is the
-only required check for its side. Branch protection on GitHub itself is **not yet set** — that is
-a repo-settings change intentionally left to the project owner; the required-check table and the
-`gh api` command are in `docs/Backend_design/07_CICD_DEPLOY.md` §4.
+🔴 **Known trap, fixed by #39:** workflow-level `paths:` meant a `server/`-only PR ran **no**
+Flutter jobs at all, so naming those jobs as required status checks on `main` would have
+blocked such a PR forever. Both `flutter.yml` and `server.yml` trigger unfiltered on every
+`push`/`pull_request`; a `changes` job (`dorny/paths-filter@v4`, pull_request only, with job-level
+`permissions: pull-requests: read` since it calls the PR-files API) gates each workflow's own
+jobs internally with `if: ${{ !cancelled() && (github.event_name != 'pull_request' ||
+needs.changes.outputs.<side> == 'true') }}` — the `!cancelled()` half is load-bearing: plain
+`needs: [changes]` implicitly requires `changes` to have *succeeded*, and on push it is skipped
+(not failed) by its own `if:`, which would otherwise cascade to skip every gated job on every
+push. `integration` in `server.yml` is never gated (it carries the cross-tenant isolation tests —
+see `server/README.md` *Checks*). Each workflow ends in one always-reported status job
+(`flutter-ci-status`, `server-ci-status`) that `needs` every job in its workflow (`changes`
+included) and uses `if: always()` plus an explicit loop over `needs.<job>.result`, passing only
+`success`/`skipped` and failing on anything else (`failure`, `cancelled`) — `always()` is safe
+*only* paired with that loop; a bare `always()` (or `!cancelled()` on the status job itself, which
+GitHub would then skip — and a skipped required check reads as passing — when the whole run is
+cancelled) is the false green `07_CICD_DEPLOY.md` §2 rule 4 warns about. These two status jobs are
+the only required check for their side. Both workflows' `concurrency.group` on `main` is keyed by
+commit SHA (not just `github.ref`) so two quick merges don't have the second evict the first's
+in-progress release-image build. Branch protection on GitHub itself is **not yet set** — that is a
+repo-settings change intentionally left to the project owner; the required-check table and the
+exact `gh api` command are in `docs/Backend_design/07_CICD_DEPLOY.md` §4.
 
 **Where the work lives — GitHub issues (since 2026-09-05).** `docs/Backend_design/` says *what* to
 build; the issue tracker says *who builds what, in what order.*

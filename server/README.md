@@ -62,16 +62,24 @@ corepack pnpm test:e2e      # against the compose Postgres/Redis — no mocks; t
 `.github/workflows/server.yml` (#38) runs the same three as separate jobs — lint, unit,
 integration — starting the compose Postgres + both Redis (with the dev overlay, so the runner
 can reach them) and applying the migrations first. Since #39 (`ci.2`), path filtering happens
-*inside* the workflow, not on the trigger: a `changes` job (pull_request only) gates `lint` and
-`unit` (and `audit`) on `server/**` having changed, but **`integration` is never path-gated** —
-it carries the cross-tenant isolation tests in `test/security.e2e-spec.ts`, which must run on
-every PR regardless of what changed (the sixth multi-tenant rule). A push to `main` never
-filters at all, so every commit on main runs the full workflow. The one required GitHub check
-is `server-ci-status`, appended at the end of the workflow — it reports on every PR (including
-one that touched only `frontend/**`, where `lint`/`audit`/`unit` are legitimately skipped) and
-fails only on a real job failure or cancellation. `flutter.yml` has the mirror-image
+*inside* the workflow, not on the trigger: a `changes` job (pull_request only, `dorny/paths-filter`
+with job-level `permissions: pull-requests: read` since it calls the PR-files API) gates `lint`,
+`audit` and `unit` on `server/**` having changed via `if: ${{ !cancelled() && (github.event_name
+!= 'pull_request' || needs.changes.outputs.server == 'true') }}` — the `!cancelled()` half matters
+because plain `needs: [changes]` would implicitly require `changes` to have *succeeded*, and on a
+push it's skipped (not failed) by its own `if:`, which would otherwise skip every gated job on
+every push too. **`integration` is never path-gated** — it carries the cross-tenant isolation
+tests in `test/security.e2e-spec.ts`, which must run on every PR regardless of what changed (the
+sixth multi-tenant rule). A push to `main` never filters at all, so every commit on main runs the
+full workflow (and `concurrency.group` on main is keyed by commit SHA, so two quick merges don't
+have the second evict the first's in-progress image build). The one required GitHub check is
+`server-ci-status`, appended at the end of the workflow — it `needs` every job including `changes`
+itself, uses `if: always()` (not `!cancelled()`, which GitHub would skip — and treat as passing —
+if the whole run were cancelled) paired with an explicit loop over every `needs.<job>.result` that
+passes only `success`/`skipped` and fails on anything else. `flutter.yml` has the mirror-image
 `flutter-ci-status`. Branch protection on `main` should require exactly those two checks — see
-`docs/Backend_design/07_CICD_DEPLOY.md` §4 for the table and the `gh api` command to set it.
+`docs/Backend_design/07_CICD_DEPLOY.md` §4 for the table and the exact `gh api` command to set it
+(not run by this repo's CI work — it's a repo-settings change for the project owner).
 
 ## Schema and migrations (#15)
 

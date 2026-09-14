@@ -37,7 +37,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: server-${{ github.ref }}
+  # Keyed by SHA on main so two quick merges each keep their own run (and their own
+  # release image) rather than the second evicting the first's in-progress run.
+  group: server-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
   # Never cancel a main run — it is the only producer of that commit's image.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
@@ -52,6 +54,11 @@ jobs:
     # Push and workflow_dispatch never filter (see the header comment), so this
     # job — and the path check it feeds — only needs to run for a PR.
     if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      # dorny/paths-filter on a pull_request event calls the PR-files API, which
+      # needs this beyond the file-level `contents: read`.
+      pull-requests: read
     outputs:
       server: ${{ steps.filter.outputs.server }}
     steps:
@@ -68,7 +75,12 @@ jobs:
     name: lint + typecheck
     runs-on: ubuntu-latest
     needs: [changes]
-    if: github.event_name != 'pull_request' || needs.changes.outputs.server == 'true'
+    # `needs: [changes]` on its own would implicitly require `changes` to have
+    # *succeeded*; on push/workflow_dispatch it is skipped by its own `if:` above,
+    # which would cascade to skip this job too. `!cancelled()` overrides that
+    # implicit requirement so the second clause (the actual path gate) is what
+    # decides, on both push and pull_request.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.server == 'true') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -83,7 +95,12 @@ jobs:
     name: audit (pnpm audit + Trivy fs)
     runs-on: ubuntu-latest
     needs: [changes]
-    if: github.event_name != 'pull_request' || needs.changes.outputs.server == 'true'
+    # `needs: [changes]` on its own would implicitly require `changes` to have
+    # *succeeded*; on push/workflow_dispatch it is skipped by its own `if:` above,
+    # which would cascade to skip this job too. `!cancelled()` overrides that
+    # implicit requirement so the second clause (the actual path gate) is what
+    # decides, on both push and pull_request.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.server == 'true') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -108,7 +125,12 @@ jobs:
     name: unit
     runs-on: ubuntu-latest
     needs: [changes]
-    if: github.event_name != 'pull_request' || needs.changes.outputs.server == 'true'
+    # `needs: [changes]` on its own would implicitly require `changes` to have
+    # *succeeded*; on push/workflow_dispatch it is skipped by its own `if:` above,
+    # which would cascade to skip this job too. `!cancelled()` overrides that
+    # implicit requirement so the second clause (the actual path gate) is what
+    # decides, on both push and pull_request.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.server == 'true') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -254,19 +276,23 @@ jobs:
   server-ci-status:
     name: server-ci-status
     runs-on: ubuntu-latest
-    needs: [lint, audit, unit, integration, build-image]
-    # #39: this is the only server-side required check on `main`. It must
-    # report on every PR — including a frontend-only one, where "lint"/"audit"/
-    # "unit" are skipped by the `changes` filter but "integration" (the
-    # cross-tenant isolation suite) still ran — so `!cancelled()` runs it even
-    # when some `needs` jobs were skipped, and its own logic (not `always()`,
-    # which would also mask a cancelled run as green — 07_CICD_DEPLOY.md §2, rule 4)
-    # fails it on a real failure or cancellation.
-    if: ${{ !cancelled() }}
+    needs: [changes, lint, audit, unit, integration, build-image]
+    # #39: this is the only server-side required check on `main`. It must report
+    # on every PR — including a frontend-only one, where "lint"/"audit"/"unit"
+    # (and `changes` itself, on push/workflow_dispatch) are legitimately skipped
+    # — so this uses `always()` to run unconditionally rather than `!cancelled()`,
+    # which would let GitHub skip *this* job too when the whole run is cancelled;
+    # a skipped required check is treated as passing, which is the false green
+    # 07_CICD_DEPLOY.md §2 rule 4 warns about. `always()` is safe here only
+    # because the result loop below explicitly fails on "cancelled" (and any
+    # other non-success/non-skipped result) for every job in `needs` — bare
+    # `always()` with no such check would itself be a false green.
+    if: always()
     steps:
       - name: require every job above to have succeeded or been skipped
         run: |
           for result in \
+            "${{ needs.changes.result }}" \
             "${{ needs.lint.result }}" \
             "${{ needs.audit.result }}" \
             "${{ needs.unit.result }}" \
