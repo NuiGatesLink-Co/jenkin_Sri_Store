@@ -481,6 +481,38 @@ describe('AuthService', () => {
         expect(checkedKeys('auth:ip:')).toEqual(['auth:ip:10.0.0.5', 'auth:ip:10.0.0.6']);
       });
 
+      it('refuses a locked-out ip before taking a database connection', async () => {
+        const createQueryRunner = vi.fn();
+        const service = new AuthService(
+          { createQueryRunner } as any,
+          {} as any,
+          {} as any,
+          rateLimitMock as any,
+        );
+        rateLimitMock.getFailureStatus.mockResolvedValueOnce({ allowed: false, retryAfter: 42 });
+
+        try {
+          await expect(
+            service.login({ username: 'owner', password: 'x', deviceToken: 'tokA' }, '10.0.0.9'),
+          ).rejects.toMatchObject({ status: 429 });
+          expect(createQueryRunner).not.toHaveBeenCalled();
+        } finally {
+          // A pre-fix service throws before consuming the Once value; don't leak it into the next test.
+          rateLimitMock.getFailureStatus.mockReset();
+          rateLimitMock.getFailureStatus.mockResolvedValue({ allowed: true });
+        }
+      });
+
+      it('counts an invalid device token against the ip bucket', async () => {
+        const { service } = build('not-an-argon2-hash');
+        rateLimitMock.recordFailure.mockClear();
+
+        await expect(
+          service.login({ username: 'owner', password: 'x', deviceToken: 'unknown' }, '10.0.0.10'),
+        ).rejects.toThrow('Invalid device token');
+        expect(rateLimitMock.recordFailure).toHaveBeenCalledWith('auth:ip:10.0.0.10', 60);
+      });
+
       it('records the client ip on auth.login_failed and auth.login', async () => {
         const argon2 = await import('argon2');
         const good = await argon2.hash('password123');
