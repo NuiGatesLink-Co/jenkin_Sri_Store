@@ -7,6 +7,7 @@ import {
 import { newId } from '../common/ids.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /** A parked bill on the wire. */
 export interface ParkedSale {
@@ -35,12 +36,18 @@ const COLUMNS = 'id, parked_at, device_id, payload';
  */
 @Injectable()
 export class ParkedSalesService {
+  constructor(private readonly tenants: TenantService) {}
+
   /**
    * Every parked bill of the tenant, newest first (`getParked`). Not filtered by
    * device: the Dart app has one machine, and ADR-0004 allows one active `pos` per
    * tenant, so the only other device a cart could belong to is a retired one.
    */
-  async list(): Promise<ParkedSale[]> {
+  list(): Promise<ParkedSale[]> {
+    return this.tenants.runTx(() => this.listIn());
+  }
+
+  private async listIn(): Promise<ParkedSale[]> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT ${COLUMNS} FROM parked_sales WHERE tenant_id = $1::uuid
@@ -51,7 +58,14 @@ export class ParkedSalesService {
   }
 
   /** `parkSale`: a fresh `pk` id and `parkedAt = now`. */
-  async park(
+  park(
+    payload: Record<string, unknown>,
+    deviceId: string,
+  ): Promise<ParkedSale> {
+    return this.tenants.runTx(() => this.parkIn(payload, deviceId));
+  }
+
+  private async parkIn(
     payload: Record<string, unknown>,
     deviceId: string,
   ): Promise<ParkedSale> {
@@ -71,7 +85,11 @@ export class ParkedSalesService {
    * *is* the recall: two tills recalling the same bill cannot both get it, because
    * only one `DELETE … RETURNING` finds the row and the other is `404`.
    */
-  async remove(id: string): Promise<ParkedSale> {
+  remove(id: string): Promise<ParkedSale> {
+    return this.tenants.runTx(() => this.removeIn(id));
+  }
+
+  private async removeIn(id: string): Promise<ParkedSale> {
     const { tenantId, manager } = currentRequestContext();
     const rows = returning<ParkedRow>(
       await manager.query(

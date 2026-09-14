@@ -18,6 +18,7 @@ import {
   type SaleActor,
 } from '../sales/sales.service.js';
 import type { QuoteCreate, QuoteFilter, QuotePatch } from './quotes.dto.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /** A quote on the wire. Money is a string (02_API_SCREENS.md §1.1). */
 export interface Quote {
@@ -109,6 +110,7 @@ export class QuotesService {
   constructor(
     private readonly docNumbers: DocNumberService,
     private readonly sales: SalesService,
+    private readonly tenants: TenantService,
   ) {}
 
   /**
@@ -116,7 +118,17 @@ export class QuotesService {
    * screen's filter, computed exactly as `_applyFilter` does from `isConverted` and
    * `isExpired` — not from the stored status column.
    */
-  async list(query: {
+  list(query: {
+    status?: QuoteFilter;
+    from?: string;
+    to?: string;
+    page: number;
+    limit: number;
+  }): Promise<{ items: Quote[]; total: number }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(query: {
     status?: QuoteFilter;
     from?: string;
     to?: string;
@@ -159,13 +171,21 @@ export class QuotesService {
     };
   }
 
-  async byId(id: string): Promise<Quote> {
+  byId(id: string): Promise<Quote> {
+    return this.tenants.runTx(() => this.byIdIn(id));
+  }
+
+  private async byIdIn(id: string): Promise<Quote> {
     const { tenantId, manager } = currentRequestContext();
     return this.read(manager, tenantId, id);
   }
 
   /** `saveQuote`: a fresh `q` id, a QT number, `date = now`, status `'open'`. */
-  async create(input: QuoteCreate, deviceId: string): Promise<Quote> {
+  create(input: QuoteCreate, deviceId: string): Promise<Quote> {
+    return this.tenants.runTx(() => this.createIn(input, deviceId));
+  }
+
+  private async createIn(input: QuoteCreate, deviceId: string): Promise<Quote> {
     // The same arithmetic a bill is held to, so a quote that saves is a quote that
     // converts — `SalesService.create` would refuse it with the same 409 later.
     assertSaleTotals(input);
@@ -215,7 +235,11 @@ export class QuotesService {
    * record of what a bill was sold from; the screen already refuses to edit one
    * (`'ใบนี้แปลงเป็นการขายแล้ว แก้ไขไม่ได้'`).
    */
-  async update(id: string, patch: QuotePatch): Promise<Quote> {
+  update(id: string, patch: QuotePatch): Promise<Quote> {
+    return this.tenants.runTx(() => this.updateIn(id, patch));
+  }
+
+  private async updateIn(id: string, patch: QuotePatch): Promise<Quote> {
     const { tenantId, manager } = currentRequestContext();
     const columns: Record<keyof QuotePatch, string> = {
       customerName: 'customer_name',
@@ -245,7 +269,11 @@ export class QuotesService {
   }
 
   /** `deleteQuote`: any quote, converted or not — the screen offers delete on every row. */
-  async delete(id: string): Promise<{ id: string; deleted: true }> {
+  delete(id: string): Promise<{ id: string; deleted: true }> {
+    return this.tenants.runTx(() => this.deleteIn(id));
+  }
+
+  private async deleteIn(id: string): Promise<{ id: string; deleted: true }> {
     const { tenantId, manager } = currentRequestContext();
     const rows = returning<{ id: string }>(
       await manager.query(
@@ -263,7 +291,11 @@ export class QuotesService {
    * A converted or expired quote may be duplicated — that is the screen's
    * "ทำซ้ำ (ต่ออายุใหม่)".
    */
-  async duplicate(id: string, deviceId: string): Promise<Quote> {
+  duplicate(id: string, deviceId: string): Promise<Quote> {
+    return this.tenants.runTx(() => this.duplicateIn(id, deviceId));
+  }
+
+  private async duplicateIn(id: string, deviceId: string): Promise<Quote> {
     const { tenantId, manager } = currentRequestContext();
     const src = await this.read(manager, tenantId, id);
     const newQuoteId = newId('q');
@@ -306,7 +338,15 @@ export class QuotesService {
    * `409 QUOTE_ALREADY_CONVERTED`. The replay check runs before the expiry check, so
    * a quote converted on its last day still replays the next morning.
    */
-  async convert(
+  convert(
+    id: string,
+    party: SaleParty,
+    actor: SaleActor,
+  ): Promise<ConvertQuoteResult> {
+    return this.tenants.runTx(() => this.convertIn(id, party, actor));
+  }
+
+  private async convertIn(
     id: string,
     party: SaleParty,
     actor: SaleActor,

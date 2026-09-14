@@ -6,6 +6,7 @@ import { returning } from '../common/sql.js';
 import type { SaleWithItems } from '../sales/sale-reads.service.js';
 import { SaleReadsService } from '../sales/sale-reads.service.js';
 import type { MechanicCreate, MechanicPatch } from '../people/people.dto.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 export interface Mechanic {
   id: string;
@@ -56,9 +57,19 @@ export class MechanicsService {
   constructor(
     private readonly saleReads: SaleReadsService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
   ) {}
 
-  async list(query: {
+  list(query: {
+    search?: string;
+    updatedSince?: string;
+    page: number;
+    limit: number;
+  }): Promise<{ items: Mechanic[]; total: number; fromCache: boolean }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(query: {
     search?: string;
     updatedSince?: string;
     page: number;
@@ -112,7 +123,11 @@ export class MechanicsService {
     return { ...page, fromCache: false };
   }
 
-  async byId(id: string): Promise<Mechanic> {
+  byId(id: string): Promise<Mechanic> {
+    return this.tenants.runTx(() => this.byIdIn(id));
+  }
+
+  private async byIdIn(id: string): Promise<Mechanic> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT ${COLUMNS} FROM mechanics
@@ -123,7 +138,11 @@ export class MechanicsService {
     return toMechanic(rows[0]);
   }
 
-  async create(input: MechanicCreate): Promise<Mechanic> {
+  create(input: MechanicCreate): Promise<Mechanic> {
+    return this.tenants.runTx(() => this.createIn(input));
+  }
+
+  private async createIn(input: MechanicCreate): Promise<Mechanic> {
     const { tenantId, manager } = currentRequestContext();
     await manager.query(
       `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
@@ -158,7 +177,11 @@ export class MechanicsService {
     return toMechanic(rows[0]);
   }
 
-  async update(id: string, patch: MechanicPatch): Promise<Mechanic> {
+  update(id: string, patch: MechanicPatch): Promise<Mechanic> {
+    return this.tenants.runTx(() => this.updateIn(id, patch));
+  }
+
+  private async updateIn(id: string, patch: MechanicPatch): Promise<Mechanic> {
     const { tenantId, manager } = currentRequestContext();
     const values: unknown[] = [tenantId, id];
     const columns: Record<string, string> = {
@@ -189,7 +212,11 @@ export class MechanicsService {
     return toMechanic(rows[0]);
   }
 
-  async delete(id: string): Promise<{ id: string; deleted: true }> {
+  delete(id: string): Promise<{ id: string; deleted: true }> {
+    return this.tenants.runTx(() => this.deleteIn(id));
+  }
+
+  private async deleteIn(id: string): Promise<{ id: string; deleted: true }> {
     const { tenantId, manager } = currentRequestContext();
     await manager.query(
       `UPDATE mechanics

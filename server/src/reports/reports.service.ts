@@ -1,6 +1,7 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { currentRequestContext } from '../common/request-context.js';
 import type { ReportDateRange } from './reports.dto.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 export interface ReportSummary {
   totalRevenue: string;
@@ -312,7 +313,13 @@ item_events AS (
 
 @Injectable()
 export class ReportsService {
-  async summary(range: ReportDateRange): Promise<ReportSummary> {
+  constructor(private readonly tenants: TenantService) {}
+
+  summary(range: ReportDateRange): Promise<ReportSummary> {
+    return this.tenants.runTx(() => this.summaryIn(range));
+  }
+
+  private async summaryIn(range: ReportDateRange): Promise<ReportSummary> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `WITH ${BOUNDS},
@@ -370,7 +377,11 @@ export class ReportsService {
    * `เครดิตช่าง` / `หักจากเครดิต` never touch the drawer. Readable from both device
    * roles, like `GET /shifts/*`.
    */
-  async closing(shiftId: string): Promise<ClosingReport> {
+  closing(shiftId: string): Promise<ClosingReport> {
+    return this.tenants.runTx(() => this.closingIn(shiftId));
+  }
+
+  private async closingIn(shiftId: string): Promise<ClosingReport> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `WITH shift AS (
@@ -445,7 +456,14 @@ export class ReportsService {
     };
   }
 
-  async topProducts(
+  topProducts(
+    range: ReportDateRange,
+    limit: number,
+  ): Promise<ProductSales[]> {
+    return this.tenants.runTx(() => this.topProductsIn(range, limit));
+  }
+
+  private async topProductsIn(
     range: ReportDateRange,
     limit: number,
   ): Promise<ProductSales[]> {
@@ -469,7 +487,11 @@ export class ReportsService {
     return rows.map(toProductSales);
   }
 
-  async byCategory(range: ReportDateRange): Promise<CategorySales[]> {
+  byCategory(range: ReportDateRange): Promise<CategorySales[]> {
+    return this.tenants.runTx(() => this.byCategoryIn(range));
+  }
+
+  private async byCategoryIn(range: ReportDateRange): Promise<CategorySales[]> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `WITH ${BOUNDS}, ${ITEM_EVENTS}
@@ -492,7 +514,11 @@ export class ReportsService {
     }));
   }
 
-  async stockValue(): Promise<StockValue> {
+  stockValue(): Promise<StockValue> {
+    return this.tenants.runTx(() => this.stockValueIn());
+  }
+
+  private async stockValueIn(): Promise<StockValue> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT count(*)::int AS product_count,
@@ -509,7 +535,14 @@ export class ReportsService {
     };
   }
 
-  async lowStock(
+  lowStock(
+    page: number,
+    limit: number,
+  ): Promise<{ items: LowStockProduct[]; total: number }> {
+    return this.tenants.runTx(() => this.lowStockIn(page, limit));
+  }
+
+  private async lowStockIn(
     page: number,
     limit: number,
   ): Promise<{ items: LowStockProduct[]; total: number }> {
@@ -543,7 +576,14 @@ export class ReportsService {
     };
   }
 
-  async productSales(
+  productSales(
+    productId: string,
+    range: ReportDateRange,
+  ): Promise<ProductSales> {
+    return this.tenants.runTx(() => this.productSalesIn(productId, range));
+  }
+
+  private async productSalesIn(
     productId: string,
     range: ReportDateRange,
   ): Promise<ProductSales> {

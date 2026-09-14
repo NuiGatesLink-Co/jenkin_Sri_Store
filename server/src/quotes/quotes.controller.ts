@@ -41,6 +41,7 @@ import {
   type ConvertQuoteResult,
   type Quote,
 } from './quotes.service.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 interface AuthenticatedRequest extends Request {
   user?: {
@@ -67,6 +68,7 @@ export class QuotesController {
   constructor(
     @InjectQueue(QUEUE_MAINTENANCE) private readonly maintenanceQueue: Queue,
     private readonly quotes: QuotesService,
+    private readonly tenants: TenantService,
   ) {}
 
   @Get()
@@ -90,7 +92,11 @@ export class QuotesController {
   @Post('purge')
   @HttpCode(HttpStatus.ACCEPTED)
   @UseInterceptors(IdempotencyInterceptor)
-  async purgeQuotes(@Req() req: AuthenticatedRequest, @Body() dto: PurgeQuotesDto) {
+  purgeQuotes(@Req() req: AuthenticatedRequest, @Body() dto: PurgeQuotesDto) {
+    return this.tenants.runTx(() => this.purgeQuotesIn(req, dto));
+  }
+
+  private async purgeQuotesIn(req: AuthenticatedRequest, dto: PurgeQuotesDto) {
     const role = req.user?.role;
     if (role !== 'manager' && role !== 'owner') {
       throw new ForbiddenException({

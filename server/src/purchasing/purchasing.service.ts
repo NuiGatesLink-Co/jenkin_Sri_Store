@@ -19,6 +19,7 @@ import {
   ReceivePOResult,
   UpdatedProductItem,
 } from './purchasing.dto.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 interface PORow {
   id: string;
@@ -57,9 +58,17 @@ export class PurchasingService {
     private readonly audit: AuditService,
     private readonly productsService: ProductsService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
   ) {}
 
-  async create(
+  create(
+    bodyRaw: unknown,
+    actor: { userId: string; deviceId: string },
+  ): Promise<PurchaseOrderOut> {
+    return this.tenants.runTx(() => this.createIn(bodyRaw, actor));
+  }
+
+  private async createIn(
     bodyRaw: unknown,
     actor: { userId: string; deviceId: string },
   ): Promise<PurchaseOrderOut> {
@@ -123,7 +132,15 @@ export class PurchasingService {
     };
   }
 
-  async list(
+  list(
+    status?: string,
+    page = 1,
+    limit = 50,
+  ): Promise<{ items: PurchaseOrderOut[]; total: number }> {
+    return this.tenants.runTx(() => this.listIn(status, page, limit));
+  }
+
+  private async listIn(
     status?: string,
     page = 1,
     limit = 50,
@@ -201,7 +218,11 @@ export class PurchasingService {
     return { items, total };
   }
 
-  async byId(id: string): Promise<PurchaseOrderOut> {
+  byId(id: string): Promise<PurchaseOrderOut> {
+    return this.tenants.runTx(() => this.byIdIn(id));
+  }
+
+  private async byIdIn(id: string): Promise<PurchaseOrderOut> {
     const { tenantId, manager } = currentRequestContext();
 
     const poRows = (await manager.query(
@@ -254,7 +275,14 @@ export class PurchasingService {
     };
   }
 
-  async cancel(
+  cancel(
+    id: string,
+    actor: { userId: string; deviceId: string },
+  ): Promise<PurchaseOrderOut> {
+    return this.tenants.runTx(() => this.cancelIn(id, actor));
+  }
+
+  private async cancelIn(
     id: string,
     actor: { userId: string; deviceId: string },
   ): Promise<PurchaseOrderOut> {
@@ -341,7 +369,14 @@ export class PurchasingService {
     };
   }
 
-  async delete(
+  delete(
+    id: string,
+    actor?: { userId: string; deviceId: string },
+  ): Promise<{ id: string; deleted: boolean }> {
+    return this.tenants.runTx(() => this.deleteIn(id, actor));
+  }
+
+  private async deleteIn(
     id: string,
     actor?: { userId: string; deviceId: string },
   ): Promise<{ id: string; deleted: boolean }> {
@@ -393,7 +428,14 @@ export class PurchasingService {
     return { id, deleted: true };
   }
 
-  async receive(
+  receive(
+    id: string,
+    actor: { userId: string; deviceId: string },
+  ): Promise<ReceivePOResult> {
+    return this.tenants.runTx(() => this.receiveIn(id, actor));
+  }
+
+  private async receiveIn(
     id: string,
     actor: { userId: string; deviceId: string },
   ): Promise<ReceivePOResult> {

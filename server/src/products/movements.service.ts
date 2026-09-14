@@ -6,6 +6,7 @@ import {
   type MovementOut,
   type MovementRow,
 } from '../sales/sales.service.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /**
  * `GET /movements?productId=&from=&to=` (02_API_SCREENS.md §3.2) — the stock ledger,
@@ -14,7 +15,19 @@ import {
  */
 @Injectable()
 export class MovementsService {
-  async list(query: {
+  constructor(private readonly tenants: TenantService) {}
+
+  list(query: {
+    productId?: string;
+    from?: string;
+    to?: string;
+    page: number;
+    limit: number;
+  }): Promise<{ items: MovementOut[]; total: number }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(query: {
     productId?: string;
     from?: string;
     to?: string;

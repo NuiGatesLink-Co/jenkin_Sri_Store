@@ -5,6 +5,7 @@ import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import type { SupplierCreate, SupplierPatch } from './catalogue.dto.js';
 import { productNotFound } from './products.service.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 export interface Supplier {
   id: string;
@@ -27,8 +28,14 @@ const COLUMNS = 'id, product_id, name, unit_cost, freight';
 /** `suppliers_repository.dart`: per-product suppliers, hard-deleted (01_DATABASE.md §10). */
 @Injectable()
 export class SuppliersService {
+  constructor(private readonly tenants: TenantService) {}
+
   /** A deleted product's suppliers are hidden with it; an unknown product has none. */
-  async listForProduct(productId: string): Promise<Supplier[]> {
+  listForProduct(productId: string): Promise<Supplier[]> {
+    return this.tenants.runTx(() => this.listForProductIn(productId));
+  }
+
+  private async listForProductIn(productId: string): Promise<Supplier[]> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT s.id, s.product_id, s.name, s.unit_cost, s.freight
@@ -41,7 +48,11 @@ export class SuppliersService {
     return rows.map(toSupplier);
   }
 
-  async create(input: SupplierCreate): Promise<Supplier> {
+  create(input: SupplierCreate): Promise<Supplier> {
+    return this.tenants.runTx(() => this.createIn(input));
+  }
+
+  private async createIn(input: SupplierCreate): Promise<Supplier> {
     const { tenantId, manager } = currentRequestContext();
     await this.assertProductLive(input.productId);
     const rows = (await manager.query(
@@ -60,7 +71,11 @@ export class SuppliersService {
     return toSupplier(rows[0]);
   }
 
-  async update(id: string, patch: SupplierPatch): Promise<Supplier> {
+  update(id: string, patch: SupplierPatch): Promise<Supplier> {
+    return this.tenants.runTx(() => this.updateIn(id, patch));
+  }
+
+  private async updateIn(id: string, patch: SupplierPatch): Promise<Supplier> {
     const { tenantId, manager } = currentRequestContext();
     if (patch.productId !== undefined)
       await this.assertProductLive(patch.productId);
@@ -94,7 +109,11 @@ export class SuppliersService {
   }
 
   /** Hard delete; `200` whether or not the row existed, as the Dart delete answered. */
-  async delete(id: string): Promise<{ id: string; deleted: true }> {
+  delete(id: string): Promise<{ id: string; deleted: true }> {
+    return this.tenants.runTx(() => this.deleteIn(id));
+  }
+
+  private async deleteIn(id: string): Promise<{ id: string; deleted: true }> {
     const { tenantId, manager } = currentRequestContext();
     await manager.query(
       `DELETE FROM suppliers WHERE tenant_id = $1::uuid AND id = $2`,

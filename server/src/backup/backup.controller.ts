@@ -23,6 +23,7 @@ import {
   QUEUE_BACKUP,
   type TenantExportJobPayload,
 } from '../queue/queue.constants.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 interface AuthenticatedRequest extends Request {
   user?: {
@@ -39,11 +40,16 @@ interface AuthenticatedRequest extends Request {
 export class BackupController {
   constructor(
     @InjectQueue(QUEUE_BACKUP) private readonly backupQueue: Queue,
+    private readonly tenants: TenantService,
   ) {}
 
   @Post('export')
   @HttpCode(HttpStatus.ACCEPTED)
-  async exportTenantData(@Req() req: AuthenticatedRequest) {
+  exportTenantData(@Req() req: AuthenticatedRequest) {
+    return this.tenants.runTx(() => this.exportTenantDataIn(req));
+  }
+
+  private async exportTenantDataIn(req: AuthenticatedRequest) {
     const role = req.user?.role;
     if (role !== 'owner') {
       throw new ForbiddenException({
@@ -76,7 +82,11 @@ export class BackupController {
   }
 
   @Get('jobs/:id')
-  async getJobStatus(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+  getJobStatus(@Req() req: AuthenticatedRequest, @Param('id') id: string) {
+    return this.tenants.runTx(() => this.getJobStatusIn(req, id));
+  }
+
+  private async getJobStatusIn(req: AuthenticatedRequest, id: string) {
     const role = req.user?.role;
     if (role !== 'owner') {
       throw new ForbiddenException({
