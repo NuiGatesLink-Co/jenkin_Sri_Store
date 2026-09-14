@@ -1081,11 +1081,17 @@ the stack fails fast if it's unset.
 
 **Wired into the deploy playbook by #121.** `deploy/ansible/deploy.yml` adds `-f monitoring.yml`
 to every compose command, copies `monitoring.yml` to `/opt/pos/` and the `deploy/prometheus/` and
-`deploy/grafana/` trees to `/opt/pos/deploy/`, brings the three services up after the API
-rollout, and fails the deploy unless `127.0.0.1:9090/-/healthy` and `127.0.0.1:3000/api/health`
-answer 200 on the VM. `-e enable_monitoring=false` (or `ENABLE_MONITORING=false`) leaves the
-overlay out; while it is on, the VM's `.env` must carry `GRAFANA_ADMIN_PASSWORD` or the first
-compose command fails before anything changes.
+`deploy/grafana/` trees to `/opt/pos/deploy/` (pruning files the repo no longer has), and brings
+the three services up **after** `/health/ready` passes and `.current_sha` is recorded. A changed
+config recreates Prometheus and Grafana — a single-file bind mount keeps the old inode after the
+copy, and the compose config hash does not change. If `127.0.0.1:9090/-/healthy` or
+`127.0.0.1:3000/api/health` does not answer 200, the deploy **warns and still succeeds**: monitoring
+is not a gate for the POS. `-e enable_monitoring=false` (or `ENABLE_MONITORING=false`) leaves the
+overlay out and removes containers an earlier deploy left running; toggling it on a VM already
+running that SHA waits for the next release, because the duplicate-release check ends the play.
+While it is on, the VM's `.env` must carry `GRAFANA_ADMIN_PASSWORD` — add it to the
+`DEMO_ENV_FILE` secret and re-run `provision.yml` first — or the first compose command fails
+before anything changes.
 
 🔴 **The bind mounts are `${MONITORING_CONFIG_DIR:-../deploy}/…`.** Relative paths resolve
 against the project directory — `server/` from the repo, but the flat `/opt/pos/` on the VM,

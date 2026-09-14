@@ -184,7 +184,10 @@ Prometheus (9090), Grafana (3000), node-exporter — ทั้งหมดผู
 5. `docker compose run --rm migrate` — **schema ก่อนโค้ด** ครั้งเดียว
 6. rolling: `up -d --no-deps api-1` → รอ healthy → `api-2` → `api-3` → `worker`, `bull-board`, etcd, monitoring
 7. seed key etcd ที่ยังไม่มี (§8) — ไม่ทับค่าที่มีอยู่
-8. `GET /health/ready` ต้อง 200 จาก Nginx ไม่งั้น playbook fail (สีแดงใน Actions)
+8. `GET /health/ready` ต้อง 200 จาก Nginx ไม่งั้น playbook fail (สีแดงใน Actions) → บันทึก SHA ลง `.current_sha`
+9. monitoring overlay (#121) **หลัง**ข้อ 8 เสมอ และ **ไม่ทำให้ deploy fail** — Grafana/Prometheus
+   ช้าหรือพังแค่พิมพ์ WARNING (`block`/`rescue`) เพราะ release ของ POS ผ่าน gate และถูกบันทึกไปแล้ว
+   (ตัดสินใจรอบ review PR #135: monitoring ไม่ใช่ gate ของเคาน์เตอร์)
 
 **กติกา migration ที่ตามมา (expand/contract):** เพราะ migrate รันก่อน restart และ**ไม่มี down-migration**
 โค้ดเวอร์ชันเก่าต้องยังรันบน schema ใหม่ได้ระหว่าง rolling — เพิ่มคอลัมน์ได้ ลบ/rename ต้องแยกเป็น
@@ -303,10 +306,16 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
   + monitoring, และ `promtool check config` ของ `prometheus.yml`)
 * **ต่อเข้า Ansible แล้ว (#121):** `deploy/ansible/deploy.yml` ใส่ `-f monitoring.yml` ในทุกคำสั่ง
   compose, copy `monitoring.yml` ไป `/opt/pos/` และ copy `deploy/prometheus/` + `deploy/grafana/`
-  ไป `/opt/pos/deploy/`, `up -d` ทั้งสาม service หลัง rolling ของ API แล้ว **fail ถ้า**
-  `127.0.0.1:9090/-/healthy` หรือ `127.0.0.1:3000/api/health` บน VM ไม่ตอบ 200 ·
-  ปิดได้ด้วย `-e enable_monitoring=false` (หรือ `ENABLE_MONITORING=false`) · ตอนเปิดอยู่ `.env` บน VM
-  ต้องมี `GRAFANA_ADMIN_PASSWORD` ไม่งั้นคำสั่ง compose แรก (pull) fail ก่อนเปลี่ยนอะไร
+  ไป `/opt/pos/deploy/` (ไฟล์ที่ถูกลบ/rename ใน repo ถูกลบบน VM ด้วย), `up -d` ทั้งสาม service
+  **หลัง** `/health/ready` ผ่านและบันทึก SHA แล้ว · config เปลี่ยน → `--force-recreate prometheus grafana`
+  (bind mount ไฟล์เดี่ยวยึด inode เก่าหลัง copy และ config hash ของ compose ไม่เปลี่ยน) · probe
+  `127.0.0.1:9090/-/healthy` + `127.0.0.1:3000/api/health` ไม่ผ่าน = **WARNING ไม่ fail** (§6 ข้อ 9) ·
+  ปิดได้ด้วย `-e enable_monitoring=false` (หรือ `ENABLE_MONITORING=false`) ซึ่ง `rm -sf` container
+  monitoring ที่ค้างจาก deploy ก่อน · สลับ flag บน VM ที่รัน SHA นั้นอยู่แล้วไม่มีผลจน release ถัดไป
+  (§6 ข้อ 1 จบ play ก่อน)
+* 🔴 **ก่อน merge/deploy ครั้งแรกหลัง #121:** เพิ่ม `GRAFANA_ADMIN_PASSWORD` ใน secret `DEMO_ENV_FILE`
+  แล้วรัน `provision.yml` ใหม่ (`.env` บน VM มาจาก secret นี้ทางเดียว) ไม่งั้นคำสั่ง compose แรก (pull)
+  fail ก่อนเปลี่ยนอะไร — คู่กับ `ETCD_ROOT_PASSWORD` ของ PR #113
 * 🔴 **path ของ bind mount คือ `${MONITORING_CONFIG_DIR:-../deploy}/…`** — path สัมพัทธ์ resolve กับ
   project directory ซึ่งจาก repo คือ `server/` แต่บน VM คือ `/opt/pos/` แบนราบ (`../deploy/…` จะเป็น
   `/opt/deploy/…` และ Docker สร้างโฟลเดอร์ว่างให้เงียบ ๆ) — playbook ตั้ง `MONITORING_CONFIG_DIR=./deploy`
