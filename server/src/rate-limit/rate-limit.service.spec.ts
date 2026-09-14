@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { runInRequestContext } from '../common/request-context.js';
 import { RateLimitService } from './rate-limit.service.js';
 
 describe('RateLimitService (ADR-0006)', () => {
@@ -87,6 +88,51 @@ describe('RateLimitService (ADR-0006)', () => {
       'EX',
       300,
     );
+  });
+
+  // #162: inside a request the middleware already holds a pool connection, so a second one
+  // from `ds` deadlocks the pool under a burst. The plan is read on the request's own
+  // transaction instead, inside a savepoint.
+  it('reads the plan on the request transaction, never the pool, inside a request (#162)', async () => {
+    redisMock.get.mockResolvedValue(null);
+    redisMock.eval.mockResolvedValue([1, 60]);
+    const manager = {
+      query: vi.fn(async (sql: string) => (sql.startsWith('SELECT') ? [{ plan: 'demo' }] : [])),
+    };
+
+    const res = await runInRequestContext({ manager: manager as any }, () =>
+      service.checkRateLimit('tenant-demo', 'GET:/products'),
+    );
+
+    expect(res.allowed).toBe(true);
+    expect(dsMock.query).not.toHaveBeenCalled();
+    expect(manager.query.mock.calls.map((c) => c[0])).toEqual([
+      'SAVEPOINT rate_limit_plan',
+      'SELECT plan FROM tenants WHERE id = $1',
+      'RELEASE SAVEPOINT rate_limit_plan',
+    ]);
+    expect(redisMock.set).toHaveBeenCalledWith('t:tenant-demo:plan', 'demo', 'EX', 300);
+  });
+
+  it('rolls back to the savepoint when the in-request plan read fails, and fails open (#162)', async () => {
+    redisMock.get.mockResolvedValue(null);
+    redisMock.eval.mockResolvedValue([1, 60]);
+    const manager = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.startsWith('SELECT')) throw new Error('invalid input syntax for type uuid');
+        return [];
+      }),
+    };
+
+    const res = await runInRequestContext({ manager: manager as any }, () =>
+      service.checkRateLimit('not-a-uuid', 'GET:/products'),
+    );
+
+    expect(res.allowed).toBe(true);
+    // Without the rollback the request transaction would be aborted, and every later
+    // statement in it — the guard's `SET LOCAL` included — would fail.
+    expect(manager.query).toHaveBeenLastCalledWith('ROLLBACK TO SAVEPOINT rate_limit_plan');
+    expect(redisMock.set).not.toHaveBeenCalled();
   });
 
   it('fails open when Redis throws an error (ADR-0006 fail-open rule)', async () => {

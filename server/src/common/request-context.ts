@@ -78,6 +78,11 @@ export function currentRequestContext(): RequestContext {
  * run either side of the guard: the guard itself (which needs the manager to do
  * `SET LOCAL`) and the interceptor that commits it. Nothing else may use it, because
  * a query through it before the guard runs sees no tenant at all under RLS.
+ *
+ * One exception, for the same reason the guard reads `tenants.status` here:
+ * `RateLimitService` reads `tenants.plan` (no RLS) on it, because any global guard that
+ * reaches for a second pool connection while the request holds this one deadlocks the
+ * pool under a burst (#162).
  */
 export function currentRequestTransaction(): EntityManager | undefined {
   return storage.getStore()?.manager;

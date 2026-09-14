@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import { DataSource } from 'typeorm';
+import { currentRequestTransaction } from '../common/request-context.js';
 import { REDIS_CACHE } from '../infra/redis.module.js';
 
 export interface RateLimitCheckResult {
@@ -256,10 +257,7 @@ export class RateLimitService {
     }
 
     try {
-      const rows = await this.ds.query(
-        `SELECT plan FROM tenants WHERE id = $1`,
-        [tenantId],
-      );
+      const rows = await this.readPlan(tenantId);
 
       if (rows.length === 0) {
         return 'basic';
@@ -276,6 +274,40 @@ export class RateLimitService {
       return plan;
     } catch {
       return 'basic';
+    }
+  }
+
+  /**
+   * 🔴 **Never a second pool connection while a request holds one (#162).** This guard runs
+   * after `RequestContextMiddleware` has already taken the request's connection, so
+   * `this.ds.query` here was a nested acquisition: with the plan cache cold (a reset tenant,
+   * or every `PLAN_CACHE_TTL_SEC`), `DB_POOL_SIZE` simultaneous requests each held one
+   * connection and waited for another, the pool had none to give, and every one of them sat
+   * out `connectionTimeoutMillis` (10 s) — the requests queued behind them for a FIRST
+   * connection 500'd in the middleware, and this lookup silently failed open to `'basic'`.
+   * Measured on `ten simultaneous opens` at `DB_POOL_SIZE=8`: eight plan lookups all failing
+   * after 10 000 ms, two 500s. A bigger pool only raises the burst size that triggers it.
+   *
+   * So inside a request the plan is read on the request's own transaction — the fix
+   * `TenantGuard` already applies to `tenants.status`, and safe for the same reason: `tenants`
+   * has no RLS, so the read is well defined before `app.tenant_id` is set. It runs inside a
+   * savepoint so a failed lookup can still fail open without leaving the request transaction
+   * aborted. Outside a request scope (no connection held) the pool is fine.
+   */
+  private async readPlan(tenantId: string): Promise<{ plan: string }[]> {
+    const sql = `SELECT plan FROM tenants WHERE id = $1`;
+    const manager = currentRequestTransaction();
+    if (!manager) {
+      return (await this.ds.query(sql, [tenantId])) as { plan: string }[];
+    }
+    await manager.query('SAVEPOINT rate_limit_plan');
+    try {
+      const rows = (await manager.query(sql, [tenantId])) as { plan: string }[];
+      await manager.query('RELEASE SAVEPOINT rate_limit_plan');
+      return rows;
+    } catch (err) {
+      await manager.query('ROLLBACK TO SAVEPOINT rate_limit_plan');
+      throw err;
     }
   }
 }
