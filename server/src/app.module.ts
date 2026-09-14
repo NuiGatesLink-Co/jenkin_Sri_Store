@@ -26,6 +26,9 @@ import { CustomersController } from './customers/customers.controller.js';
 import { CustomersModule } from './customers/customers.module.js';
 import { MechanicsController } from './mechanics/mechanics.controller.js';
 import { MechanicsModule } from './mechanics/mechanics.module.js';
+import { SettingsController } from './settings/settings.controller.js';
+import { BootstrapController } from './settings/bootstrap.controller.js';
+import { SettingsModule } from './settings/settings.module.js';
 import { ReportsController } from './reports/reports.controller.js';
 import { ReportsModule } from './reports/reports.module.js';
 import { QueueModule, QueueProcessorsModule } from './queue/queue.module.js';
@@ -71,6 +74,8 @@ const TENANT_ROUTES = [
   ShiftsController,
   CustomersController,
   MechanicsController,
+  SettingsController,
+  BootstrapController,
   ReportsController,
   QuotesController,
   BackupController,
@@ -107,6 +112,7 @@ export class AppModule implements NestModule {
         ShiftsModule,
         CustomersModule,
         MechanicsModule,
+        SettingsModule,
         ReportsModule,
         QueueModule,
         QuotesModule,
