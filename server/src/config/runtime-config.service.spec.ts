@@ -1,3 +1,4 @@
+import { getEventListeners } from 'node:events';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Logger } from 'pino';
 import { RuntimeConfigService, LOG_LEVEL_KEY } from './runtime-config.service.js';
@@ -213,7 +214,13 @@ describe('RuntimeConfigService', () => {
 describe('RuntimeConfigService watch resume (#120)', () => {
   const keyBase64 = Buffer.from(LOG_LEVEL_KEY).toString('base64');
   const b64 = (v: string) => Buffer.from(v).toString('base64');
-  const hang = () => new Promise<Response>(() => {});
+  /** A fetch that never answers, but rejects when its signal aborts (as real fetch does). */
+  const hang = (_url?: unknown, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+        once: true,
+      });
+    });
   let logger: Partial<Logger> & { level: string };
   let service: RuntimeConfigService;
 
@@ -350,6 +357,109 @@ describe('RuntimeConfigService watch resume (#120)', () => {
 
     expect(logger.level).toBe('error');
     expect(watchBodies(fetchSpy)[1].create_request.start_revision).toBe('101');
+  });
+
+  describe('reconnect backoff (PR #129 review)', () => {
+    const tick = (ms = 0) => vi.advanceTimersByTimeAsync(ms);
+    /** fetch that answers range with `rangeBody` and every watch with `watch()`. */
+    const etcd = (watch: () => Response | Promise<Response>) =>
+      vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async (url) =>
+          String(url).endsWith('/v3/watch')
+            ? watch()
+            : json({ header: { revision: '1' }, kvs: [] }),
+        );
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.mocked(service.backoffDelay).mockReturnValue(1_000);
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('grows the attempt when etcd accepts the watch and then cancels it', async () => {
+      etcd(() =>
+        stream({ result: { canceled: true, cancel_reason: 'permission denied' } }),
+      );
+
+      await service.start();
+      for (let i = 0; i < 4; i++) await tick(1_000);
+
+      const attempts = vi.mocked(service.backoffDelay).mock.calls.map(([a]) => a);
+      expect(attempts.length).toBeGreaterThanOrEqual(3);
+      expect(attempts.slice(0, 3)).toEqual([0, 1, 2]);
+    });
+
+    it('backs off after a stream that ends cleanly instead of reconnecting instantly', async () => {
+      const fetchSpy = etcd(() => stream());
+
+      await service.start();
+      await tick(0);
+      await tick(0);
+
+      expect(watchBodies(fetchSpy)).toHaveLength(1);
+      expect(service.backoffDelay).toHaveBeenCalledTimes(1);
+
+      await tick(1_000);
+      expect(watchBodies(fetchSpy)).toHaveLength(2);
+    });
+
+    it('resets the attempt once a real event arrives', async () => {
+      let n = 0;
+      etcd(() =>
+        n++ < 2
+          ? stream({ result: { canceled: true } })
+          : stream({
+              result: {
+                events: [
+                  { type: 'PUT', kv: { key: keyBase64, value: b64('debug'), mod_revision: '5' } },
+                ],
+              },
+            }),
+      );
+
+      await service.start();
+      for (let i = 0; i < 3; i++) await tick(1_000);
+
+      const attempts = vi.mocked(service.backoffDelay).mock.calls.map(([a]) => a);
+      expect(logger.level).toBe('debug');
+      expect(attempts.slice(0, 3)).toEqual([0, 1, 0]);
+    });
+
+    it('onModuleDestroy cancels a pending retry timer and leaves no abort listener behind', async () => {
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await service.start();
+      for (let i = 0; i < 5; i++) await tick(1_000);
+      const signal = (service as any).abortController.signal as AbortSignal;
+
+      expect(getEventListeners(signal, 'abort').length).toBeLessThanOrEqual(1);
+      expect(vi.getTimerCount()).toBe(1);
+
+      service.onModuleDestroy();
+      await tick(0);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(getEventListeners(signal, 'abort')).toHaveLength(0);
+
+      const calls = fetchSpy.mock.calls.length;
+      await tick(60_000);
+      expect(fetchSpy.mock.calls.length).toBe(calls);
+    });
+
+    it('warns once while etcd stays down, then logs retries at debug', async () => {
+      vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await service.start();
+      for (let i = 0; i < 5; i++) await tick(1_000);
+
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(logger.debug!).mock.calls.length).toBeGreaterThanOrEqual(4);
+    });
   });
 
   it('backs off exponentially between 1s and 30s with jitter', () => {

@@ -42,6 +42,8 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
   /** True when the watch loop must re-read the key before watching (boot failure, compaction). */
   private needsSync = false;
   private reconnectAttempt = 0;
+  /** True once the current outage has been logged at warn; cleared when etcd delivers data again. */
+  private warnedUnavailable = false;
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -84,6 +86,7 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
       );
       // Keep trying in the background instead of stranding on env defaults (#120).
       this.needsSync = true;
+      this.warnedUnavailable = true;
     }
 
     // 3. Start background watch loop for real-time updates
@@ -201,23 +204,24 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
         if (String(err?.message).includes('401')) {
           this.authToken = undefined;
         }
-        this.logger.warn(
+        // 07_CICD_DEPLOY.md §8: warn once per outage; further retries are debug noise.
+        const level = this.warnedUnavailable ? 'debug' : 'warn';
+        this.warnedUnavailable = true;
+        this.logger[level](
           { err: err?.message || String(err) },
           'etcd watch stream interrupted; reconnecting...',
         );
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(
-            resolve,
-            this.backoffDelay(this.reconnectAttempt++),
-          );
-          this.abortController?.signal.addEventListener(
-            'abort',
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            { once: true },
-          );
+          const signal = this.abortController?.signal;
+          const onAbort = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          }, this.backoffDelay(this.reconnectAttempt++));
+          signal?.addEventListener('abort', onAbort, { once: true });
         });
       }
     }
@@ -262,7 +266,6 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
     if (!resp.ok || !resp.body) {
       throw new Error(`etcd watch initiation failed with HTTP ${resp.status}`);
     }
-    this.reconnectAttempt = 0;
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
@@ -296,6 +299,10 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
         }
       }
     }
+    // A cleanly closed body (proxy timeout, etcd shutdown) must reconnect through backoff too.
+    if (!this.isStopped) {
+      throw new Error('etcd watch stream ended');
+    }
   }
 
   /**
@@ -318,7 +325,11 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
     }
 
     const events = result?.events;
-    if (!Array.isArray(events)) return;
+    if (!Array.isArray(events) || events.length === 0) return;
+
+    // Only a delivered event proves the watch works; an accepted-then-cancelled watch must keep backing off.
+    this.reconnectAttempt = 0;
+    this.warnedUnavailable = false;
 
     for (const event of events) {
       const modRevision = Number(event.kv?.mod_revision);
