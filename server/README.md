@@ -1143,6 +1143,21 @@ Redis, mints access tokens from a per-run RSA key pair, and resets one tenant pe
 - **`fileParallelism: false`.** Each file boots the whole application, so parallel files
   multiply the connection pools past `max_connections=100` and the run dies as "worker
   exited unexpectedly" rather than as a failed assertion.
+- **One run per Postgres (#141).** Every file shares the `pos` database and both Redis, and
+  `test/schema.e2e-spec.ts` drops `pos_schema_test` `WITH (FORCE)` — so a second concurrent
+  `pnpm test:e2e` against the same stack does not fail cleanly, it corrupts the first (a
+  migration dying with `terminating connection due to administrator command`, document
+  numbers starting mid-series). Vitest's `globalSetup` (`test/support/e2e-runner-lock.ts`)
+  therefore takes a session-level `pg_try_advisory_lock` on a dedicated connection before any
+  file starts, and a second run refuses at once with
+  `e2e runner lock: another \`pnpm test:e2e\` is already running against this Postgres; held by "e2e-lock pid=… host=…"`.
+  The lock lives in the maintenance database of `DATABASE_ADMIN_URL` (`postgres` by default),
+  never in a database a suite drops, and Postgres releases it when the connection closes — a
+  crashed or Ctrl+C'd run leaves nothing stale. It is refuse-not-wait: a waiting run would just
+  hide the collision. If the lock connection dies mid-run, the run is failed at teardown.
+  CI has one Postgres per job and always gets the lock. Per-run databases were not chosen:
+  the Redis ports, the `pos_app` URL in `fixture.ts` and the migrate step are all fixed, so
+  isolation would mean a database *and* two Redis per run.
 - `TEST_LOG_LEVEL=error pnpm test:e2e` is how you find out why a suite is getting a 500.
 
 ## Invariants this stack enforces (from #14 / #2)
