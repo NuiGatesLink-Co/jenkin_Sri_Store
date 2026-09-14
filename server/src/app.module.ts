@@ -34,10 +34,19 @@ import { ReportsModule } from './reports/reports.module.js';
 import { QueueModule, QueueProcessorsModule } from './queue/queue.module.js';
 import { QuotesController } from './quotes/quotes.controller.js';
 import { QuotesModule } from './quotes/quotes.module.js';
+import { ParkedSalesController } from './parked-sales/parked-sales.controller.js';
+import { ParkedSalesModule } from './parked-sales/parked-sales.module.js';
 import { BackupModule } from './backup/backup.module.js';
 import { BackupController } from './backup/backup.controller.js';
 import { ProductsController } from './products/products.controller.js';
 import { ProductsModule } from './products/products.module.js';
+import {
+  CategoriesController,
+  MovementsController,
+  SuppliersController,
+} from './products/catalogue.controllers.js';
+import { PurchaseOrdersController } from './purchasing/purchase-orders.controller.js';
+import { PurchasingModule } from './purchasing/purchasing.module.js';
 
 import { PurchasingController } from './purchasing/purchasing.controller.js';
 import { PurchasingModule } from './purchasing/purchasing.module.js';
@@ -81,9 +90,14 @@ const TENANT_ROUTES = [
   BootstrapController,
   ReportsController,
   QuotesController,
+  ParkedSalesController,
   BackupController,
   ProductsController,
   PurchasingController,
+  CategoriesController,
+  SuppliersController,
+  MovementsController,
+  PurchaseOrdersController,
 ];
 
 /** The HTTP application: core + health + platform. Business modules are added by later tickets. */
@@ -120,6 +134,7 @@ export class AppModule implements NestModule {
         ReportsModule,
         QueueModule,
         QuotesModule,
+        ParkedSalesModule,
         BackupModule,
         ProductsModule,
         PurchasingModule,

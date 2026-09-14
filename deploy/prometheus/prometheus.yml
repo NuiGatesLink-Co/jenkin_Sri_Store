@@ -1,0 +1,38 @@
+# Scrape config for the `prometheus` service in ../compose/monitoring.yml (#63 `ops.1`).
+# Owning doc: docs/Backend_design/07_CICD_DEPLOY.md §10 · ADR-0013.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Host CPU / memory / disk — the dashboard's three host panels
+  # (../grafana/dashboards/pos-overview.json).
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']
+
+  # The API has no /metrics endpoint yet (#34/#35). Until then this job scrapes the
+  # readiness path so the three instances at least appear as targets.
+  #
+  # 🔴 Known limitation (measured while building this file, not assumed): Prometheus's `up`
+  # is 0 whenever the response body fails to parse as the Prometheus text-exposition format —
+  # not just on connection/HTTP failures. /health/ready answers 200 with a JSON body, which
+  # fails that parse, so these targets read DOWN in the Prometheus UI even while the API is
+  # actually up (reproduced against a real `prom/prometheus` container: a 200 JSON response
+  # yields `health: "down"`, `lastError: "expected equal, got \":\" ... while parsing"`). This
+  # is the best available signal without adding an exporter the ticket doesn't ask for
+  # (e.g. blackbox_exporter); it is a placeholder, not a fixed reading of "is the API up", and
+  # it stops mattering the moment the job below is switched on.
+  - job_name: api-readiness
+    metrics_path: /health/ready
+    static_configs:
+      - targets: ['api-1:3000', 'api-2:3000', 'api-3:3000']
+
+  # Disabled until #34/#35 land a real /metrics endpoint (internal-only per
+  # 02_API_SCREENS.md's endpoint table — never routed through the public Nginx surface).
+  # Turning it on is then a one-line uncomment; the dashboard's two SLI panels (success rate,
+  # p95) read "no data" until this job is enabled and the app emits what they query.
+  # - job_name: api-metrics
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ['api-1:3000', 'api-2:3000', 'api-3:3000']

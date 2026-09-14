@@ -449,6 +449,8 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX idx_products_search ON products USING GIN (
   lower(part_no || ' ' || name || ' ' || name_th || ' ' || COALESCE(compat,'')) gin_trgm_ops
 );
+-- ⚠️ คำถามออกแบบที่ยังเปิด (#16, 2026-09-14): ใต้ RLS (role `pos_app`) planner ไม่ใช้ index นี้กับ LIKE เพราะ `textlike` ไม่ใช่ LEAKPROOF — ค้นหาจริงเป็น tenant index + filter (e2e `catalogue.e2e-spec.ts` ปักไว้ทั้งสองแผน)
+-- 🆕 migration 1788652800007: CREATE UNIQUE INDEX uq_products_partno_ci ON products (tenant_id, lower(part_no)) WHERE deleted_at IS NULL;  -- รหัสอะไหล่ห้ามซ้ำแบบไม่สนตัวพิมพ์ (db.js addProduct)
 
 > ### ⚠️ ทำไมไม่ใช้ full-text (`to_tsvector`) กับภาษาไทย
 > ภาษาไทย**ไม่มีช่องว่างระหว่างคำ** — parser มาตรฐานของ PostgreSQL จะมอง `"ผ้าเบรกหน้า"`

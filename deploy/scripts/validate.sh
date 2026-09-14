@@ -21,9 +21,35 @@ docker compose -f server/docker-compose.yml -f deploy/compose/vm.override.yml co
 
 echo "  -> Compose override merges successfully with zero errors."
 
+echo "=== 1b. Validating the monitoring overlay (#63 ops.1) ==="
+IMAGE_TAG="test-sha-validation" \
+POS_APP_PASSWORD="dummy_pos_app_password" \
+REDIS_PASSWORD="dummy_redis_password" \
+POSTGRES_PASSWORD="dummy_postgres_password" \
+JWT_PRIVATE_KEY="dummy_private_key" \
+JWT_PUBLIC_KEYS='{"dummy":"dummy"}' \
+BULL_BOARD_PASSWORD="dummy_bull_board_password" \
+GRAFANA_ADMIN_PASSWORD="dummy_grafana_password" \
+docker compose -f server/docker-compose.yml -f deploy/compose/vm.override.yml -f deploy/compose/monitoring.yml config --quiet
+
+echo "  -> Base + VM override + monitoring overlay merge successfully with zero errors."
+
+if command -v promtool >/dev/null 2>&1; then
+  promtool check config deploy/prometheus/prometheus.yml
+elif command -v docker >/dev/null 2>&1; then
+  docker run --rm --entrypoint promtool -v "$REPO_ROOT/deploy/prometheus:/cfg" prom/prometheus:v2.55.1 check config /cfg/prometheus.yml
+else
+  echo "  -> promtool and docker not found in PATH (skipping Prometheus config check)."
+fi
+
 echo "=== 2. Checking File Existence & Basic Structure ==="
 REQUIRED_FILES=(
   "deploy/compose/vm.override.yml"
+  "deploy/compose/monitoring.yml"
+  "deploy/prometheus/prometheus.yml"
+  "deploy/grafana/provisioning/datasources/prometheus.yml"
+  "deploy/grafana/provisioning/dashboards/dashboards.yml"
+  "deploy/grafana/dashboards/pos-overview.json"
   "deploy/ansible/ansible.cfg"
   "deploy/ansible/inventory/hosts.ini"
   "deploy/ansible/provision.yml"

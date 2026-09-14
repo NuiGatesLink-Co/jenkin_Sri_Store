@@ -60,8 +60,26 @@ corepack pnpm test:e2e      # against the compose Postgres/Redis — no mocks; t
 ```
 
 `.github/workflows/server.yml` (#38) runs the same three as separate jobs — lint, unit,
-integration — on every push/PR touching `server/**`, starting the compose Postgres + both
-Redis (with the dev overlay, so the runner can reach them) and applying the migrations first.
+integration — starting the compose Postgres + both Redis (with the dev overlay, so the runner
+can reach them) and applying the migrations first. Since #39 (`ci.2`), path filtering happens
+*inside* the workflow, not on the trigger: a `changes` job (pull_request only, `dorny/paths-filter`
+with job-level `permissions: pull-requests: read` since it calls the PR-files API) gates `lint`,
+`audit` and `unit` on `server/**` having changed via `if: ${{ !cancelled() && (github.event_name
+!= 'pull_request' || needs.changes.outputs.server == 'true') }}` — the `!cancelled()` half matters
+because plain `needs: [changes]` would implicitly require `changes` to have *succeeded*, and on a
+push it's skipped (not failed) by its own `if:`, which would otherwise skip every gated job on
+every push too. **`integration` is never path-gated** — it carries the cross-tenant isolation
+tests in `test/security.e2e-spec.ts`, which must run on every PR regardless of what changed (the
+sixth multi-tenant rule). A push to `main` never filters at all, so every commit on main runs the
+full workflow (and `concurrency.group` on main is keyed by commit SHA, so two quick merges don't
+have the second evict the first's in-progress image build). The one required GitHub check is
+`server-ci-status`, appended at the end of the workflow — it `needs` every job including `changes`
+itself, uses `if: always()` (not `!cancelled()`, which GitHub would skip — and treat as passing —
+if the whole run were cancelled) paired with an explicit loop over every `needs.<job>.result` that
+passes only `success`/`skipped` and fails on anything else. `flutter.yml` has the mirror-image
+`flutter-ci-status`. Branch protection on `main` should require exactly those two checks — see
+`docs/Backend_design/07_CICD_DEPLOY.md` §4 for the table and the exact `gh api` command to set it
+(not run by this repo's CI work — it's a repo-settings change for the project owner).
 
 ## Schema and migrations (#15)
 
@@ -265,7 +283,7 @@ for the same mechanic sharing one product), then takes `FOR UPDATE` on every pro
 the bill, and only then bumps the counter. Any later path that writes
 stock **and** issues a number must take them in that same order. `POST /returns` (#22)
 does, with the parent bill's own `FOR UPDATE` ahead of all three: **sale → mechanic →
-products → `doc_counters`**. `POST /purchase-orders/:id/receive` (#26) still has to;
+products → `doc_counters`**. `POST /purchase-orders/:id/receive` (#26) takes the PO row `FOR UPDATE`, then every matched product in id order, and issues no number (the PO number was issued at create) — no other path locks a PO row, so it cannot close a cycle;
 `POST /sales/:id/void` (#23) does, taking the mechanic's row before the first product
 because it now reverses the tab. The drawer row that `POST /sales` and
 `POST /mechanics/:id/credit-payments` read first (before the mechanic on a sale, after it
@@ -625,6 +643,127 @@ the CP number → the row → the reduced balance.
   patch them from a stale read. `mechanics.updated_at` also moves and is not returned;
   the client stamps its own, as it does after every write.
 
+## The catalogue (#16)
+
+`src/products/` — products, categories, suppliers, `movements`, ported from
+`products_repository.dart` / `suppliers_repository.dart` / `movements_repository.dart`.
+Reads are open to any tenant token; every write is `manager`/`owner`, both device roles,
+`Idempotency-Key` mandatory (`02_API_SCREENS.md §4`). `test/catalogue.e2e-spec.ts` replays
+every case of `frontend/test/products_repository_test.dart` at the HTTP seam.
+
+- **Products are soft-deleted** (`01_DATABASE.md §10`); every read hides tombstones except
+  `?updatedSince=`, which is the sync read and must carry them.
+- 🔴 **`?updatedSince=` is keyset-paged on `(updated_at, id)`.** Many rows share one
+  `updated_at` (a sale stamps every line with the transaction's `now()`; the platform import
+  stamps a catalogue at once), and `updatedAt` on the wire is millisecond-truncated, so a
+  reader that paged with `updated_at > max(updatedAt)` skipped the rest of a tie cut by a page
+  boundary — or, with a tie larger than a page, was served the same page forever. The response
+  carries `meta.nextCursor: { updatedSince, afterId }` (microsecond precision, or `null` on an
+  empty page); the reader sends both back and always asks for the first page after it
+  (`page>1` with `updatedSince` is a 400; `afterId` without it is a 400). `updatedSince` alone
+  still answers `updated_at > $ts`, as specified. A pass is done when a page is shorter than
+  `limit`; its last `nextCursor` is where the next refresh starts. Proved by *a keyset sync pass
+  over a tie larger than a page* (nine rows, one microsecond, limit 3).
+- 🔴 **Not solved here — late commits.** A write stamped with its transaction's start time
+  (`now()`) can commit after a reader has already moved its cursor past that time, and is then
+  never read. Recorded as #55's read-back-window question under ADR-0010 *ยังไม่เคาะ*. **Until
+  #55 decides that window, a client must start each refresh a safety margin before its stored
+  cursor** (an `updatedSince` some seconds earlier, no `afterId`), otherwise the protocol above
+  loses late-committing writes; the rows it reads again are upserts by id, so re-reading is harmless.
+- **`?partNo=` is one product, trimmed and case-insensitive** (`lower(part_no) = lower($n)`,
+  served by `uq_products_partno_ci`) — the same comparison uniqueness uses. A `partNo` that is
+  present but blank answers an empty page, never catalogue page 1.
+- **The platform import pre-flights case-duplicate part numbers** (`tenant-import.service.ts`):
+  a snapshot whose products share a part number ignoring case is a 400 naming the ids, before
+  the transaction, like the negative-stock pre-flight. It compares with JS `toLowerCase()`; a
+  non-ASCII pair that JS and Postgres `lower()` fold differently would still reach the index as a 500.
+- **`?search=`** puts the predicate on `SEARCH_EXPRESSION` — the exact expression
+  `idx_products_search` is built on — then rechecks `part_no`/`name`/`name_th` so matching stays
+  what the screens do (no `compat`). 🔴 **Under RLS the trigram index is not used:** as
+  `pos_app`, `LIKE` (`textlike`) is not LEAKPROOF, so the planner will not run it inside the index
+  ahead of the tenant policy and the search is a tenant index scan plus a filter. The e2e pins
+  both plans (owner: the index; `pos_app`: not the index). Open design question
+  (`01_DATABASE.md §5.2`) — do not "fix" it by marking functions LEAKPROOF or bypassing RLS.
+- **A part number is unique case-insensitively among live products**, enforced by the database:
+  `uq_products_partno_ci (tenant_id, lower(part_no)) WHERE deleted_at IS NULL` (migration
+  `1788652800007`), so the platform import cannot bypass it. A `23505` on it maps to
+  `409 DUPLICATE_PART_NO` / `รหัสอะไหล่นี้มีอยู่แล้ว`; two concurrent `BP-1`/`bp-1` creates give
+  exactly one 201. A tombstone's number is free to reuse.
+- **`adjust-stock` clamps at zero** (`01_DATABASE.md §7.6`) **after** validating the body: an
+  integer `delta`, a `type` of `adjustment-in`/`adjustment-out` whose direction matches the sign,
+  and a result that fits `INT`. The `movements` row keeps the requested `delta` beside the clamped
+  `stock_after`, as the Dart repository does. One `stock.adjust` audit row (#43). It locks one
+  product row and nothing else, so it cannot join the sale path's lock order.
+- **Categories are hard-deleted with no foreign key** from `products.category`; the product
+  keeps the name. `GET /categories` answers `[{name, color}]` for listed names from one query,
+  and stands the five seed names in when the table is empty, as the Dart repository. **The
+  colour of an orphaned name is the client's** — its hash fallback (`catColor` in
+  `products_repository.dart` / `AppColors.catColor`); the API adds no colour to products.
+- `PATCH /products/:id` never reads `stock` — stock moves only through writes that log a movement.
+- Product money is now a string on the wire (`price`/`cost`, §1.1); it was a number before #16.
+
+## Quotes and parked sales (#27)
+
+`src/quotes/` and `src/parked-sales/`, ported from `quotes_repository.dart` /
+`parked_repository.dart`. 🔴 **Neither writes `products` or `movements`.** The one exception
+is `POST /quotes/:id/convert`, which sells through `SalesService.create` — it never writes
+stock itself. `test/quotes-parked.e2e-spec.ts` asserts every product's stock and the
+ledger's row count across the whole lifecycle.
+
+- **Quotes: any role, both device roles; convert is `pos` only.** Every write takes an
+  `Idempotency-Key`. A QT number comes from `DocNumberService` in the token's device series, so a
+  session with no device token is `403 DEVICE_ROLE_FORBIDDEN`.
+- **`validUntil = now + (validDays ?? 30) × 24h`.** This is the Dart data layer's literal. The
+  server never reads `settings.quote_valid_days`, and neither does the Flutter client:
+  `_handleSaveQuote` (`checkout_screen.dart:515`) passes no `validDays`, so every quote gets 30
+  days whatever the setting says. The JS screen used to pass `quoteValidDays`; that is a
+  pre-existing JS→Flutter gap, not something this server closes.
+- **`isExpired` is `valid_until < now()`, evaluated at read time on every quote whatever its
+  status. `isConverted` is `status = 'converted'`** — `QuoteRowStatus`. The stored status is never
+  rewritten to `'expired'`. `?status=open|expired|converted` is `quotes_screen.dart`'s
+  `_applyFilter`: `expired` excludes converted quotes.
+- **A quote is held to the sale's arithmetic when it is saved** (`assertSaleTotals`,
+  `409 TOTAL_MISMATCH`), so a quote that saves is a quote that converts.
+- **`PATCH` takes header text only** (`customerName`, `customerPhone`, `notes`). It refuses
+  `status`, lines and money with a 400, and refuses any change to a converted quote with
+  `409 QUOTE_ALREADY_CONVERTED`. The screen's old convert, `updateQuote(status: 'converted')` followed
+  by `POST /sales`, is the half-finished state `02_API_SCREENS.md §3.8` calls out, so it is not
+  reachable here. `DELETE` works on any quote, as the screen allows.
+- **Convert is offered on `!converted && !expired`** (`quotes_screen.dart:559`), not on
+  `status = 'open'`, so an imported row stored as e.g. `'cancelled'` but still valid converts.
+- **Convert body = `POST /sales` minus lines and money** (`id`, `paymentMethod`, customer,
+  mechanic, `mechanicDelta`, `overrideCreditLimit`). The lines, prices, discount and total are
+  the saved quote's. Sending any of them is a 400: an edited cart is a different bill, and a
+  different bill goes through `POST /sales`. A quote line with no product goes to the sale path with
+  an empty id, as Checkout does, and comes back as `สต็อกไม่พอ … ไม่พบในสต็อก`.
+- 🔴 **Lock order on convert: quote `FOR UPDATE` → the sale path's own order.** Nothing else
+  locks a quote after a shift, a mechanic, a product or a counter, so this cannot form a cycle.
+  Converting twice cannot produce two bills:
+  - A second request waits on the quote row, then finds it converted.
+  - The same bill `id` replays the original. The sale is replayed through `existingSale`, and the
+    quote is re-read. The e2e compares the whole body.
+  - Any other `id` gets `409 QUOTE_ALREADY_CONVERTED`, with `details.convertedSaleId`.
+  - The replay check runs before the expiry check, so a quote converted on its last day still
+    replays the next morning.
+  - 🔴 **A convert retry must reuse its `Idempotency-Key`.** A retry with a fresh key on a quote
+    that has since been deleted (DELETE works on converted quotes, as in Dart) or purged answers
+    `404 QUOTE_NOT_FOUND`, and a client that reads every 4xx as a verdict would ring the bill
+    up again. The key replay does not read the quote, so it still answers the original.
+  - A replay through the bill `id` re-reads the quote, so `quote.isExpired` is recomputed at
+    read time: a replay the next day can differ from the original in that one field. A key
+    replay returns the stored body unchanged.
+  - An open quote whose bill `id` is already taken is `409 SALE_ID_REUSED`. Otherwise
+    `existingSale` would replay an unrelated bill, and the quote would be marked converted into it.
+- 🔴 **Divergence from Dart, open for the owner (02 §3.8):** Checkout drops short or
+  non-catalogue lines from a loaded quote and lets staff edit the cart. Convert here is
+  all-or-nothing. A quote that cannot convert is therefore rung up with `POST /sales`, stays
+  `open`, and can later be converted into a second bill.
+- **Parked sales: `pos` only, reads included** (ADR-0004). The body is `{ payload: {...} }`, stored
+  verbatim as JSONB. The list is tenant-wide, newest first, and not filtered by device.
+  Whether a till may see another device's cart is an open question for the owner. **`DELETE` returns the deleted row, so the delete is the
+  recall.** When two tills recall the same bill, one `DELETE … RETURNING` finds it and the other
+  gets `404 PARKED_SALE_NOT_FOUND`.
+
 ## Conventions these slices set
 
 - **Pagination lives in `meta`, not in `data`** (§1.2). A handler returns
@@ -719,3 +858,56 @@ for s in api-1 api-2 api-3; do docker compose up -d --no-deps $s; sleep 5; done
 ```
 
 Each instance keeps its static address (`172.30.0.11–13`), so Nginx needs no reload.
+
+## Monitoring overlay (#63 `ops.1`)
+
+Node Exporter + Prometheus + Grafana as a separate compose overlay, so it can sit next to the
+stack above without touching it:
+
+```
+cd server
+docker compose -f docker-compose.yml -f ../deploy/compose/monitoring.yml up -d
+```
+
+(On the VM, `vm.override.yml` goes in between.) **`GRAFANA_ADMIN_PASSWORD` is required** in
+`.env`, the same way `POS_APP_PASSWORD`/`REDIS_PASSWORD`/`BULL_BOARD_PASSWORD` already are —
+the stack fails fast if it's unset.
+
+🔴 **Not wired into the deploy playbook, and no open ticket owns that wiring.** `#67` `cd.2`
+merged (PR #108) without adding this overlay: `deploy/ansible/deploy.yml`'s `compose_files` is
+still `-f docker-compose.yml -f vm.override.yml` only, and the playbook copies neither
+`deploy/prometheus/` nor `deploy/grafana/` to `/opt/pos/`. Whoever picks this up next needs a
+new issue, and a trap to avoid: on the VM every compose file lands flat at `/opt/pos/*.yml`, so
+if `monitoring.yml` is copied there the same way, its relative `../deploy/prometheus/…` and
+`../deploy/grafana/…` paths resolve against `/opt/pos/` and land on `/opt/deploy/…`, which
+won't exist — `deploy/prometheus/` and `deploy/grafana/` have to be mirrored to that same
+relative location (or the compose invocation needs `--project-directory`), not just the one
+`monitoring.yml` file.
+
+**Nothing new is reachable from outside the host.** `node-exporter` publishes no port at all
+(Prometheus reaches it on the compose network); `prometheus` (`127.0.0.1:9090`) and `grafana`
+(`127.0.0.1:3000`) are loopback-only, same pattern as Bull-Board:
+
+```
+ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -L 3100:127.0.0.1:3100 deploy@<vm>
+```
+
+Grafana's datasource and its one dashboard (`deploy/grafana/dashboards/pos-overview.json`) are
+provisioned from files under `deploy/grafana/provisioning/` — nothing to click, and a rebuilt
+Grafana volume comes back identical. The dashboard has the VM's CPU/memory/disk (live from
+node-exporter) plus two SLI panels — success rate and p95 — that read "no data" until #34/#35
+add a real `/metrics` endpoint; `deploy/prometheus/prometheus.yml` has that scrape job
+commented out, ready to enable.
+
+🔴 **Prometheus's `up` reflects whether the response body parses as its text format, not just
+the HTTP status.** `/health/ready` answers 200 with a JSON body, which fails that parse, so the
+interim `api-readiness` job (scraping `/health/ready` directly on `api-1..3:3000`) shows all
+three instances as DOWN in the Prometheus UI even while the API is actually up — confirmed
+against a real `prom/prometheus` container while building this overlay. This is a known,
+accepted gap (adding `blackbox_exporter` to work around it would be scope beyond what #63
+asks for) that closes itself once the commented `api-metrics` job above is turned on.
+
+Every relative path in `monitoring.yml` is written against `server/`, not against
+`deploy/compose/` where the file itself lives — Compose resolves bind-mount paths against the
+*project directory*, which defaults to the directory of the **first** `-f` file. Always list
+`docker-compose.yml` first.
