@@ -81,10 +81,18 @@ class MechanicsRepository {
   /// Transactional (mirrors db.js: insert payment + reduce mechanic balance):
   ///   newP = { ...p, id:newId('cp'), receiptNo:docNo('CP'), date:now }
   ///   mech.creditBalance = max(0, (creditBalance||0) - amount)
+  ///
+  /// [paymentMethod] and [allowOverpayment] exist for `POST
+  /// /mechanics/:id/credit-payments` (#24), which needs both on the wire. The
+  /// Drift table has no method column, so this local path does not store them —
+  /// the screen still folds the method into [note] for the history line — and a
+  /// local write has no server to refuse an overpayment, so the flag is moot here.
   Future<CreditPaymentRow> addCreditPayment({
     required String mechanicId,
     required double amount,
     String? note,
+    required String paymentMethod,
+    bool allowOverpayment = false,
   }) async {
     return db.transaction(() async {
       final row = CreditPaymentRow(
@@ -132,4 +140,58 @@ class MechanicsRepository {
         .get();
     return rows.map((r) => db.creditPayments.map(r.data)).toList();
   }
+
+  // ── Credit-payment outbox (#24) ─────────────────────────────────────────────
+  // Only `ApiMechanicsRepository` ever writes `pending_credit_payments`; on the
+  // Drift-only build the table stays empty and these are harmless.
+
+  /// Payments taken at the counter that the server has not confirmed, oldest
+  /// first — both the ones still to send and the ones it refused.
+  Future<List<PendingCreditPaymentRow>> getPendingCreditPayments() =>
+      (db.select(db.pendingCreditPayments)
+            ..orderBy([(t) => OrderingTerm.asc(t.createdAt)]))
+          .get();
+
+  /// Sends whatever is still queued. Nothing to send without a server.
+  Future<void> flushPendingCreditPayments() async {}
+
+  /// Drops a payment the server REFUSED. A row still queued is never dropped:
+  /// it may already be committed with only the reply lost.
+  Future<void> discardRejectedCreditPayment(String id) =>
+      (db.delete(db.pendingCreditPayments)
+            ..where((t) => t.id.equals(id) & t.rejectedCode.isNotNull()))
+          .go();
+
+  /// A person confirmed a refused overpayment: queue it again with the flag and
+  /// send. The id stays — the server never stored the refused attempt, and the id
+  /// is its replay check — but the `Idempotency-Key` is new, because the body
+  /// changed and a key may not be reused for a different body.
+  Future<void> resendRejectedAllowingOverpayment(String id) async {
+    await (db.update(
+      db.pendingCreditPayments,
+    )..where((t) => t.id.equals(id) & t.rejectedCode.isNotNull())).write(
+      PendingCreditPaymentsCompanion(
+        idempotencyKey: Value(newId('idem')),
+        allowOverpayment: const Value(true),
+        rejectedCode: const Value(null),
+        rejectedMessage: const Value(null),
+      ),
+    );
+    await flushPendingCreditPayments();
+  }
+}
+
+/// Thrown by `addCreditPayment` when the payment was saved on this device but
+/// the server has not confirmed it yet.
+///
+/// 🔴 Not a failure: the cash is taken and the payment WILL be sent. The screen
+/// must close the dialog and say so, because a cashier who reads "failed" presses
+/// again — and that second press is a second payment.
+class CreditPaymentQueued implements Exception {
+  const CreditPaymentQueued();
+
+  @override
+  String toString() =>
+      'บันทึกการรับชำระไว้ในเครื่องแล้ว — ยังส่งเข้าระบบไม่ได้ จะส่งให้อัตโนมัติ '
+      '(ยอดค้างจะลดเมื่อส่งสำเร็จ) ไม่ต้องกดรับชำระซ้ำ';
 }

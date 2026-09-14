@@ -21,13 +21,15 @@ describe('AuthController', () => {
   it('login delegates to authService.login', async () => {
     authServiceMock.login.mockResolvedValue({ accessToken: 'a1', refreshToken: 'r1' });
 
-    const res = await controller.login({ username: 'owner', password: 'pwd' });
+    const reqMock = { ip: '127.0.0.1' } as any;
+    const res = await controller.login({ username: 'owner', password: 'pwd' }, reqMock);
     expect(res).toEqual({ accessToken: 'a1', refreshToken: 'r1' });
-    expect(authServiceMock.login).toHaveBeenCalledWith({ username: 'owner', password: 'pwd' });
+    expect(authServiceMock.login).toHaveBeenCalledWith({ username: 'owner', password: 'pwd' }, '127.0.0.1');
   });
 
   it('login throws UnauthorizedException when credentials are missing', async () => {
-    await expect(controller.login({ username: '', password: '' } as any)).rejects.toThrow(
+    const reqMock = { ip: '127.0.0.1' } as any;
+    await expect(controller.login({ username: '', password: '' } as any, reqMock)).rejects.toThrow(
       UnauthorizedException,
     );
   });

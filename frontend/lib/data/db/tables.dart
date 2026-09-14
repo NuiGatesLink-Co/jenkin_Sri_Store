@@ -32,6 +32,10 @@ class Products extends Table {
   /// false so an unknown product is not sellable offline.
   BoolColumn get offlineOk => boolean().withDefault(const Constant(false))();
 
+  /// Schema v4 (Ticket #55): soft delete timestamp from server so that
+  /// `?updatedSince=` cursor does not re-resurrect deleted products.
+  DateTimeColumn get deletedAt => dateTime().nullable()();
+
   @override
   Set<Column> get primaryKey => {id};
 }
@@ -262,6 +266,38 @@ class CreditPayments extends Table {
   RealColumn get amount => real()();
   DateTimeColumn get date => dateTime()();
   TextColumn get note => text().nullable()();
+
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+/// Schema v5 (#24): credit payments taken at the counter that the server has not
+/// confirmed yet — the outbox of `ApiMechanicsRepository.addCreditPayment`.
+///
+/// 🔴 The id and `Idempotency-Key` are minted and written here BEFORE the request
+/// goes out, and every resend uses them verbatim, so neither a lost reply, an app
+/// restart nor a day offline can turn one payment into two. Nothing here touches
+/// `credit_payments` or the mechanic's balance: those are patched from the
+/// server's reply only (ADR-0010 — no local CP numbers, no second bookkeeping).
+@DataClassName('PendingCreditPaymentRow')
+class PendingCreditPayments extends Table {
+  /// The client id sent as the body's `id` — the server's durable replay check.
+  TextColumn get id => text()();
+  TextColumn get idempotencyKey => text()();
+  TextColumn get mechanicId => text()();
+
+  /// The wire's two-decimal string, exactly as it will be sent.
+  TextColumn get amount => text()();
+  TextColumn get paymentMethod => text()();
+  TextColumn get note => text().nullable()();
+  BoolColumn get allowOverpayment =>
+      boolean().withDefault(const Constant(false))();
+  DateTimeColumn get createdAt => dateTime()();
+
+  /// Null while the payment may still be sent. Set to the server's refusal code
+  /// once it gave a verdict — the row then waits for a person, never a retry.
+  TextColumn get rejectedCode => text().nullable()();
+  TextColumn get rejectedMessage => text().nullable()();
 
   @override
   Set<Column> get primaryKey => {id};

@@ -16,6 +16,12 @@ export interface AppConfig {
   jwtPublicKeys?: string[];
   /** Optional active signing key ID (defaults to 'key-1'). */
   jwtKeyId?: string;
+  /** Allowed CORS origins (defaults to '*' or localhost in dev). */
+  corsOrigins?: string[];
+  /** Optional etcd URL for dynamic runtime config (ADR-0013, 07_CICD_DEPLOY §8). */
+  etcdUrl?: string;
+  /** Optional etcd root password. */
+  etcdPassword?: string;
 }
 
 export const APP_CONFIG = Symbol('APP_CONFIG');
@@ -24,6 +30,19 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   const v = env[name];
   if (!v) throw new Error(`Missing required environment variable ${name}`);
   return v;
+}
+
+function parsePublicKeys(raw: string): string[] {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, string>;
+      return Object.values(parsed);
+    } catch {
+      // fallback to split
+    }
+  }
+  return trimmed.split(',').map((k) => k.trim());
 }
 
 export function loadConfig(env = process.env): AppConfig {
@@ -49,7 +68,12 @@ export function loadConfig(env = process.env): AppConfig {
     jwtPlatformSecret: env.JWT_PLATFORM_SECRET ?? 'dev-only-platform-secret',
     jwtTenantSecret: env.JWT_TENANT_SECRET ?? 'dev-only-tenant-secret',
     jwtPrivateKey: isApi ? required(env, 'JWT_PRIVATE_KEY') : undefined,
-    jwtPublicKeys: isApi ? required(env, 'JWT_PUBLIC_KEYS').split(',').map(k => k.trim()) : undefined,
+    jwtPublicKeys: isApi ? parsePublicKeys(required(env, 'JWT_PUBLIC_KEYS')) : undefined,
     jwtKeyId: env.JWT_KEY_ID ?? 'key-1',
+    corsOrigins: env.CORS_ORIGINS
+      ? env.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
+      : undefined,
+    etcdUrl: env.ETCD_URL,
+    etcdPassword: env.ETCD_ROOT_PASSWORD ?? env.ETCD_PASSWORD,
   };
 }

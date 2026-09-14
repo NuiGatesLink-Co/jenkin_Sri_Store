@@ -58,13 +58,25 @@ export class HttpExceptionFilter implements ExceptionFilter {
   catch(exception: unknown, host: ArgumentsHost) {
     const ctx = host.switchToHttp();
     const req = ctx.getRequest<Request & { id?: string }>();
+    const res = ctx.getResponse<Response>();
     const { status, body } = toErrorEnvelope(exception);
+
+    if (exception instanceof HttpException) {
+      const resp = exception.getResponse();
+      if (typeof resp === 'object' && resp !== null) {
+        const retryAfter = (resp as Record<string, unknown>).retryAfter;
+        if (retryAfter !== undefined) {
+          res.setHeader('Retry-After', String(retryAfter));
+        }
+      }
+    }
+
     if (status >= 500) {
       this.logger.error(
         { correlationId: req.id, err: exception },
         'unhandled exception',
       );
     }
-    ctx.getResponse<Response>().status(status).json(body);
+    res.status(status).json(body);
   }
 }

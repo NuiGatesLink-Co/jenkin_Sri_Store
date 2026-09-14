@@ -94,13 +94,17 @@ frontend/
       utils/                   ← newId/docNo (ids.dart), baht/round2/pointsFor (money.dart),
                                  csvSafe (csv_safe.dart)
     data/
-      db/tables.dart           ← 20 Drift tables (ported sa_* stores from pos/db.js)
+      db/tables.dart           ← 21 Drift tables (20 ported sa_* stores + #24's credit-payment outbox)
       db/database.dart         ← AppDatabase (@DriftDatabase) + seed data + AppDatabase.open()
       db/database.g.dart       ← GENERATED (committed). Regenerate ONLY on an ASCII path.
       repositories/            ← one repo per domain; transactional services mirror db.js
+      repositories/api/        ← #56: ApiSales/ApiReturns/ApiShifts — same interfaces,
+                                 server is the truth, Drift rows patched from the response
+                                 (ADR-0010). Opt-in: --dart-define=USE_API_WRITES=true
     domain/models/aggregates.dart  ← SaleWithItems/… read aggregates + input DTOs (SaleInput…)
     presentation/
-      repositories/repository_providers.dart ← flutter_bloc RepositoryProvider tree (13 repos)
+      repositories/repository_providers.dart ← flutter_bloc RepositoryProvider tree (13 repos
+                                 + AuthRepository/ApiClient); `useApi` swaps in the #56 API repos
       blocs/                    ← Cubits (ThemeMode, FontScale, PendingQuote, Cart)
       screens/                  ← 11 screens, 1:1 with the JS screens
       widgets/                  ← shared UI kit + AppShell nav + sub-views (receipt, A4 quote,
@@ -241,6 +245,9 @@ is the credit-note transaction ported from `returns_repository.dart`, and `POST 
 reverses the customer and mechanic ledger, which was #23's one remaining AC (1/2/4/5 shipped with #75).
 🔴 **The lock order grew to sale → mechanic → products → `doc_counters` → customer** — `sales` is the
 outermost resource because the sale path only INSERTs it; **#28 and #30 must keep that order**.
+(#94 and #100 add a `shifts` read `FOR SHARE` between the sale and mechanic locks on the void and return
+paths — every return method, since non-cash credit notes still net into a shift's gross profit — shared
+locks cannot cycle with the drawer's exclusive lockers, which lock nothing else; see `shifts.service.ts`.)
 Migration `1788652800004` adds `return_items.cost_at_sale`, carried from the locked `sale_items` read
 (ADR-0008's reasoning, applied to credit notes); #22 also writes `returns.shift_id`, which closes half
 of **#28**'s "every sale *and return* carries `shift_id`" — do not rebuild it there.
@@ -387,6 +394,160 @@ real schema at the commit before each bump — **they are evidence, do not tidy 
 #55's `?updatedSince=` cursor sees creates and edits but is structurally blind to deletions —
 **#55 owns that column.** It was deliberately NOT added in #53: ADR-0010 decision 2 moves the
 client schema only when the client actually needs the field, and nothing writes it until #55.
+
+**#54 is merged (PR #81) and #56 + #82 are merged and closed (PR #84, `ae4d47b`, 2026-09-12 — `feat/fe3-api-writes` deleted; read `docs/handoff_log/review-merge-fe3-84.md` for the review round that gated it).** `fe.3` is the
+money path client-side: `ApiSalesRepository` / `ApiReturnsRepository` / `ApiShiftsRepository` under
+`frontend/lib/data/repositories/api/`, each `implements` the concrete Drift class's implicit
+interface, hits the server, and **patches Drift rows from the response** (ADR-0010). Reads still
+delegate to the Drift instance they hold — those are #55. Wiring is opt-in:
+`repositoryProviders(db, useApi: …)` defaults to `const bool.fromEnvironment('USE_API_WRITES')`,
+so the shop keeps running the Drift build and `--dart-define=USE_API_WRITES=true` is what a
+developer flips. Read `docs/handoff_log/fe3-api-writes.md` before touching the client write path.
+
+Rules the slice establishes, all enforced or pinned:
+- 🔴 **An `ApiRepository` never calls a Drift transactional service** — `saveSale` after a `201` is
+  a double stock decrement, and a local stock pre-check refuses a bill the server would have taken.
+  `frontend/test/api_repository_contract_test.dart` enforces it at the source level. Its first draft
+  banned `db.transaction(` outright and red-flagged correct code: a **local-only** transaction after
+  the response is how a header row and its FK-bearing lines avoid being half-written. The rule is
+  what ADR-0010 §3 actually implies — no Drift transactional service, and **no transaction held open
+  across the wire**.
+- 🔴 **An `ApiException` must never reach a screen.** Checkout, Returns and the Cash Drawer all
+  render a failure as `e.toString().replaceFirst('Exception: ', '')`, so an escaping one prints
+  `ApiException(status: 409, code: …)` at the counter. `api_wire.dart`'s `rethrowThai` converts every
+  server verdict to the plain `Exception(thaiMessage)` those screens already understand.
+- 🔴 **The bill id and `Idempotency-Key` are minted once per cart, not once per call.** `ApiClient`
+  sets no timeout, so the ordinary failure is a dropped reply for a bill the server committed; a
+  fresh id and key on the counter's second press defeat **both** server defences at once
+  (`existingSale` keys on the client's bill id, `idempotency_keys` on the header) and ring the sale
+  up twice. The parked attempt lives in `api_wire.dart`'s **`PendingWrites`**, and all three money
+  paths use it — `createReturn` and `addDrawerEntry` did not at first, which is a second refund and
+  a wrong closing count respectively; `POST /returns` takes no client id at all, so the header is
+  its only defence, and the over-refund guard allows `sold − refunded` and so cannot see a duplicate.
+- 🔴 **Only a 4xx is a verdict** (`isVerdict`). A 5xx — nginx's own 502/504 included — and a 429
+  leave the write's fate unknown, and `503 IDEMPOTENCY_KEY_IN_FLIGHT` says outright that the
+  original is still running. Reading every `ApiException` as an answer is how a committed bill gets
+  rung up a second time. An attempt is also closed only **after** the local patch succeeds: a patch
+  that throws is as unresolved as a lost socket, and it expires after ten minutes because the
+  fingerprint is a value, not an identity.
+- 🔴 **Consent is carried, never inferred.** `SaleInput.overrideCreditLimit` exists because the
+  first implementation replayed `checkout_screen`'s own credit-limit test against the cached
+  mechanic row on a 409 and treated a trip as proof the counter had confirmed. It is not the same
+  read — the screen tests the row it captured when its list loaded — so it could override a limit
+  nobody was shown a dialog for, and the server then writes an `audit_log` row recording a
+  confirmation that never happened. **But removing that must not leave the 409 unanswered:** the
+  same staleness means the pre-emptive dialog cannot fire for a mechanic another till has already
+  moved, so `checkout_screen` catches `CREDIT_LIMIT_EXCEEDED` and asks again with the *server's*
+  `details {creditLimit, creditBalance, newBalance}`. That is what `PosException` is for —
+  `rethrowThai` used to erase the code, so no caller could tell one refusal from another; its
+  `toString()` is still the bare Thai sentence, so no screen had to change.
+- **Money crosses the wire as the string `"1234.50"`** (`wireMoney`, rounded through integer
+  satang); timestamps are ISO-8601; a field the response omits leaves its row alone (`keepMoney`).
+
+**#82 is closed by the same branch.** `POST /sales` and `POST /returns` wrote four things they did
+not return — `sales.shift_id`, the `movements` rows, `sale_items.cost_at_sale`, and the mechanic's
+three running totals — so the client had nowhere honest to get them. All four are returned now
+(no migration; `RETURNING` on INSERTs that already existed, no new read, no new lock, lock order
+untouched). 🔴 **Anything added to either write result must also be added to `existingSale`**, or a
+replayed bill answers null for a shift it really has; the e2e compares the replay's **whole body**
+with `toEqual` and pins array order, and the check was falsified rather than trusted. Still open:
+`POST /sales/:id/void` does not return its movements — it answers `SaleWithItems`, the shape
+`GET /sales/:id` also returns, so that is a design call. A void writes `movements.type = 'void'`
+(migration `1788652800003`), never `'return'`.
+
+🔴 **`setState(() => _someFuture = …)` trips a Flutter assertion** — the arrow body *returns* the
+Future and `setState` asserts its callback did not. Six pre-existing sites were fixed on this
+branch. They were invisible because the shop runs a release web build, where assertions are
+compiled out; the `checkout_screen` one sat in the **failed-sale `catch`**, so every refused bill
+hit it in any debug build. Write `setState(() { x = …; })`, never the arrow form, **when the
+value assigned is a `Future`** — that is the whole rule: `setState(() => _busy = true)` is fine,
+and 99 arrow-form sites remain in `frontend/lib` on purpose. A convention broader than its bug is
+one nobody follows, which teaches readers to skip the 🔴 markers.
+
+🔴 **An offline fallback may only run when the server never answered.** #55's API
+repositories (`data/repositories/api_*.dart`) `extend` their Drift counterpart and fell through to
+`super.<write>()` inside a bare `catch (_)`, so a server that *did* answer — a 409, or a 5xx where
+the write may well have committed and only the reply was lost — silently re-ran the Drift
+transactional service: a second weighted-average cost and a second `movements` row out of
+`receivePO`, a second `credit_payments` row, a second quote. All 16 write fallbacks now sit behind
+`on ApiException catch (e) { rethrowServerRefusal(e); }`, which converts the refusal to the
+`PosException` the screens render; only a transport failure still falls back, which is what keeps
+the app working with no server in phase 1. `api_repository_contract_test.dart` enforces it at the
+source level over **both** folders — its glob used to be `repositories/api/` only, so #55's files,
+which are one level up, were never checked at all.
+
+🔴 **`ApiClient.onSessionExpired` had no listener.** `_executeRefresh` cleared the tokens and
+called a hook nobody had set, so a refused refresh left the app in a signed-in state that every
+later request 401'd against. `main.dart` now wires it to `AuthCubit.sessionExpired`, which keeps the
+device token (ADR-0004 — the machine is still enrolled, only the person is signed out) and emits
+`Unauthenticated` with **no** `errorMessage`: at 04:00 the counter needs the login form, not a
+dialog about token lifetimes. **There is still no login screen and no router redirect**, so #54's
+AC3 and AC5 cannot be closed by this — that UI is unticketed work.
+
+**#83 is open** (`team/3`): `ServerErrorResolver` prefers *any* server message containing a Thai
+codepoint over its own canonical string, so `returns.service.ts`'s English
+`Refund method 'หักจากเครดิต' needs a bill with a mechanic.` wins and the mapped Thai never fires.
+Three idempotency codes are unmapped too.
+
+**#24 `p5.7` is built (branch `feat/p5.7-credit-payments`, 2026-09-13, not yet merged).**
+`POST /mechanics/:id/credit-payments` — `pos` only, idempotent, a CP number, and migration
+`1788652800005` adding `credit_payments.payment_method` + `.shift_id` (nullable, **no default**:
+an imported row is neither of our shifts nor necessarily cash). 🔴 **An overpayment is refused,
+not clamped:** `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` unless `allowOverpayment: true` (one
+`audit_log` row) — `GREATEST(0, …)` on an unvalidated amount is #22's money bug again.
+`paymentMethod` is required. The client `id` is a second duplicate defence beside the key, and
+the replay check runs **before** the overpayment check or a replayed full settlement is refused.
+🔴 **No open drawer, no money (owner's decision 2026-09-13, branch `feat/24-shift-guards`):**
+`POST /mechanics/:id/credit-payments` and `POST /sales` now answer `409 NO_OPEN_SHIFT` when the
+calling device has no shift with `closed_at IS NULL`, on every payment method — the old "stamp null
+and take it" port left that cash in no closing report. `ShiftsService.requireOpenShiftIdFor` reads
+the drawer `FOR SHARE` (a close waits for in-flight money; money behind a committed close is
+refused). It runs **after** both replay paths (key and client `id`), so a payment or bill committed
+while the drawer was open still replays after close; credit payment order is mechanic → replay →
+drawer → overpayment → CP number, sale order is `existingSale` → drawer → mechanic → products.
+`POST /returns` is covered **for cash only** since #100 (owner, 2026-09-13): a `'เงินสด'` refund with no
+open drawer is `409 NO_OPEN_SHIFT` (after the bill guards and the key replay; nothing written, no CN number
+consumed); `โอน`/`หักจากเครดิต` are still taken and stamp null. After today's close a cash refund waits for
+tomorrow's open — `open()` hands back the closed row. No NOT NULL
+migration: imported rows are legitimately null. E2E fixtures open a drawer with `seedOpenShift`.
+The same branch fixes the #55 client write, which sent no key, no method, and cast the string
+balance to `num` straight into a second local row. 🔴 **The client write is an outbox, not a
+Drift fallback:** every payment goes into `pending_credit_payments` (Drift **schema v5**) with
+its id + key BEFORE the request, and leaves only when the server answers. No network / 5xx →
+`CreditPaymentQueued` (the dialog closes and says so; the balance and `credit_payments` are
+patched from the server's reply only). A 4xx during a later flush keeps the row for a person
+(banner on the Mechanics screen). AC3 (cash settlements summed by `shift_id`) was closed by #30.
+Read `docs/handoff_log/lane-a-24-credit-payments.md` before touching credit payments.
+
+**#30, #95, #97, #94 and #100 are merged — PRs #96, #98, #99, #101, #102, 2026-09-13; #7 (Lane A parent) closed.**
+The reports are done, and every cash-moving write is now tied to a drawer:
+- `GET /reports/closing?shiftId=` computes expected cash and variance **by `shift_id` only**, plus gross profit
+  (`cost_at_sale` first, then `products.cost`, disclosed as `estimatedCostRows` / `unknownCostRows`).
+- `GET /reports/summary`, top-products, by-category and product-sales all count the same set of bills
+  (`COUNTED_SALE`): a **manual** void is excluded; a bill **auto**-voided by a full return is kept and its
+  credit note subtracts.
+- Migration `1788652800006` adds `idx_returns_shift`.
+
+🔴 **Reports are live SQL, never snapshotted at close, so a closed shift stays closed only because writes are
+refused.** Two project-owner decisions closed the holes:
+- **#94 (option A):** `POST /sales/:id/void` works only on a bill from the calling device's open drawer.
+  Otherwise the server answers `409 NO_OPEN_SHIFT` or `409 SALE_NOT_IN_OPEN_SHIFT`, and the older bill needs
+  a credit note.
+- **#100 (option A, cash only):** a `'เงินสด'` refund with no open drawer gets `409 NO_OPEN_SHIFT`.
+  `โอน` / `หักจากเครดิต` refunds are still accepted, stamped null.
+
+Every refund reads the drawer `FOR SHARE`. Non-cash credit notes still net into the shift's gross profit,
+and an unlocked read raced a close and stamped the **closed** shift's id — pinned by an e2e that holds the
+row lock.
+
+After today's close, a cash refund waits for tomorrow's open, because `open()` hands back the closed row.
+
+Still open:
+- the Thai wording for `SALE_NOT_IN_OPEN_SHIFT` (the shop's to write, §8.1)
+- the Drift build does not enforce any of these drawer rules (the phase-1 divergence #24 accepted)
+
+Read `docs/handoff_log/p7-closing-report-and-shift-guards.md` before touching `server/src/reports/`,
+the void path or the returns path.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming

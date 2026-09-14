@@ -29,8 +29,19 @@ import { MechanicsModule } from './mechanics/mechanics.module.js';
 import { SettingsController } from './settings/settings.controller.js';
 import { BootstrapController } from './settings/bootstrap.controller.js';
 import { SettingsModule } from './settings/settings.module.js';
+import { ReportsController } from './reports/reports.controller.js';
+import { ReportsModule } from './reports/reports.module.js';
+import { QueueModule, QueueProcessorsModule } from './queue/queue.module.js';
+import { QuotesController } from './quotes/quotes.controller.js';
+import { QuotesModule } from './quotes/quotes.module.js';
+import { BackupModule } from './backup/backup.module.js';
+import { BackupController } from './backup/backup.controller.js';
+import { ProductsController } from './products/products.controller.js';
+import { ProductsModule } from './products/products.module.js';
 
-/** Shared infrastructure (config, logger, Postgres, both Redis) — no HTTP. */
+import { RuntimeConfigService } from './config/runtime-config.service.js';
+
+/** Shared infrastructure (config, logger, Postgres, both Redis, runtime config) — no HTTP. */
 @Module({})
 export class CoreModule {
   static forRoot(config: AppConfig, logger: Logger): DynamicModule {
@@ -40,8 +51,9 @@ export class CoreModule {
       providers: [
         { provide: APP_CONFIG, useValue: config },
         { provide: LOGGER, useValue: logger },
+        RuntimeConfigService,
       ],
-      exports: [APP_CONFIG, LOGGER],
+      exports: [APP_CONFIG, LOGGER, RuntimeConfigService],
     };
   }
 }
@@ -64,6 +76,10 @@ const TENANT_ROUTES = [
   MechanicsController,
   SettingsController,
   BootstrapController,
+  ReportsController,
+  QuotesController,
+  BackupController,
+  ProductsController,
 ];
 
 /** The HTTP application: core + health + platform. Business modules are added by later tickets. */
@@ -97,19 +113,30 @@ export class AppModule implements NestModule {
         CustomersModule,
         MechanicsModule,
         SettingsModule,
+        ReportsModule,
+        QueueModule,
+        QuotesModule,
+        BackupModule,
+        ProductsModule,
       ],
       providers: [RequestContextMiddleware],
     };
   }
 }
 
-/** The BullMQ worker process: core only. Processors arrive with #35. */
+/** The BullMQ worker process: core + db + redis + queue. Processors arrive with #35. */
 @Module({})
 export class WorkerModule {
   static forRoot(config: AppConfig, logger: Logger): DynamicModule {
     return {
       module: WorkerModule,
-      imports: [CoreModule.forRoot(config, logger), DbModule, RedisModule],
+      imports: [
+        CoreModule.forRoot(config, logger),
+        DbModule,
+        RedisModule,
+        QueueModule,
+        QueueProcessorsModule,
+      ],
     };
   }
 }

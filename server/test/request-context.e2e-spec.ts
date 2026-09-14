@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
-import { accessToken, createTestApp, resetTenant, type TenantFixture } from './support/fixture.js';
+import {
+  accessToken,
+  createTestApp,
+  resetTenant,
+  seedOpenShift,
+  type TenantFixture,
+} from './support/fixture.js';
 
 // The seam itself: which routes get a request transaction, and what happens on the
 // paths that never reach the interceptor that commits it.
@@ -38,6 +44,9 @@ describe('the request-context seam (e2e)', () => {
       deviceId: fixture.posDeviceId,
       deviceRole: 'pos',
     });
+    // `POST /sales` refuses with 409 NO_OPEN_SHIFT when the device has no open drawer
+    // (owner's decision, 2026-09-13).
+    await seedOpenShift(admin, TENANT, fixture.posDeviceId, { userId: fixture.userId });
   });
 
   afterAll(async () => {

@@ -4,6 +4,8 @@ import { RowLevelSecurity1788652800001 } from './migrations/1788652800001-RowLev
 import { AuthSecurityDefinerAndAuditFix1788652800002 } from './migrations/1788652800002-AuthSecurityDefinerAndAuditFix.js';
 import { MovementsVoidType1788652800003 } from './migrations/1788652800003-MovementsVoidType.js';
 import { ReturnItemsCostAtSale1788652800004 } from './migrations/1788652800004-ReturnItemsCostAtSale.js';
+import { CreditPaymentsMethodAndShift1788652800005 } from './migrations/1788652800005-CreditPaymentsMethodAndShift.js';
+import { ReturnsShiftIndex1788652800006 } from './migrations/1788652800006-ReturnsShiftIndex.js';
 
 /** Static list — no glob, so it survives the dist/ build unchanged. Append new migrations here. */
 export const MIGRATIONS = [
@@ -12,6 +14,8 @@ export const MIGRATIONS = [
   AuthSecurityDefinerAndAuditFix1788652800002,
   MovementsVoidType1788652800003,
   ReturnItemsCostAtSale1788652800004,
+  CreditPaymentsMethodAndShift1788652800005,
+  ReturnsShiftIndex1788652800006,
 ];
 
 /**

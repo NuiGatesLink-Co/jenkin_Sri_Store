@@ -91,6 +91,109 @@ export class RateLimitService {
     }
   }
 
+  /**
+   * Checks key-based rate limit (e.g. per-IP requests).
+   */
+  async checkKeyLimit(
+    key: string,
+    limit: number,
+    windowSec: number,
+  ): Promise<RateLimitCheckResult> {
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const windowSlice = Math.floor(nowSec / windowSec);
+      const sanitizedKey = key.replace(/[^a-zA-Z0-9_:-]/g, '_');
+      const redisKey = `rl:${sanitizedKey}:${windowSlice}`;
+
+      const result = (await this.redis.eval(
+        RATE_LIMIT_LUA,
+        1,
+        redisKey,
+        windowSec,
+      )) as [number, number];
+
+      const count = result[0];
+      const ttl = result[1];
+
+      if (count > limit) {
+        const retryAfter = ttl > 0 ? ttl : windowSec;
+        return { allowed: false, retryAfter };
+      }
+      return { allowed: true };
+    } catch (err) {
+      this.logger.warn(`RateLimitService fail-open on key ${key}: ${err}`);
+      return { allowed: true };
+    }
+  }
+
+  /**
+   * Checks whether failed attempts have exceeded threshold.
+   */
+  async getFailureStatus(
+    key: string,
+    limit: number,
+    windowSec: number,
+  ): Promise<RateLimitCheckResult> {
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const windowSlice = Math.floor(nowSec / windowSec);
+      const sanitizedKey = key.replace(/[^a-zA-Z0-9_:-]/g, '_');
+      const redisKey = `rl:${sanitizedKey}:${windowSlice}`;
+
+      const countStr = await this.redis.get(redisKey);
+      const count = countStr ? parseInt(countStr, 10) : 0;
+
+      if (count >= limit) {
+        const ttl = await this.redis.ttl(redisKey);
+        const retryAfter = ttl > 0 ? ttl : windowSec;
+        return { allowed: false, retryAfter };
+      }
+      return { allowed: true };
+    } catch (err) {
+      this.logger.warn(`RateLimitService fail-open for ${key}: ${err}`);
+      return { allowed: true };
+    }
+  }
+
+  /**
+   * Records a failed attempt (increments failure counter with TTL).
+   */
+  async recordFailure(key: string, windowSec: number): Promise<number> {
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const windowSlice = Math.floor(nowSec / windowSec);
+      const sanitizedKey = key.replace(/[^a-zA-Z0-9_:-]/g, '_');
+      const redisKey = `rl:${sanitizedKey}:${windowSlice}`;
+
+      const result = (await this.redis.eval(
+        RATE_LIMIT_LUA,
+        1,
+        redisKey,
+        windowSec,
+      )) as [number, number];
+
+      return result[0];
+    } catch (err) {
+      this.logger.warn(`RateLimitService failed to record failure for key ${key}: ${err}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Clears failed attempt counter upon success.
+   */
+  async clearKey(key: string, windowSec = 60): Promise<void> {
+    try {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const windowSlice = Math.floor(nowSec / windowSec);
+      const sanitizedKey = key.replace(/[^a-zA-Z0-9_:-]/g, '_');
+      const redisKey = `rl:${sanitizedKey}:${windowSlice}`;
+      await this.redis.del(redisKey);
+    } catch {
+      // Non-critical
+    }
+  }
+
   private async getTenantPlan(tenantId: string): Promise<string> {
     const cacheKey = `t:${tenantId}:plan`;
 

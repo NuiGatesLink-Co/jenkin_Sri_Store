@@ -159,7 +159,7 @@ The other nine are **stubs that `throw UnimplementedError('<name>: pending <agen
 | `purchase_orders_repository.dart` | `PurchaseOrdersRepository` | **Purchase Orders** | `Future<List<PurchaseOrderWithItems>> getPOs()`; `Future<PurchaseOrderRow> savePO(PoInput)`; `Future<List<String>> receivePO(id)` (weighted-avg cost, returns unmatched partNos); `Future<void> cancelPO(id)`; `Future<void> deletePO(id)` |
 | `quotes_repository.dart` | `QuotesRepository` | **Quotes** | `Future<List<QuoteWithItems>> getQuotes()`; `Future<QuoteRow> saveQuote(QuoteInput)`; `Future<void> updateQuote(id, QuotesCompanion)`; `Future<QuoteRow?> duplicateQuote(id)`; `Future<int> purgeOldQuotes({olderThanDays=90})`; `Future<void> deleteQuote(id)` |
 | `parked_repository.dart` | `ParkedRepository` | **Parked** | `Future<List<ParkedSaleRow>> getParked()`; `Future<ParkedSaleRow> parkSale(ParkedInput)`; `Future<void> deleteParked(id)` |
-| `mechanics_repository.dart` | `MechanicsRepository` | **Mechanics** | `Future<List<MechanicRow>> getMechanics()`; `Future<MechanicRow> addMechanic(MechanicsCompanion)` (auto M### code); `Future<void> updateMechanic(id, MechanicsCompanion)`; `Future<void> deleteMechanic(id)`; `Future<CreditPaymentRow> addCreditPayment({mechanicId,amount,note?})` (reduces balance, clamp 0); `Future<List<CreditPaymentRow>> getCreditPayments()` |
+| `mechanics_repository.dart` | `MechanicsRepository` | **Mechanics** | `Future<List<MechanicRow>> getMechanics()`; `Future<MechanicRow> addMechanic(MechanicsCompanion)` (auto M### code); `Future<void> updateMechanic(id, MechanicsCompanion)`; `Future<void> deleteMechanic(id)`; `Future<CreditPaymentRow> addCreditPayment({mechanicId,amount,note?,paymentMethod,allowOverpayment=false})` (reduces balance, clamp 0; `paymentMethod` + `allowOverpayment` are for the API write, #24 — Drift has no method column and ignores both; the API build queues instead and may throw `CreditPaymentQueued`); `Future<List<CreditPaymentRow>> getCreditPayments()`; outbox (#24, API build only writes it): `Future<List<PendingCreditPaymentRow>> getPendingCreditPayments()`, `Future<void> flushPendingCreditPayments()`, `Future<void> discardRejectedCreditPayment(id)`, `Future<void> resendRejectedAllowingOverpayment(id)` |
 | `customers_repository.dart` | `CustomersRepository` | **Customers** | `Future<List<CustomerRow>> getCustomers()`; `Future<CustomerRow> addCustomer(CustomersCompanion)` (auto CUS### code); `Future<void> updateCustomer(id, CustomersCompanion)`; `Future<void> deleteCustomer(id)` |
 | `snapshot_repository.dart` | `SnapshotRepository` | **Snapshot** | `Future<Map<String,dynamic>> exportSnapshot()` (sa_* keyed + __meta); `Future<void> importLegacyBackup(Map<String,dynamic>)` (atomic; Thai 'ไฟล์สำรองไม่ถูกต้อง — ไม่พบข้อมูล __meta' throw on missing __meta) |
 
@@ -172,11 +172,52 @@ comment before implementing.
 ## 4. Dependency injection (`lib/presentation/repositories/repository_providers.dart` + `lib/presentation/blocs/`)
 
 Repositories are wired via flutter_bloc's `RepositoryProvider`, not Riverpod.
-`repositoryProviders(AppDatabase db)` returns the 13 `RepositoryProvider`
-entries below; `main.dart` wires them via `MultiRepositoryProvider`, wrapping
-`AppDatabase.open()`'s single instance. Screens read a repo with
-`context.read<XRepository>()` (never `context.watch` — repos are DI, not
-reactive state).
+
+```dart
+repositoryProviders(
+  AppDatabase db, {
+  AuthRepository? authRepository,   // #54
+  ApiClient? apiClient,             // #54
+  bool useApi = const bool.fromEnvironment('USE_API_WRITES'),  // #56 — WRITES
+  bool useApiRepositories = true,                              // #55 — READS
+})
+```
+
+There are **two switches and they default differently**, because they gate
+different halves of the cutover: `useApi` swaps in #56's API **write** paths
+(sales, returns, shifts) and is **off** unless a developer passes
+`--dart-define=USE_API_WRITES=true`; `useApiRepositories` swaps in #55's API
+**read** paths (products, customers, mechanics, purchase orders, quotes) and is
+**on**. Read that pairing before changing either: with reads on and writes off,
+a Drift `saveSale` moves local stock and the ledger for a bill the server never
+saw, and the next sync overwrites those rows with the server's numbers.
+
+It returns the 13 `RepositoryProvider` entries below **plus `AuthRepository`,
+`ApiClient` and `BootstrapService`** (#54/#55), 16 in all; `main.dart` wires them via
+`MultiRepositoryProvider`, wrapping `AppDatabase.open()`'s single instance.
+Screens read a repo with `context.read<XRepository>()` (never `context.watch` —
+repos are DI, not reactive state).
+
+`useApi` (#56) is the phase-1 cutover switch and **defaults to false**: the shop
+keeps running the Drift build (CLAUDE.md, *"no cutover is planned for phase 1"*),
+and `--dart-define=USE_API_WRITES=true` is what a developer flips to test against
+a server. When true, three of the entries below are swapped for their
+write-through API implementations from `lib/data/repositories/api/` —
+`SalesRepository` → `ApiSalesRepository`, `ReturnsRepository` →
+`ApiReturnsRepository`, `ShiftsRepository` → `ApiShiftsRepository`. **The types
+in the table do not change**, which is the whole point of ADR-0010: each API
+class `implements` the concrete Drift class's implicit interface and keeps a
+Drift instance to delegate its reads to, so no screen can tell the difference.
+`useApi` also arms the owner's 2026-09-13 shift guards, all on the API side of
+the interface: `ApiSalesRepository.saveSale` and
+`ApiMechanicsRepository(db, client, writesToServer: useApi).addCreditPayment`
+(with `writesToServer` false — the Drift build — it is the plain Drift write:
+no outbox, no shift check)
+refuse with `PosException('NO_OPEN_SHIFT', …)` while the cached drawer is not
+open (`isActive && closedAt == null`, `api_wire.dart hasOpenShift`), and
+`ApiShiftsRepository(…, mechanics:)` flushes the credit-payment outbox before
+`closeShift` and refuses (`CASH_CREDIT_PAYMENTS_UNSENT`) while a queued `เงินสด`
+row remains. With `useApi` false none of this runs.
 
 | Repository | Type |
 |---|---|
@@ -193,6 +234,9 @@ reactive state).
 | `SettingsRepository` | `RepositoryProvider<SettingsRepository>` |
 | `SnapshotRepository` | `RepositoryProvider<SnapshotRepository>` |
 | `ShiftsRepository` | `RepositoryProvider<ShiftsRepository>` |
+| `AuthRepository` | `RepositoryProvider<AuthRepository>` (#54) |
+| `ApiClient` | `RepositoryProvider<ApiClient>` (#54) |
+| `BootstrapService` | `RepositoryProvider<BootstrapService>` (#55 — fills the cache at login) |
 
 Cross-screen/app-wide UI state lives in Cubits under `lib/presentation/blocs/`
 (plus `ThemeModeCubit`/`FontScaleCubit` in `lib/presentation/widgets/`, kept
@@ -261,7 +305,11 @@ QuotesManager (in Quote.jsx), BackupRestore.jsx / SettingsScreen backup sub-tab.
 **Input DTOs** (what transactional services accept):
 - `SaleInput { double subtotal, discount, total; String paymentMethod;
   String? customerId, customerName, mechanicId, mechanicName; double? mechanicDelta;
-  List<SaleLineInput> items }`
+  bool overrideCreditLimit = false; List<SaleLineInput> items }`
+  - `overrideCreditLimit` (#56) is the counter's answer to
+    'ยืนยันขายเครดิต?', **carried** rather than re-derived: the server refuses an
+    over-limit credit bill with `409 CREDIT_LIMIT_EXCEEDED` unless it is set, and
+    consent cannot be worked out from a mechanic row a later reader sees.
   - `SaleLineInput { String productId, name; int qty; double price; String? partNo, nameTH }`
 - `ReturnInput { String saleId; List<ReturnLineInput> items; String refundMethod; String? reason }`
   - `ReturnLineInput { String productId, name; int qty; double price; int? originalQty }`
