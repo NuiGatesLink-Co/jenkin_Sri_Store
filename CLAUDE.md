@@ -570,8 +570,8 @@ the void path or the returns path.
 - **Still open:**
   - #32 is built on a local branch but not pushed. It uses per-tenant generation tokens with no `KEYS`, and
     must be rebased onto #116's `SettingsService`.
-  - PRs #110 (#39), #111 (#63) and #113 (#64) are open. #113 needs `ETCD_ROOT_PASSWORD` in the
-    `DEMO_ENV_FILE` secret first.
+  - #39 (PR #110) and #63 (PR #111) are merged, but branch protection is not set yet (the command is
+    in 07 §4). PR #113 (#64) is open and needs `ETCD_ROOT_PASSWORD` in the `DEMO_ENV_FILE` secret first.
 - 🔴 **Stacked PRs don't retarget themselves when their base merges** unless the base branch is deleted. Retarget
   them to `main` before merging, or they land on the dead feature branch.
 - 🔴 **Parallel agents against one dev database:**

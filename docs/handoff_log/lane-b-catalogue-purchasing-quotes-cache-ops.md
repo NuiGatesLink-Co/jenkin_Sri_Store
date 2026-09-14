@@ -1,7 +1,7 @@
 # Handoff — Lane B catalogue, purchasing, quotes, cache + ops/CI slices
 
 **Date:** 2026-09-14 · **Driver:** NuimanLP, orchestrating agents (Opus implemented and reviewed the money paths; Sonnet did CI/ops)
-**Tickets:** #16, #26, #27 (merged) · #39, #63, #64 (PRs open) · #32 (built, local) · #25 (landed as LomerAlloys' #116)
+**Tickets:** #16, #26, #27, #39, #63 (merged) · #64 (PR open) · #32 (built, local) · #25 (landed as LomerAlloys' #116)
 **Method:** every slice went through at least one review round: `code-review` (Standards + Spec) and `scrutinize`. Findings were sent back to the implementer and re-verified. Nothing below is merged on the author's word alone.
 
 ---
@@ -14,8 +14,8 @@
 | #26 p6.1 purchase orders | ✅ merged | PR #114 |
 | #27 p6.2 quotes + parked sales | ✅ merged | PR #115 (the conflict in §8/§8.1 was resolved to 20 rows) |
 | #25 p4.3 bootstrap + settings | ✅ merged — **LomerAlloys' version** | PR #116. Our own `feat/25-p4.3-bootstrap` duplicates it; see §4 |
-| #39 ci.2 path filters | PR open | #110 |
-| #63 ops.1 monitoring overlay | PR open | #111 |
+| #39 ci.2 path filters | ✅ merged — branch protection **not yet set** | PR #110 |
+| #63 ops.1 monitoring overlay | ✅ merged | PR #111 |
 | #64 ops.2 etcd store | PR open, **blocked on a secret** | #113 |
 | #32 p8.2 cache invalidation | built and reviewed, **not pushed** | local branch `feat/32-p8.2-cache-invalidation` (11 commits, head `3bc368e`, on `integration/lane-b`) |
 | #55 fe.2 client reads | unblocked, not finished | see §5 |
@@ -50,13 +50,13 @@
 
 ---
 
-## 3. Open PRs — what each needs
+## 3. The CI/ops PRs — what each needed / still needs
 
-- **#110 (#39):**
+- **#110 (#39), merged:**
   - Fixed on the branch 2026-09-14 (`3b179ac`): the status jobs have no checkout, so the workflow-level `working-directory` (`frontend/`, `server/`) didn't exist and bash could not start. **Both status checks failed on every PR.** They now set `defaults.run.working-directory: .`.
   - Still to verify on a live run: a **cancelled** run reports the status checks as failed.
   - After merge: run the branch-protection command in `07_CICD_DEPLOY.md` §4. Not done yet.
-- **#111 (#63):**
+- **#111 (#63), merged:**
   - AC8 is only partly met. Prometheus sets `up` from whether the body parses in its text-exposition format, so a JSON `/health/ready` target always reads down.
   - **No ticket owns putting the overlay on the VM.** #67 closed without doing it. Trap for whoever does it: on the VM compose lands flat at `/opt/pos/`, so the overlay's `../deploy/...` bind paths resolve to `/opt/deploy/...`.
 - **#113 (#64):**
