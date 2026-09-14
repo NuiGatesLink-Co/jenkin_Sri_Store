@@ -292,11 +292,18 @@ services:
         condition: service_healthy
 
 # Fixed subnet so the api instances can hold static addresses (see nginx.conf).
+# Static addresses live in 172.30.0.2-.127; Docker hands out dynamic ones only from ip_range
+# (.128-.255), so a container started while api-N is being recreated cannot take its address (#148).
+# Every new `ipv4_address` must stay below .128. `gateway` is pinned to .1, which Docker would
+# otherwise take from ip_range. Changing this block recreates the network on an existing host
+# (07 §7 runbook).
 networks:
   default:
     ipam:
       config:
         - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25
+          gateway: 172.30.0.1
 
 volumes:
   pgdata:

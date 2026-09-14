@@ -68,6 +68,35 @@
       ansible.builtin.meta: end_play
       when: current_sha == image_tag
 
+    # docker-compose.yml's network gained ip_range (#148). Compose cannot change the IPAM of a network
+    # that has containers attached: measured with compose v5.0.2, `run --rm` swaps the network under
+    # the running containers and reconnects them WITHOUT their ipv4_address (api-N lose .11-.13, so
+    # Nginx has no upstream), and `up -d <some services>` stops those services and then errors out.
+    # So stop here, before anything is copied or started, and let a person take the one-time outage
+    # (07 §7 runbook). A missing network (fresh VM, or after that step) passes.
+    - name: Inspect the existing compose network
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - inspect
+          - srisurart-pos_default
+          - --format
+          - "{{ '{{' }}json .IPAM.Config{{ '}}' }}"
+      register: pos_network
+      changed_when: false
+      failed_when: false
+
+    - name: Refuse to deploy onto a network created before ip_range was added
+      ansible.builtin.assert:
+        that:
+          - pos_network.rc != 0 or '172.30.0.128/25' in pos_network.stdout
+        fail_msg: >-
+          The srisurart-pos_default network on {{ inventory_hostname }} predates the ip_range in
+          docker-compose.yml ({{ pos_network.stdout }}). Nothing was changed. Take the one-time
+          network recreate in 07_CICD_DEPLOY.md §7 (a short full POS outage, volumes kept), then
+          re-run this playbook.
+
     - name: Copy docker-compose base configuration
       ansible.builtin.copy:
         src: "{{ repo_root }}/server/docker-compose.yml"
@@ -237,7 +266,6 @@
           loop:
             - prometheus
             - grafana
-          register: monitoring_config_copy
 
         # copy never deletes: a dashboard removed or renamed in the repo would stay provisioned
         - name: List monitoring config files in the repo
@@ -268,7 +296,6 @@
           vars:
             repo_files: "{{ monitoring_config_repo.files | map(attribute='path') | map('relpath', repo_root ~ '/deploy') | list }}"
             vm_files: "{{ monitoring_config_vm.files | map(attribute='path') | map('relpath', app_dir ~ '/deploy') | list }}"
-          register: monitoring_config_prune
 
         - name: Pull monitoring images
           ansible.builtin.command: "docker compose {{ monitoring_compose_files }} pull node-exporter prometheus grafana"
@@ -277,23 +304,30 @@
           args:
             chdir: "{{ app_dir }}"
 
-        - name: Bring up node-exporter, Prometheus and Grafana
-          ansible.builtin.command: "docker compose {{ monitoring_compose_files }} up -d node-exporter prometheus grafana"
+        - name: Bring up node-exporter
+          ansible.builtin.command: "docker compose {{ monitoring_compose_files }} up -d node-exporter"
           environment:
             IMAGE_TAG: "{{ image_tag }}"
           args:
             chdir: "{{ app_dir }}"
 
-        # A single-file bind mount keeps the old inode after copy's atomic rename, and the compose
-        # config hash does not change, so only a recreate picks up new Prometheus/Grafana config.
-        - name: Recreate Prometheus and Grafana when their config changed
+        # Always recreate, never "only when this run changed the config" (#148). A single-file bind
+        # mount keeps the old inode after copy's atomic rename and the compose config hash does not
+        # change, so only a recreate loads new config. Gating that on this run's copy result lost the
+        # change for good when a run copied the file and then failed later in this block: the next
+        # release copied nothing, and Prometheus kept the old config. A checksum of the mounted file
+        # cannot replace this either: Grafana's provisioning mounts are directories, which already
+        # show the new files while Grafana still runs what it read at startup. This block runs only
+        # for a new image_tag, so the cost is a few seconds of monitoring gap per release; the
+        # TSDB and Grafana state are named volumes and survive. Dependencies (node-exporter) are
+        # not force-recreated.
+        - name: Recreate Prometheus and Grafana so they load the copied config
           ansible.builtin.command: "docker compose {{ monitoring_compose_files }} up -d --force-recreate prometheus grafana"
           environment:
             IMAGE_TAG: "{{ image_tag }}"
           args:
             chdir: "{{ app_dir }}"
           changed_when: true
-          when: monitoring_config_copy is changed or monitoring_config_prune is changed
 
         - name: Verify Prometheus and Grafana answer on host loopback
           ansible.builtin.uri:
@@ -331,6 +365,22 @@
       register: monitoring_removed
       failed_when: false
       when: not (enable_monitoring | bool)
+
+    # failed_when: false keeps a broken rm from failing a POS release that is already recorded, but
+    # it must not be silent: a failed rm leaves the monitoring containers running (#148). A missing
+    # rc (the module failed before running anything) counts as a failure; the `removes:` skip when
+    # monitoring.yml was never copied reports rc 0.
+    - name: Warn that monitoring containers could not be removed (POS release is unaffected)
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: enable_monitoring=false, but removing the monitoring containers failed on
+          {{ inventory_hostname }} (rc={{ monitoring_removed.rc | default('none') }}):
+          {{ monitoring_removed.stderr | default('', true) or monitoring_removed.msg | default('see task output above') }}.
+          node-exporter, Prometheus and Grafana may still be running; check
+          `docker compose {{ monitoring_compose_files }} ps` in {{ app_dir }}.
+      when:
+        - not (enable_monitoring | bool)
+        - monitoring_removed.rc | default(1) != 0
 
     - name: Log successful deployment completion
       ansible.builtin.debug:
