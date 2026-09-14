@@ -3,8 +3,13 @@ name: Flutter CI
 # Client-side gate. Mirrors the local gate in CLAUDE.md:
 #   dart analyze  (NEVER flutter analyze — see the non-ASCII path constraint)
 #   flutter test
-# server/ has its own workflow; paths-ignore keeps this from running on
-# backend-only changes (ADR-0011).
+# server/ has its own workflow. #39: path filtering no longer happens at the
+# trigger level (a server-only PR must still produce a green, always-reported
+# flutter-ci-status, or it can never satisfy a required check — CLAUDE.md
+# "Known trap"). Filtering instead happens per-job below, keyed off the
+# `changes` job, and only on pull_request — a push to `main` always runs
+# every job so every commit on main produces both release images
+# (07_CICD_DEPLOY.md §2).
 
 permissions:
   contents: read
@@ -12,9 +17,7 @@ permissions:
 on:
   push:
     branches: [main]
-    paths: ['frontend/**', '.github/workflows/flutter.yml']
   pull_request:
-    paths: ['frontend/**', '.github/workflows/flutter.yml']
   workflow_dispatch:
 
 concurrency:
@@ -31,9 +34,29 @@ defaults:
     working-directory: frontend
 
 jobs:
+  changes:
+    name: detect changed paths (pull_request only)
+    runs-on: ubuntu-latest
+    # Push and workflow_dispatch never filter (see the header comment), so this
+    # job — and the path check it feeds — only needs to run for a PR.
+    if: github.event_name == 'pull_request'
+    outputs:
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/flutter.yml'
+
   analyze-and-test:
     name: analyze + test
     runs-on: ubuntu-latest
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
     steps:
       - uses: actions/checkout@v4
 
@@ -55,6 +78,8 @@ jobs:
   deps-audit:
     name: pubspec.lock CVEs (OSV-Scanner)
     runs-on: ubuntu-latest
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
     # sec.1 (2026-09-09): `pub` has no `audit` command, so the lockfile is checked
     # against OSV. Fails on any known vulnerability in a locked dependency.
     steps:
@@ -67,6 +92,8 @@ jobs:
   codegen-check:
     name: drift codegen is up to date
     runs-on: ubuntu-latest
+    needs: [changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true'
     # The committed *.g.dart files are the build on the shop's Thai path, where
     # build_runner cannot run (CLAUDE.md). CI runners are ASCII, so this is the
     # only place the generated code is ever verified against the schema.
@@ -103,8 +130,8 @@ jobs:
     # artefact stays: it is how a person inspects a build without a registry.
     # There is deliberately NO deploy step — the production host is undecided
     # until before task q4 (03_ARCHITECTURE.md §8). The faculty VM is demo-only.
-    # When #39 lands, this job becomes a `needs:` of the flutter-ci-status job;
-    # it is never itself a required check (07 §4).
+    # #39: this job is a `needs:` of flutter-ci-status below; it is never
+    # itself a required check (07 §4).
     # Visibility: a package first pushed by GITHUB_TOKEN from this public repo is
     # linked to it and is public from the start — verified 2026-09-10 with an
     # anonymous pull of both images right after the first push (07 §7). No manual
@@ -173,3 +200,28 @@ jobs:
         run: |
           docker push "$WEB_IMAGE:${{ github.sha }}"
           docker push "$WEB_IMAGE:main"
+
+  flutter-ci-status:
+    name: flutter-ci-status
+    runs-on: ubuntu-latest
+    needs: [analyze-and-test, deps-audit, codegen-check, build-web]
+    # #39: this is the only Flutter-side required check on `main`. It must
+    # report on every PR — including a server-only one, where every job above
+    # is skipped by the `changes` filter — so `!cancelled()` runs it even when
+    # every `needs` job was skipped, and its own logic (not `always()`, which
+    # would also mask a cancelled run as green — 07_CICD_DEPLOY.md §2, rule 4) fails
+    # it on a real failure or cancellation.
+    if: ${{ !cancelled() }}
+    steps:
+      - name: require every job above to have succeeded or been skipped
+        run: |
+          for result in \
+            "${{ needs.analyze-and-test.result }}" \
+            "${{ needs.deps-audit.result }}" \
+            "${{ needs.codegen-check.result }}" \
+            "${{ needs.build-web.result }}"; do
+            if [[ "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "::error::a required Flutter job did not succeed: $result"
+              exit 1
+            fi
+          done

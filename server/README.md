@@ -60,8 +60,18 @@ corepack pnpm test:e2e      # against the compose Postgres/Redis — no mocks; t
 ```
 
 `.github/workflows/server.yml` (#38) runs the same three as separate jobs — lint, unit,
-integration — on every push/PR touching `server/**`, starting the compose Postgres + both
-Redis (with the dev overlay, so the runner can reach them) and applying the migrations first.
+integration — starting the compose Postgres + both Redis (with the dev overlay, so the runner
+can reach them) and applying the migrations first. Since #39 (`ci.2`), path filtering happens
+*inside* the workflow, not on the trigger: a `changes` job (pull_request only) gates `lint` and
+`unit` (and `audit`) on `server/**` having changed, but **`integration` is never path-gated** —
+it carries the cross-tenant isolation tests in `test/security.e2e-spec.ts`, which must run on
+every PR regardless of what changed (the sixth multi-tenant rule). A push to `main` never
+filters at all, so every commit on main runs the full workflow. The one required GitHub check
+is `server-ci-status`, appended at the end of the workflow — it reports on every PR (including
+one that touched only `frontend/**`, where `lint`/`audit`/`unit` are legitimately skipped) and
+fails only on a real job failure or cancellation. `flutter.yml` has the mirror-image
+`flutter-ci-status`. Branch protection on `main` should require exactly those two checks — see
+`docs/Backend_design/07_CICD_DEPLOY.md` §4 for the table and the `gh api` command to set it.
 
 ## Schema and migrations (#15)
 

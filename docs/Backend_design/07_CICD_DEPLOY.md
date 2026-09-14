@@ -10,6 +10,16 @@
 ticket ใต้ #10: #61 `ci.4` · #62 `ci.5` · #63 `ops.1` · #64 `ops.2` · #65 `cd.1` (รอ #61 #62) · #66 `ops.3` (รอ #64) ·
 #67 `cd.2` (รอ #65) · #39 และ #44 ได้ comment ปรับขอบเขต
 
+สถานะ 2026-09-14 (**#39** `ci.2`, branch `feat/39-ci2-path-filters`): §2 กติกา 4 ข้อและ §4
+ทำจริงแล้วใน `.github/workflows/flutter.yml` / `server.yml` — job `changes`
+(`dorny/paths-filter@v4`, ทำงานเฉพาะ `pull_request`) กรองเฉพาะ job ฝั่งของตัวเอง
+(`analyze-and-test`/`deps-audit`/`codegen-check` ในไฟล์แรก, `lint`/`audit`/`unit` ในไฟล์ที่สอง),
+`integration` (ถือ cross-tenant isolation test ใน `test/security.e2e-spec.ts`) ไม่ถูกกรองเลย,
+และ `push` ขึ้น `main` ไม่มี `paths:` อีกต่อไปทั้งสองไฟล์ — ทุก commit บน main จึงรันเต็มเสมอ
+(ปิดช่องว่าง AC4 ของ #40 ไปด้วย). `flutter-ci-status` / `server-ci-status` เพิ่มแล้วท้ายไฟล์ของตัวเอง
+ตามกติกาข้อ 4. **Branch protection บน GitHub ยังไม่ได้ตั้ง** (เจ้าของ repo ต้องรัน `gh api` เอง —
+ดู PR ของ #39 สำหรับคำสั่ง)
+
 ---
 
 ## 1. แผนที่ 7 บล็อก (ตารางบนสไลด์ ↔ ของจริงใน repo)

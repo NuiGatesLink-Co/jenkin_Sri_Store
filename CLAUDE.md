@@ -349,18 +349,25 @@ web-asset assertion), committed 2026-09-04. Status per level:
    **Not built yet (teammates):** Ansible provision/deploy to the `demo` VM with rollback
    (#65 #67), monitoring overlay (#63), etcd + `RuntimeConfigService` (#64 #66). The *production*
    host is still unchosen (due before `q4`).
-   🔴 **#40's AC4 is still open:** `push.paths` means a `server/`-only commit produces no web
-   image and a `frontend/`-only commit no server image, so a full release exists only for a commit
-   touching both. The fix — no `paths:` on push, PR-only filtering inside the workflow — is
-   specified in 07 §2 and belongs to **#39**.
+   🔴 **#40's AC4 is being fixed by #39** (branch `feat/39-ci2-path-filters`, not yet merged):
+   `push.paths` meant a `server/`-only commit produced no web image and a `frontend/`-only
+   commit no server image, so a full release existed only for a commit touching both. Both
+   workflows now drop `paths:` from `push` entirely — every commit on `main` runs everything.
 
 `server/` and the Flutter client share this repo ([ADR-0011](docs/Backend_design/adr/0011-monorepo.md)),
-so PR runs are path-filtered — the Flutter jobs must not run on `server/`-only PRs.
-🔴 **Known trap:** today's workflow-level `paths:` means a `server/`-only PR runs **no** Flutter
-jobs at all; if those job names are required status checks on `main`, such a PR can never satisfy
-them and blocks forever. Issue **#39** owns the fix, and its shape is decided (07 §2/§4): filter
-inside the workflow on PRs only, two uniquely-named always-reported status jobs
-(`flutter-ci-status`, `server-ci-status`) as the only required checks, `!cancelled()` semantics.
+and their CI is still one-workflow-per-side (`flutter.yml`, `server.yml`) with per-job path
+filtering — see the next paragraph for how #39 keeps that from deadlocking a PR.
+🔴 **Known trap, fixed by #39** (branch `feat/39-ci2-path-filters`, not yet merged): workflow-level
+`paths:` meant a `server/`-only PR ran **no** Flutter jobs at all, so naming those jobs as required
+status checks on `main` would have blocked such a PR forever. Both `flutter.yml` and `server.yml`
+now trigger unfiltered on every `push`/`pull_request`; a `changes` job (`dorny/paths-filter@v4`,
+pull_request only) gates each workflow's own jobs internally, `integration` in `server.yml` is
+never gated (it carries the cross-tenant isolation tests — see `server/README.md` *Checks*), and
+each workflow ends in one always-reported status job (`flutter-ci-status`, `server-ci-status`,
+`!cancelled()` semantics — never `always()`, which would turn a cancelled run green) that is the
+only required check for its side. Branch protection on GitHub itself is **not yet set** — that is
+a repo-settings change intentionally left to the project owner; the required-check table and the
+`gh api` command are in `docs/Backend_design/07_CICD_DEPLOY.md` §4.
 
 **Where the work lives — GitHub issues (since 2026-09-05).** `docs/Backend_design/` says *what* to
 build; the issue tracker says *who builds what, in what order.*
