@@ -35,6 +35,10 @@ import { BackupModule } from './backup/backup.module.js';
 import { BackupController } from './backup/backup.controller.js';
 import { ProductsController } from './products/products.controller.js';
 import { ProductsModule } from './products/products.module.js';
+import { BootstrapController } from './bootstrap/bootstrap.controller.js';
+import { BootstrapModule } from './bootstrap/bootstrap.module.js';
+import { SettingsController } from './settings/settings.controller.js';
+import { SettingsModule } from './settings/settings.module.js';
 
 import { RuntimeConfigService } from './config/runtime-config.service.js';
 
@@ -75,6 +79,8 @@ const TENANT_ROUTES = [
   QuotesController,
   BackupController,
   ProductsController,
+  BootstrapController,
+  SettingsController,
 ];
 
 /** The HTTP application: core + health + platform. Business modules are added by later tickets. */
@@ -112,6 +118,8 @@ export class AppModule implements NestModule {
         QuotesModule,
         BackupModule,
         ProductsModule,
+        BootstrapModule,
+        SettingsModule,
       ],
       providers: [RequestContextMiddleware],
     };
