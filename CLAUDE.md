@@ -567,6 +567,37 @@ Still open:
 Read `docs/handoff_log/p7-closing-report-and-shift-guards.md` before touching `server/src/reports/`,
 the void path or the returns path.
 
+**Lane B catalogue, purchasing and quotes are merged. #16 → PR #112, #26 → PR #114, #27 → PR #115, all on
+2026-09-14. #25 landed as LomerAlloys' PR #116.** Read
+`docs/handoff_log/lane-b-catalogue-purchasing-quotes-cache-ops.md` before touching `server/src/products/`,
+`purchasing/`, `quotes/`, `parked-sales/`, or the cache. Rules these slices established:
+- 🔴 **Sync cursor.** `GET /products?updatedSince=&afterId=` is a keyset on `(updated_at, id)`, and the
+  response carries `meta.nextCursor` at microsecond precision. A millisecond timestamp alone skips or
+  re-serves rows, because every line of one bill shares the same `now()`. A row stamped at transaction start
+  can still commit behind a cursor; until #55 decides a read-back window, that stays an open ADR-0010 bullet.
+- 🔴 **Part-number uniqueness is enforced by Postgres, not the app.** Migration `1788652800007` adds
+  `uq_products_partno_ci (tenant_id, lower(part_no)) WHERE deleted_at IS NULL`, and error 23505 maps to
+  `409 DUPLICATE_PART_NO`. The trigram search index is **not** used under RLS, because `textlike` is not
+  leakproof. An `EXPLAIN` run as superuser lies about the plan, so check it as `pos_app`.
+- 🔴 **Receive lock order is PO row → products in id order.** The weighted-average cost rounds exact satang
+  half-up, which deliberately differs from Dart's float `round2` on half-satang cases (a unit test pins it).
+  A part on two PO lines writes **one** combined movement, because of `uq_movements_ref`.
+- 🔴 **Quote convert** locks the quote, then runs `SalesService.create` in the same transaction, so a refusal
+  rolls back the quote and the idempotency claim. Owner questions are recorded in 02 §3.8: convert is
+  all-or-nothing while Checkout edits the cart, and deleting a converted quote is still allowed.
+- **Still open:**
+  - #32 is built on a local branch but not pushed. It uses per-tenant generation tokens with no `KEYS`, and
+    must be rebased onto #116's `SettingsService`.
+  - #39 (PR #110) and #63 (PR #111) are merged, but branch protection is not set yet (the command is
+    in 07 §4). PR #113 (#64) is open and needs `ETCD_ROOT_PASSWORD` in the `DEMO_ENV_FILE` secret first.
+- 🔴 **Stacked PRs don't retarget themselves when their base merges** unless the base branch is deleted. Retarget
+  them to `main` before merging, or they land on the dead feature branch.
+- 🔴 **Parallel agents against one dev database:**
+  - The e2e tests hardcode ports 5432/6379/6380, so serialise migrate and e2e runs behind a lock, and give each
+    branch its own migration id.
+  - `pnpm db:migrate` needs `DATABASE_URL` set explicitly.
+  - A subagent that waits on a background task is never woken, so run e2e in the foreground.
+
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
 back** (decided 2026-09-04). Recover from git history if you ever need the Supabase-era text:
