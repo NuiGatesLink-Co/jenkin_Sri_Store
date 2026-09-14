@@ -20,7 +20,8 @@ export const VALID_LOG_LEVELS = new Set([
 ]);
 
 const CONNECT_TIMEOUT_MS = 1_500;
-const RECONNECT_DELAY_MS = 3_000;
+const BACKOFF_MIN_MS = 1_000;
+const BACKOFF_MAX_MS = 30_000;
 
 /**
  * RuntimeConfigService: Dynamic runtime configuration via etcd v3 (ADR-0013, 07_CICD_DEPLOY.md §8).
@@ -36,6 +37,13 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
   private abortController?: AbortController;
   private isStopped = false;
   private authToken?: string;
+  /** etcd cluster revision this instance has seen up to; the watch resumes at +1. */
+  latestRevision?: number;
+  /** True when the watch loop must re-read the key before watching (boot failure, compaction). */
+  private needsSync = false;
+  private reconnectAttempt = 0;
+  /** True once the current outage has been logged at warn; cleared when etcd delivers data again. */
+  private warnedUnavailable = false;
 
   constructor(
     @Inject(APP_CONFIG) private readonly config: AppConfig,
@@ -71,15 +79,18 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
 
       // 2. Fetch initial log_level from etcd
       await this.fetchInitialLogLevel(etcdUrl);
-
-      // 3. Start background watch loop for real-time updates
-      void this.runWatchLoop(etcdUrl);
     } catch (err: any) {
       this.logger.warn(
         { err: err?.message || String(err) },
         'etcd unavailable, using environment configuration',
       );
+      // Keep trying in the background instead of stranding on env defaults (#120).
+      this.needsSync = true;
+      this.warnedUnavailable = true;
     }
+
+    // 3. Start background watch loop for real-time updates
+    void this.runWatchLoop(etcdUrl);
   }
 
   /**
@@ -133,8 +144,13 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
     }
 
     const data = (await resp.json()) as {
+      header?: { revision?: string };
       kvs?: Array<{ key: string; value: string }>;
     };
+
+    if (data.header?.revision !== undefined) {
+      this.latestRevision = Number(data.header.revision);
+    }
 
     if (data.kvs && data.kvs.length > 0) {
       const rawVal = Buffer.from(data.kvs[0].value, 'base64')
@@ -178,29 +194,45 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
         if (this.config.etcdPassword && !this.authToken) {
           await this.authenticate(etcdUrl);
         }
+        if (this.needsSync) {
+          await this.fetchInitialLogLevel(etcdUrl);
+          this.needsSync = false;
+        }
         await this.watchStream(etcdUrl);
       } catch (err: any) {
         if (this.isStopped) break;
         if (String(err?.message).includes('401')) {
           this.authToken = undefined;
         }
-        this.logger.warn(
+        // 07_CICD_DEPLOY.md §8: warn once per outage; further retries are debug noise.
+        const level = this.warnedUnavailable ? 'debug' : 'warn';
+        this.warnedUnavailable = true;
+        this.logger[level](
           { err: err?.message || String(err) },
           'etcd watch stream interrupted; reconnecting...',
         );
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, RECONNECT_DELAY_MS);
-          this.abortController?.signal.addEventListener(
-            'abort',
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            { once: true },
-          );
+          const signal = this.abortController?.signal;
+          const onAbort = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          }, this.backoffDelay(this.reconnectAttempt++));
+          signal?.addEventListener('abort', onAbort, { once: true });
         });
       }
     }
+  }
+
+  /**
+   * Exponential backoff between BACKOFF_MIN_MS and BACKOFF_MAX_MS, with jitter in the upper half.
+   */
+  backoffDelay(attempt: number): number {
+    const base = Math.min(BACKOFF_MAX_MS, BACKOFF_MIN_MS * 2 ** attempt);
+    return Math.max(BACKOFF_MIN_MS, base / 2 + Math.random() * (base / 2));
   }
 
   /**
@@ -220,7 +252,13 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        create_request: { key: keyBase64 },
+        create_request:
+          this.latestRevision === undefined
+            ? { key: keyBase64 }
+            : {
+                key: keyBase64,
+                start_revision: (this.latestRevision + 1).toString(),
+              },
       }),
       signal: this.abortController?.signal,
     });
@@ -245,13 +283,25 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
         const trimmed = line.trim();
         if (!trimmed) continue;
 
+        let payload: unknown;
         try {
-          const payload = JSON.parse(trimmed);
-          this.handleWatchPayload(payload);
+          payload = JSON.parse(trimmed);
         } catch {
           // ignore chunk boundary JSON fragments
+          continue;
+        }
+        try {
+          this.handleWatchPayload(payload);
+        } catch (err) {
+          // Release the stream before reconnecting (compaction/cancel).
+          reader.cancel().catch(() => {});
+          throw err;
         }
       }
+    }
+    // A cleanly closed body (proxy timeout, etcd shutdown) must reconnect through backoff too.
+    if (!this.isStopped) {
+      throw new Error('etcd watch stream ended');
     }
   }
 
@@ -259,10 +309,34 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
    * Parses gRPC-gateway JSON event payload from watch stream.
    */
   handleWatchPayload(payload: any): void {
-    const events = payload?.result?.events;
-    if (!Array.isArray(events)) return;
+    const result = payload?.result;
+    if (Number(result?.compact_revision) > 0) {
+      // Our start_revision was compacted away: re-read the key, then watch from its revision.
+      this.needsSync = true;
+      this.latestRevision = undefined;
+      throw new Error(
+        `etcd watch compacted at revision ${result.compact_revision}; resyncing`,
+      );
+    }
+    if (result?.canceled) {
+      throw new Error(
+        `etcd watch canceled: ${result.cancel_reason ?? 'no reason given'}`,
+      );
+    }
+
+    const events = result?.events;
+    if (!Array.isArray(events) || events.length === 0) return;
+
+    // Only a delivered event proves the watch works; an accepted-then-cancelled watch must keep backing off.
+    this.reconnectAttempt = 0;
+    this.warnedUnavailable = false;
 
     for (const event of events) {
+      const modRevision = Number(event.kv?.mod_revision);
+      if (modRevision > (this.latestRevision ?? 0)) {
+        this.latestRevision = modRevision;
+      }
+
       // type can be 0 or 'PUT' or undefined for a PUT event
       const isPut =
         event.type === 'PUT' || event.type === 0 || event.type === undefined;
