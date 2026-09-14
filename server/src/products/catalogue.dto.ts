@@ -163,7 +163,7 @@ function partNo(value: unknown): string {
   return requiredString(value, 'partNo').trim();
 }
 
-function asObject(body: unknown): Record<string, unknown> {
+export function asObject(body: unknown): Record<string, unknown> {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
     throw new BadRequestException('body must be an object');
   }
@@ -174,7 +174,7 @@ function has(value: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
-function requiredString(value: unknown, field: string): string {
+export function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new BadRequestException(`${field} is required`);
   }
@@ -182,7 +182,7 @@ function requiredString(value: unknown, field: string): string {
 }
 
 /** `nameTH` and `brand` are NOT NULL but may be empty — the screen trims and sends ''. */
-function stringOrEmpty(value: unknown, field: string): string {
+export function stringOrEmpty(value: unknown, field: string): string {
   if (value === undefined || value === null) return '';
   if (typeof value !== 'string') {
     throw new BadRequestException(`${field} must be a string`);
@@ -198,7 +198,7 @@ function optionalString(value: unknown, field: string): string | null {
   return value;
 }
 
-function integer(value: unknown, field: string, min = -INT4_MAX): number {
+export function integer(value: unknown, field: string, min = -INT4_MAX): number {
   if (typeof value !== 'number' || !Number.isInteger(value)) {
     throw new BadRequestException(`${field} must be an integer`);
   }
@@ -210,7 +210,7 @@ function integer(value: unknown, field: string, min = -INT4_MAX): number {
   return value;
 }
 
-function nonNegativeMoney(value: unknown, field: string): string {
+export function nonNegativeMoney(value: unknown, field: string): string {
   const amount = toSatang(value, field);
   if (amount < 0) {
     throw new BadRequestException(`${field} must not be negative`);
