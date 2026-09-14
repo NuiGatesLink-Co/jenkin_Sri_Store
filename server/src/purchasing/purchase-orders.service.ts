@@ -133,6 +133,24 @@ export class PurchaseOrdersService {
     };
   }
 
+  async get(id: string): Promise<PurchaseOrder> {
+    const { tenantId, manager } = currentRequestContext();
+    const rows = (await manager.query(
+      `SELECT id, po_no, supplier, status, created_at, received_at, cancelled_at
+         FROM purchase_orders
+        WHERE tenant_id = $1::uuid AND id = $2`,
+      [tenantId, id],
+    )) as PoRow[];
+    if (rows.length === 0) {
+      throw new HttpException(
+        { code: 'PO_NOT_FOUND', message: `purchase order ${id} not found` },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    const lines = await this.linesOf(manager, tenantId, [id]);
+    return toPurchaseOrder(rows[0], lines.get(id) ?? []);
+  }
+
   /** `savePO`: server-minted id and PO number, status `open`. Touches no stock. */
   async create(
     input: PoCreate,

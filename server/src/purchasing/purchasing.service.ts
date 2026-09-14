@@ -7,8 +7,9 @@ import {
 import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf, toSatang } from '../common/money.js';
-import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
+import { currentRequestContext } from '../common/request-context.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ProductsService } from '../products/products.service.js';
 import {
   parseCreatePO,
@@ -55,6 +56,7 @@ export class PurchasingService {
     private readonly docNumberService: DocNumberService,
     private readonly audit: AuditService,
     private readonly productsService: ProductsService,
+    private readonly cache: TenantCache,
   ) {}
 
   async create(
@@ -602,9 +604,7 @@ export class PurchasingService {
       after: { id: po.id, poNo: po.po_no, status: 'received' },
     });
 
-    onTransactionCommit(() => {
-      void this.productsService.invalidateCache(tenantId);
-    });
+    this.cache.invalidateAfterCommit(tenantId, 'products');
 
     return {
       poId: po.id,

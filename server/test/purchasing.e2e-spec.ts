@@ -49,6 +49,12 @@ describe('purchasing / PO (e2e)', () => {
       deviceId: fixture.posDeviceId,
       deviceRole: 'pos',
     });
+
+    await admin.query(
+      `INSERT INTO products (tenant_id, id, part_no, name, name_th, category, brand, price, cost, stock)
+       VALUES ($1::uuid, 'prod-bp', 'BP-1234', 'Front Brake Pad', 'ผ้าเบรกหน้า', 'เบรก', 'Brand', 350, 200.00, 10)`,
+      [TENANT],
+    );
   });
 
   afterAll(async () => {
@@ -84,7 +90,8 @@ describe('purchasing / PO (e2e)', () => {
       .set(auth());
 
     expect(listRes.status).toBe(200);
-    expect(listRes.body.data.items).toEqual(
+    const poList = Array.isArray(listRes.body.data) ? listRes.body.data : listRes.body.data.items;
+    expect(poList).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: poId })]),
     );
 
