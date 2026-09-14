@@ -1,17 +1,18 @@
 // ApiQuotesRepository — write-through cache implementation of QuotesRepository.
 //
 // Complies with ADR-0010:
-//  • Server is authority on quotes and expiration dates.
-//  • Quotes NEVER touch stock (pure document persistence).
-//  • Writes results through to Drift immediately; offline fallback preserved.
+//  • Server issues QT numbers (ADR-0007) and validates quote conversions/purges.
+//  • Quotes do not touch stock or the cash drawer until converted into sales.
+//  • Writes results through to Drift immediately.
 
-import '../../core/network/api_exception.dart';
 import 'package:drift/drift.dart';
 
 import '../../core/network/api_client.dart';
+import '../../core/network/api_exception.dart';
 import '../../core/utils/ids.dart';
 import '../../domain/models/aggregates.dart';
 import '../db/database.dart';
+import 'api/api_wire.dart';
 import 'quotes_repository.dart';
 
 class ApiQuotesRepository extends QuotesRepository {
@@ -21,90 +22,85 @@ class ApiQuotesRepository extends QuotesRepository {
 
   Future<void> syncFromServer() async {
     try {
-      final res = await apiClient.get('/api/v1/quotes');
-      if (res is List) {
-        for (final item in res) {
-          if (item is Map) {
-            final map = Map<String, dynamic>.from(item);
-            final quoteId = map['id'] as String;
-            final quoteNo = (map['quoteNo'] ?? map['quote_no'] ?? '') as String;
-            final dateStr = map['date'] ?? map['createdAt'] ?? map['created_at'];
-            final date = dateStr != null
-                ? DateTime.tryParse(dateStr.toString()) ?? DateTime.now()
-                : DateTime.now();
-            final validUntilStr = map['validUntil'] ?? map['valid_until'];
-            final validUntil = validUntilStr != null
-                ? DateTime.tryParse(validUntilStr.toString()) ?? date.add(const Duration(days: 30))
-                : date.add(const Duration(days: 30));
-            final status = (map['status'] ?? 'open') as String;
-            final customerName = (map['customerName'] ?? map['customer_name']) as String?;
-            final customerPhone = (map['customerPhone'] ?? map['customer_phone']) as String?;
-            final notes = map['notes'] as String?;
+      bool hasMore = true;
+      int page = 1;
 
-            double parseNum(dynamic val) {
-              if (val is num) return val.toDouble();
-              if (val is String) return double.tryParse(val) ?? 0.0;
-              return 0.0;
-            }
+      while (hasMore) {
+        final res = await apiClient.getPaginated(
+          '/api/v1/quotes',
+          queryParameters: {'page': page, 'limit': 100},
+        );
+        final items = res.data;
 
-            final subtotal = parseNum(map['subtotal']);
-            final discount = parseNum(map['discount']);
-            final total = parseNum(map['total']);
+        if (items.isNotEmpty) {
+          for (final item in items) {
+            if (item is Map) {
+              final map = Map<String, dynamic>.from(item);
+              final qId = map['id'] as String;
+              final quoteNo = (map['quoteNo'] ?? map['quote_no'] ?? '') as String;
+              final customerName = (map['customerName'] ?? map['customer']) as String?;
+              final customerPhone = (map['customerPhone'] ?? map['customer_phone']) as String?;
+              final date = stampOrNull(map['date']) ?? DateTime.now();
+              final validUntil = stampOrNull(map['validUntil'] ?? map['valid_until']) ?? date.add(const Duration(days: 30));
+              final total = money(map['total']);
+              final status = (map['status'] ?? 'open') as String;
+              final convertedAt = stampOrNull(map['convertedAt'] ?? map['converted_at']);
+              final notes = (map['notes'] ?? map['note']) as String?;
 
-            DateTime? convertedAt;
-            final convertedAtStr = map['convertedAt'] ?? map['converted_at'];
-            if (convertedAtStr != null) {
-              convertedAt = DateTime.tryParse(convertedAtStr.toString());
-            }
+              final quoteRow = QuoteRow(
+                id: qId,
+                quoteNo: quoteNo,
+                status: status,
+                date: date,
+                validUntil: validUntil,
+                convertedAt: convertedAt,
+                subtotal: map['subtotal'] != null ? money(map['subtotal']) : null,
+                discount: map['discount'] != null ? money(map['discount']) : null,
+                total: total,
+                customerName: customerName,
+                customerPhone: customerPhone,
+                notes: notes,
+                validDays: (map['validDays'] as num?)?.toInt(),
+              );
 
-            await db.into(db.quotes).insert(
-                  QuotesCompanion(
-                    id: Value(quoteId),
-                    quoteNo: Value(quoteNo),
-                    date: Value(date),
-                    validUntil: Value(validUntil),
-                    status: Value(status),
-                    customerName: Value(customerName),
-                    customerPhone: Value(customerPhone),
-                    notes: Value(notes),
-                    subtotal: Value(subtotal),
-                    discount: Value(discount),
-                    total: Value(total),
-                    convertedAt: Value(convertedAt),
-                  ),
-                  onConflict: DoUpdate((old) => QuotesCompanion(
-                        status: Value(status),
-                        convertedAt: Value(convertedAt),
-                      )),
-                );
+              await db.into(db.quotes).insertOnConflictUpdate(quoteRow);
 
-            final items = item['items'];
-            if (items is List) {
-              await (db.delete(db.quoteItems)..where((t) => t.quoteId.equals(quoteId))).go();
-              for (final line in items) {
-                if (line is Map) {
-                  final lineMap = Map<String, dynamic>.from(line);
-                  final productId = (lineMap['productId'] ?? lineMap['product_id']) as String?;
-                  final name = (lineMap['name'] ?? '') as String;
-                  final qty = (lineMap['qty'] as num?)?.toInt() ?? 0;
-                  final price = parseNum(lineMap['price']);
+              final qItems = map['items'];
+              if (qItems is List) {
+                await (db.delete(db.quoteItems)..where((t) => t.quoteId.equals(qId))).go();
+                for (final line in qItems) {
+                  if (line is Map) {
+                    final lineMap = Map<String, dynamic>.from(line);
+                    final productId = lineMap['productId'] as String?;
+                    final name = (lineMap['name'] ?? '') as String;
+                    final qty = (lineMap['qty'] as num?)?.toInt() ?? 0;
+                    final price = money(lineMap['price']);
 
-                  await db.into(db.quoteItems).insert(
-                        QuoteItemsCompanion.insert(
-                          quoteId: quoteId,
-                          productId: Value(productId),
-                          name: name,
-                          qty: qty,
-                          price: price,
-                        ),
-                      );
+                    await db.into(db.quoteItems).insert(
+                          QuoteItemsCompanion.insert(
+                            quoteId: qId,
+                            productId: Value(productId),
+                            name: name,
+                            qty: qty,
+                            price: price,
+                          ),
+                        );
+                  }
                 }
               }
             }
           }
         }
+
+        if (page >= res.totalPages || items.isEmpty) {
+          hasMore = false;
+        } else {
+          page++;
+        }
       }
-    } catch (_) {}
+    } catch (_) {
+      // Network failure or degraded mode: gracefully ignore and rely on Drift cache
+    }
   }
 
   @override
@@ -117,20 +113,19 @@ class ApiQuotesRepository extends QuotesRepository {
   Future<QuoteRow> saveQuote(QuoteInput input) async {
     try {
       final body = {
-        'customerName': input.customerName,
-        'customerPhone': input.customerPhone,
-        'notes': input.notes,
-        'validDays': input.validDays ?? 30,
-        'status': input.status ?? 'open',
-        'subtotal': input.subtotal?.toStringAsFixed(2),
-        'discount': input.discount?.toStringAsFixed(2) ?? '0.00',
-        'total': input.total?.toStringAsFixed(2),
+        'subtotal': wireMoney(input.subtotal ?? 0),
+        'discount': wireMoney(input.discount ?? 0),
+        'total': wireMoney(input.total ?? 0),
+        if (input.customerName != null) 'customerName': input.customerName,
+        if (input.customerPhone != null) 'customerPhone': input.customerPhone,
+        if (input.notes != null) 'notes': input.notes,
+        if (input.validDays != null) 'validDays': input.validDays,
         'items': input.items
-            .map((item) => {
-                  'productId': item.productId,
-                  'name': item.name,
-                  'qty': item.qty,
-                  'price': item.price.toStringAsFixed(2),
+            .map((i) => {
+                  if (i.productId != null) 'productId': i.productId,
+                  'name': i.name,
+                  'qty': i.qty,
+                  'price': wireMoney(i.price),
                 })
             .toList(),
       };
@@ -138,41 +133,64 @@ class ApiQuotesRepository extends QuotesRepository {
       final res = await apiClient.post('/api/v1/quotes', body: body);
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
-        final quoteId = (resMap['id'] ?? newId('q')) as String;
+        final realId = (resMap['id'] ?? newId('q')) as String;
         final quoteNo = (resMap['quoteNo'] ?? resMap['quote_no'] ?? docNo('QT')) as String;
-        final now = DateTime.now();
-        final validDays = input.validDays ?? 30;
-        final validUntil = now.add(Duration(days: validDays));
+        final date = stampOrNull(resMap['date']) ?? DateTime.now();
+        final validUntil = stampOrNull(resMap['validUntil'] ?? resMap['valid_until']) ??
+            date.add(Duration(days: input.validDays ?? 30));
+        final total = money(resMap['total'] ?? input.total);
+        final status = (resMap['status'] ?? 'open') as String;
 
-        final row = QuoteRow(
-          id: quoteId,
+        final quoteRow = QuoteRow(
+          id: realId,
           quoteNo: quoteNo,
-          date: now,
+          status: status,
+          date: date,
           validUntil: validUntil,
-          status: input.status ?? 'open',
-          customerName: input.customerName,
-          customerPhone: input.customerPhone,
-          notes: input.notes,
-          subtotal: input.subtotal ?? 0,
-          discount: input.discount ?? 0,
-          total: input.total ?? 0,
+          convertedAt: null,
+          subtotal: resMap['subtotal'] != null ? money(resMap['subtotal']) : input.subtotal,
+          discount: resMap['discount'] != null ? money(resMap['discount']) : input.discount,
+          total: total,
+          customerName: (resMap['customerName'] ?? input.customerName) as String?,
+          customerPhone: (resMap['customerPhone'] ?? input.customerPhone) as String?,
+          notes: (resMap['notes'] ?? input.notes) as String?,
+          validDays: (resMap['validDays'] as num?)?.toInt() ?? input.validDays,
         );
 
-        await db.into(db.quotes).insertOnConflictUpdate(row);
+        await db.into(db.quotes).insertOnConflictUpdate(quoteRow);
+        await (db.delete(db.quoteItems)..where((t) => t.quoteId.equals(realId))).go();
 
-        for (final item in input.items) {
-          await db.into(db.quoteItems).insert(
-                QuoteItemsCompanion.insert(
-                  quoteId: quoteId,
-                  productId: Value(item.productId),
-                  name: item.name,
-                  qty: item.qty,
-                  price: item.price,
-                ),
-              );
+        final rawItems = resMap['items'];
+        if (rawItems is List && rawItems.isNotEmpty) {
+          for (final line in rawItems) {
+            if (line is Map) {
+              final lineMap = Map<String, dynamic>.from(line);
+              await db.into(db.quoteItems).insert(
+                    QuoteItemsCompanion.insert(
+                      quoteId: realId,
+                      productId: Value(lineMap['productId'] as String?),
+                      name: (lineMap['name'] ?? '') as String,
+                      qty: (lineMap['qty'] as num?)?.toInt() ?? 1,
+                      price: money(lineMap['price']),
+                    ),
+                  );
+            }
+          }
+        } else {
+          for (final item in input.items) {
+            await db.into(db.quoteItems).insert(
+                  QuoteItemsCompanion.insert(
+                    quoteId: realId,
+                    productId: Value(item.productId),
+                    name: item.name,
+                    qty: item.qty,
+                    price: item.price,
+                  ),
+                );
+          }
         }
 
-        return row;
+        return quoteRow;
       }
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
@@ -184,15 +202,32 @@ class ApiQuotesRepository extends QuotesRepository {
   }
 
   @override
+  Future<void> deleteQuote(String id) async {
+    try {
+      await apiClient.delete('/api/v1/quotes/$id');
+      await (db.delete(db.quoteItems)..where((t) => t.quoteId.equals(id))).go();
+      await (db.delete(db.quotes)..where((t) => t.id.equals(id))).go();
+      return;
+    } on ApiException catch (e) {
+      rethrowServerRefusal(e);
+    } catch (_) {}
+
+    await super.deleteQuote(id);
+  }
+
+  @override
   Future<void> updateQuote(String id, QuotesCompanion patch) async {
     try {
       final body = <String, dynamic>{};
       if (patch.customerName.present) body['customerName'] = patch.customerName.value;
       if (patch.customerPhone.present) body['customerPhone'] = patch.customerPhone.value;
       if (patch.notes.present) body['notes'] = patch.notes.value;
-      if (patch.status.present) body['status'] = patch.status.value;
 
-      await apiClient.patch('/api/v1/quotes/$id', body: body);
+      final res = await apiClient.patch('/api/v1/quotes/$id', body: body);
+      if (res is Map) {
+        await db.into(db.quotes).insertOnConflictUpdate(patch.copyWith(id: Value(id)));
+        return;
+      }
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
     } catch (_) {}
@@ -208,19 +243,50 @@ class ApiQuotesRepository extends QuotesRepository {
         final resMap = Map<String, dynamic>.from(res);
         final newIdStr = (resMap['id'] ?? newId('q')) as String;
         final newQuoteNo = (resMap['quoteNo'] ?? resMap['quote_no'] ?? docNo('QT')) as String;
-        final now = DateTime.now();
+        final date = stampOrNull(resMap['date']) ?? DateTime.now();
+        final validUntil = stampOrNull(resMap['validUntil'] ?? resMap['valid_until']) ?? date.add(const Duration(days: 30));
+        final customerName = (resMap['customerName'] ?? resMap['customer']) as String?;
+        final customerPhone = (resMap['customerPhone'] ?? resMap['customer_phone']) as String?;
+        final total = money(resMap['total']);
+        final status = (resMap['status'] ?? 'open') as String;
+        final notes = (resMap['notes'] ?? resMap['note']) as String?;
 
-        final source = await (db.select(db.quotes)..where((t) => t.id.equals(id))).getSingleOrNull();
-        if (source != null) {
-          final newRow = source.copyWith(
-            id: newIdStr,
-            quoteNo: newQuoteNo,
-            date: now,
-            validUntil: now.add(const Duration(days: 30)),
-            status: 'open',
-          );
-          await db.into(db.quotes).insertOnConflictUpdate(newRow);
+        final newRow = QuoteRow(
+          id: newIdStr,
+          quoteNo: newQuoteNo,
+          status: status,
+          date: date,
+          validUntil: validUntil,
+          convertedAt: null,
+          subtotal: resMap['subtotal'] != null ? money(resMap['subtotal']) : null,
+          discount: resMap['discount'] != null ? money(resMap['discount']) : null,
+          total: total,
+          customerName: customerName,
+          customerPhone: customerPhone,
+          notes: notes,
+          validDays: (resMap['validDays'] as num?)?.toInt(),
+        );
+        await db.into(db.quotes).insertOnConflictUpdate(newRow);
 
+        final items = resMap['items'];
+        if (items is List && items.isNotEmpty) {
+          await (db.delete(db.quoteItems)..where((t) => t.quoteId.equals(newIdStr))).go();
+          for (final line in items) {
+            if (line is Map) {
+              final lineMap = Map<String, dynamic>.from(line);
+              await db.into(db.quoteItems).insert(
+                    QuoteItemsCompanion.insert(
+                      quoteId: newIdStr,
+                      productId: Value(lineMap['productId'] as String?),
+                      name: (lineMap['name'] ?? '') as String,
+                      qty: (lineMap['qty'] as num?)?.toInt() ?? 1,
+                      price: money(lineMap['price']),
+                    ),
+                  );
+            }
+          }
+        } else {
+          // If items not returned in server body, copy from local source
           final sourceItems = await (db.select(db.quoteItems)..where((t) => t.quoteId.equals(id))).get();
           for (final item in sourceItems) {
             await db.into(db.quoteItems).insert(
@@ -233,8 +299,8 @@ class ApiQuotesRepository extends QuotesRepository {
                   ),
                 );
           }
-          return newRow;
         }
+        return newRow;
       }
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
@@ -249,10 +315,9 @@ class ApiQuotesRepository extends QuotesRepository {
       final res = await apiClient.post('/api/v1/quotes/purge', body: {'olderThanDays': olderThanDays});
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
-        if (resMap['count'] != null) {
+        if (resMap['queued'] == true || resMap['count'] != null) {
           // Also clean local Drift
-          await super.purgeOldQuotes(olderThanDays: olderThanDays);
-          return (resMap['count'] as num).toInt();
+          return await super.purgeOldQuotes(olderThanDays: olderThanDays);
         }
       }
     } on ApiException catch (e) {
@@ -260,16 +325,5 @@ class ApiQuotesRepository extends QuotesRepository {
     } catch (_) {}
 
     return super.purgeOldQuotes(olderThanDays: olderThanDays);
-  }
-
-  @override
-  Future<void> deleteQuote(String id) async {
-    try {
-      await apiClient.delete('/api/v1/quotes/$id');
-    } on ApiException catch (e) {
-      rethrowServerRefusal(e);
-    } catch (_) {}
-
-    await super.deleteQuote(id);
   }
 }

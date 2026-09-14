@@ -3,6 +3,7 @@
 // Complies with ADR-0010:
 //  • Fills the Drift local cache on login / startup in one request.
 //  • Batch writes products, categories, customers, mechanics, settings into Drift.
+//  • Supports ETag 304 Not Modified when cache is already warm and unchanged.
 //  • Supports fallback to individual GETs if /bootstrap is not yet deployed on server.
 
 import 'package:drift/drift.dart';
@@ -13,17 +14,29 @@ import '../db/database.dart';
 import '../repositories/api_customers_repository.dart';
 import '../repositories/api_mechanics_repository.dart';
 import '../repositories/api_products_repository.dart';
+import '../repositories/api/api_wire.dart';
 
 class BootstrapService {
   final AppDatabase db;
   final ApiClient apiClient;
 
+  String? _lastEtag;
+
   BootstrapService({required this.db, required this.apiClient});
 
   Future<bool> bootstrap() async {
     try {
-      final res = await apiClient.get('/api/v1/bootstrap');
+      final headers = <String, String>{};
+      if (_lastEtag != null) {
+        headers['If-None-Match'] = _lastEtag!;
+      }
+
+      final res = await apiClient.get('/api/v1/bootstrap', headers: headers);
       if (res is Map) {
+        if (res['notModified'] == true) {
+          // HTTP 304 Not Modified: Cache is already up to date!
+          return true;
+        }
         await _applyBootstrapPayload(Map<String, dynamic>.from(res));
         return true;
       }
@@ -114,7 +127,7 @@ class BootstrapService {
         }
       }
 
-      // 5. Settings
+      // 5. Settings (ADR-0010: do not drop cashierName, taxId, branchNo on conflict)
       final settings = data['settings'];
       if (settings is Map) {
         final settingsMap = Map<String, dynamic>.from(settings);
@@ -124,6 +137,12 @@ class BootstrapService {
             ? (settingsMap['taxRate'] as num).toDouble()
             : (settingsMap['vatRate'] != null ? (settingsMap['vatRate'] as num).toDouble() : 7.0);
 
+        final cashier = (settingsMap['cashierName'] ?? settingsMap['cashier_name']) as String?;
+        final taxId = (settingsMap['taxId'] ?? settingsMap['tax_id']) as String?;
+        final branch = (settingsMap['branchNo'] ?? settingsMap['branch_no']) as String?;
+        final addr = settingsMap['address'] as String?;
+        final ph = settingsMap['phone'] as String?;
+
         batch.insert(
           db.settingsRow,
           SettingsRowCompanion(
@@ -131,18 +150,21 @@ class BootstrapService {
             shopName: Value(shopName),
             shopNameEN: Value(shopNameEN),
             taxRate: Value(taxRate),
-            address: Value(settingsMap['address'] as String?),
-            phone: Value(settingsMap['phone'] as String?),
-            cashierName: Value((settingsMap['cashierName'] ?? settingsMap['cashier_name']) as String?),
-            taxId: Value((settingsMap['taxId'] ?? settingsMap['tax_id']) as String?),
-            branchNo: Value((settingsMap['branchNo'] ?? settingsMap['branch_no']) as String?),
+            address: Value(addr),
+            phone: Value(ph),
+            cashierName: Value(cashier),
+            taxId: Value(taxId),
+            branchNo: Value(branch),
           ),
           onConflict: DoUpdate((old) => SettingsRowCompanion(
                 shopName: Value(shopName),
                 shopNameEN: Value(shopNameEN),
                 taxRate: Value(taxRate),
-                address: Value(settingsMap['address'] as String?),
-                phone: Value(settingsMap['phone'] as String?),
+                address: Value(addr),
+                phone: Value(ph),
+                cashierName: Value(cashier),
+                taxId: Value(taxId),
+                branchNo: Value(branch),
               )),
         );
       }
@@ -157,15 +179,15 @@ class BootstrapService {
       nameTH: Value((json['nameTH'] ?? json['name_t_h'] ?? json['nameTh'] ?? '') as String),
       category: Value((json['category'] ?? '') as String),
       brand: Value((json['brand'] ?? '') as String),
-      price: Value(json['price'] is num ? (json['price'] as num).toDouble() : double.tryParse('${json['price']}') ?? 0.0),
-      cost: Value(json['cost'] is num ? (json['cost'] as num).toDouble() : double.tryParse('${json['cost']}') ?? 0.0),
+      price: Value(money(json['price'])),
+      cost: Value(money(json['cost'])),
       stock: Value((json['stock'] as num?)?.toInt() ?? 0),
       minStock: Value((json['minStock'] ?? json['min_stock'] as num?)?.toInt() ?? 0),
       compat: Value(json['compat'] as String?),
       zone: Value(json['zone'] as String?),
       offlineOk: Value((json['offlineOk'] ?? json['offline_ok'] as bool?) ?? false),
-      updatedAt: Value(json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'].toString()) : null),
-      deletedAt: Value(json['deletedAt'] != null ? DateTime.tryParse(json['deletedAt'].toString()) : null),
+      updatedAt: Value(stampOrNull(json['updatedAt'])),
+      deletedAt: Value(stampOrNull(json['deletedAt'])),
     );
   }
 
@@ -178,20 +200,14 @@ class BootstrapService {
       phone: Value(json['phone'] as String?),
       address: Value(json['address'] as String?),
       points: Value((json['points'] as num?)?.toInt() ?? 0),
-      totalSpend: Value(json['totalSpend'] is num ? (json['totalSpend'] as num).toDouble() : double.tryParse('${json['totalSpend']}') ?? 0.0),
+      totalSpend: Value(money(json['totalSpend'])),
       createdAt: Value((json['createdAt'] ?? json['created_at'] ?? '') as String),
-      updatedAt: Value(json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'].toString()) : null),
-      deletedAt: Value(json['deletedAt'] != null ? DateTime.tryParse(json['deletedAt'].toString()) : null),
+      updatedAt: Value(stampOrNull(json['updatedAt'])),
+      deletedAt: Value(stampOrNull(json['deletedAt'])),
     );
   }
 
   MechanicsCompanion _parseMechanic(Map<String, dynamic> json) {
-    double parseNum(dynamic val) {
-      if (val is num) return val.toDouble();
-      if (val is String) return double.tryParse(val) ?? 0.0;
-      return 0.0;
-    }
-
     return MechanicsCompanion(
       id: Value(json['id'] as String),
       code: Value((json['code'] ?? '') as String),
@@ -201,15 +217,14 @@ class BootstrapService {
       shopName: Value((json['shopName'] ?? json['shop_name']) as String?),
       phone: Value(json['phone'] as String?),
       note: Value(json['note'] as String?),
-      creditLimit: Value(parseNum(json['creditLimit'] ?? json['credit_limit'])),
-      creditBalance: Value(parseNum(json['creditBalance'] ?? json['credit_balance'])),
-      totalSales: Value(parseNum(json['totalSales'] ?? json['total_sales'])),
-      totalCredit: Value(parseNum(json['totalCredit'] ?? json['total_credit'])),
-      totalDiscount: Value(parseNum(json['totalDiscount'] ?? json['total_discount'])),
-      totalMarkup: Value(parseNum(json['totalMarkup'] ?? json['total_markup'])),
+      creditLimit: Value(money(json['creditLimit'] ?? json['credit_limit'])),
+      creditBalance: Value(money(json['creditBalance'] ?? json['credit_balance'])),
+      totalSales: Value(money(json['totalSales'] ?? json['total_sales'])),
+      totalDiscount: Value(money(json['totalDiscount'] ?? json['total_discount'])),
+      totalMarkup: Value(money(json['totalMarkup'] ?? json['total_markup'])),
       createdAt: Value((json['createdAt'] ?? json['created_at'] ?? '') as String),
-      updatedAt: Value(json['updatedAt'] != null ? DateTime.tryParse(json['updatedAt'].toString()) : null),
-      deletedAt: Value(json['deletedAt'] != null ? DateTime.tryParse(json['deletedAt'].toString()) : null),
+      updatedAt: Value(stampOrNull(json['updatedAt'])),
+      deletedAt: Value(stampOrNull(json['deletedAt'])),
     );
   }
 }
