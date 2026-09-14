@@ -645,11 +645,17 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   (not on `feat/67-auto-deploy` either); #67 is reopened. Deploys are `ansible-playbook` by hand until it lands,
   so 07 §2's "merge → deploy.yml" arrow is design, not fact. An agent building it was stopped by the Claude Code
   permission classifier ("Production Deploy") — it needs the owner's explicit go-ahead.
-- **Still open (2026-09-14 close-out, `docs/handoff_log/ops-closeout-138-deploy-tickets.md`):** #67; #140
-  Redis `commandTimeout`; #141 e2e runners sharing a DB (runner lock, `fix/141-e2e-runner-lock`); #142 ADR-0003 `tx.*` slices; #143 Flutter login
-  screen + redirect; #145 Thai wording for
-  `SALE_NOT_IN_OPEN_SHIFT` (owner); #148 monitoring recovery gaps; branch protection on `main` (owner runs
-  07 §4). The repo's only branches are `main` and `POC_sample_offline_first`.
+- **Merged 2026-09-14 (orchestrated round):** #141 → PR #157 (e2e runner lock), #140 → PR #158 (ioredis
+  `commandTimeout`, `REDIS_COMMAND_TIMEOUT_MS` default 1000 ms, not on BullMQ connections), #144 → PR #159
+  (`src/devices`), #143 → PR #155 (login screen + redirect, `USE_API_WRITES` only), #148 → PR #156.
+  🔴 **#156 changes the base compose network (`ip_range` + `gateway`)**: an existing host's network must be
+  recreated once — `deploy.yml` stops at a pre-flight check and 07 §7 has the `down --remove-orphans` step
+  (never `-v`); dev machines need one `docker compose down` in `server/` too.
+- **Still open:** #67 (needs the owner's go-ahead); #142 → slices #149–#154 (tx.0–tx.5; #151/#152 scope needs a
+  decision); #145 Thai wording for `SALE_NOT_IN_OPEN_SHIFT` (owner); #160 intermittent e2e worker crash
+  (0xC0000409); #161 a network failure during refresh signs the user out; #162 `ten simultaneous opens` local
+  pool timeout; #163 device-management decisions (owner); branch protection on `main` (owner runs 07 §4).
+  The repo's only long-lived branches are `main` and `POC_sample_offline_first`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
