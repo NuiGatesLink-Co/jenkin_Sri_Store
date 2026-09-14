@@ -7,6 +7,7 @@ import {
   runInTenantScope,
   setRequestTenant,
 } from '../src/common/request-context.js';
+import { MechanicsController } from '../src/mechanics/mechanics.controller.js';
 import { SalesController } from '../src/sales/sales.controller.js';
 import {
   accessToken,
@@ -157,6 +158,9 @@ describe('idempotent money writes leave one effect in the tables (e2e, #152)', (
     const responses = await fiveTimes('/sales', key, body);
 
     expectAllEqual(responses, 201);
+    // The table counts here are also backstopped by `existingSale` (the client's bill id),
+    // so on this route the replay proof is the equal 201s and the one 'done' key; the returns
+    // and credit-payment cases below are where the key is the only defence.
     expect(
       await count(
         `SELECT count(*)::int AS n FROM sales WHERE tenant_id = $1::uuid`,
@@ -298,11 +302,11 @@ describe('idempotent money writes leave one effect in the tables (e2e, #152)', (
   };
 
   /** What the controller reads from a request: the key header, the concrete path, the token. */
-  const fakeRequest = (key: string, body: object) =>
+  const fakeRequest = (key: string, body: object, path = '/api/v1/sales') =>
     ({
       method: 'POST',
       baseUrl: '',
-      path: '/api/v1/sales',
+      path,
       body,
       header: (name: string) => (name === 'idempotency-key' ? key : undefined),
       user: {
@@ -384,5 +388,78 @@ describe('idempotent money writes leave one effect in the tables (e2e, #152)', (
       ),
     ).toBe(0);
     expect(await stock()).toBe(40);
+  });
+
+  it('with no request transaction (the tx.4 shape), three simultaneous same-key credit payments: two wait on the claim, then replay the winner', async () => {
+    const mechanics = app.get(MechanicsController);
+    const key = uniq('k-tx4-race');
+    const body = { amount: '1000.00', paymentMethod: 'เงินสด' };
+    const path = `/api/v1/mechanics/${MECHANIC}/credit-payments`;
+    // Each call owns its connection: no middleware transaction to share.
+    const runners = vi.spyOn(ds, 'createQueryRunner');
+
+    // The winner claims, then parks on the mechanic row this superuser transaction holds,
+    // so the other two arrive while its claim is uncommitted and block on the INSERT.
+    const holder = admin.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    let calls: Promise<{ result: unknown; statuses: number[] }>[] = [];
+    try {
+      await holder.query(
+        `SELECT id FROM mechanics WHERE tenant_id = $1::uuid AND id = $2 FOR UPDATE`,
+        [TENANT, MECHANIC],
+      );
+      calls = [0, 1, 2].map(() => {
+        const { res, statuses } = fakeResponse();
+        return inTenantScope(() =>
+          mechanics.creditPayment(
+            MECHANIC,
+            body,
+            fakeRequest(key, body, path),
+            res,
+          ),
+        ).then((result) => ({ result, statuses }));
+      });
+      const deadline = Date.now() + 10_000;
+      for (;;) {
+        const waiting = (await admin.query(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+            WHERE usename = 'pos_app' AND datname = current_database()
+              AND wait_event_type = 'Lock'`,
+        )) as { n: number }[];
+        if (waiting[0].n === 3) break;
+        if (Date.now() > deadline) {
+          throw new Error(
+            `expected 3 pos_app backends waiting on a lock, saw ${waiting[0].n}`,
+          );
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    } finally {
+      await holder.commitTransaction();
+      await holder.release();
+    }
+    const outcomes = await Promise.all(calls);
+
+    expect(runners).toHaveBeenCalledTimes(3);
+    // Exactly one ran the work (Nest's own status stands); two replayed with the stored 201.
+    expect(outcomes.map((o) => o.statuses).sort()).toEqual([[], [201], [201]]);
+    const bodies = outcomes.map((o) => JSON.parse(JSON.stringify(o.result)));
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(bodies[2]).toEqual(bodies[0]);
+    expect(
+      await count(
+        `SELECT count(*)::int AS n FROM credit_payments WHERE tenant_id = $1::uuid`,
+        [TENANT],
+      ),
+    ).toBe(1);
+    const rows = (await admin.query(
+      `SELECT credit_balance FROM mechanics WHERE tenant_id = $1::uuid AND id = $2`,
+      [TENANT, MECHANIC],
+    )) as { credit_balance: string }[];
+    expect(rows[0].credit_balance).toBe('2000.00');
+    expect(await keyRows(key)).toEqual([
+      { status: 'done', endpoint: `POST ${path}`, response_code: 201 },
+    ]);
   });
 });

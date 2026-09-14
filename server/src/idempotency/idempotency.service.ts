@@ -13,7 +13,6 @@ import { currentRequestContext } from '../common/request-context.js';
 import { TenantService } from '../common/database/tenant.service.js';
 import { LOGGER } from '../infra/logger.provider.js';
 import { REDIS_CACHE } from '../infra/redis.module.js';
-import type { IdempotencyParams } from './idempotency.runner.js';
 
 /** Express lower-cases header names. */
 export const IDEMPOTENCY_KEY_HEADER = 'idempotency-key';
@@ -47,6 +46,20 @@ export interface StoredResponse {
   code: number;
   /** The handler's return value — the `data` the success envelope wraps. */
   body: unknown;
+}
+
+/** Everything HTTP about a request that its idempotency record needs (tx.3, #152). */
+export interface IdempotencyParams {
+  key: string;
+  /** The CONCRETE target — method and path with its parameters filled in. */
+  endpoint: string;
+  requestHash: string;
+  /**
+   * The status this route answers with on success, stored and replayed to a retry. It must
+   * equal the route's `@HttpCode` (else 201 for POST, 200 otherwise) —
+   * `idempotency-routes.spec.ts` checks every call site against its decorators.
+   */
+  successCode: number;
 }
 
 export type ClaimResult =
@@ -110,7 +123,14 @@ export class IdempotencyService {
    * therefore never claims twice: only controllers call this.
    *
    * A replay sets the stored status on `res` (the route's `@Res({ passthrough: true })`)
-   * and returns the stored body; the global `EnvelopeInterceptor` wraps both alike.
+   * and returns the stored body; the global `EnvelopeInterceptor` wraps both alike. That
+   * status reaches the wire: Nest sets the route's status BEFORE the handler and sends with
+   * none, so `res.status` here wins — measured, not read, by `idempotency.e2e-spec.ts` ›
+   * *the stored status reaches the wire on replay*, which goes red without this call.
+   *
+   * 🔴 Everything in `work` runs inside the transaction that holds the claim row — for the
+   * void, that includes the manager-PIN argon2 verify. tx.5 (#154) has to move the PIN check
+   * ahead of this call in the controller; a nested `runTx` would only join.
    */
   runIdempotent<T>(
     params: IdempotencyParams,

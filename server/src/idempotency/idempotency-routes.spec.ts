@@ -9,15 +9,17 @@ const SRC = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 
 /**
  * tx.3 (#152): idempotency is no longer a decorator a reader can check by eye, so this scan
- * checks three things `@UseInterceptors(IdempotencyInterceptor)` used to make obvious.
+ * checks what `@UseInterceptors(IdempotencyInterceptor)` used to make obvious.
  *
  *   1. **Which routes are idempotent** — pinned below, so a route that silently loses its
- *      claim (or a new write that never had one) fails here instead of double-charging.
+ *      claim fails here instead of double-charging.
  *   2. **The claim comes first.** The handler's whole body is `return this.idempotency
  *      .runIdempotent(idempotencyParamsOf(req, …), res, …)` — or tx.2's `runTx` wrapper around
  *      a private `*In` whose whole body is — so nothing reads or locks before the claim.
  *   3. **The stored success status is the one the route sends.** The interceptor read it from
  *      `@HttpCode`; now each call site passes it, and a typo would replay a 201 for a 200.
+ *   4. **`@Res({ passthrough: true })`.** A plain `@Res()` hands the response to the handler,
+ *      which never sends it — the request would hang.
  */
 const ROUTE_DECORATORS = new Set(['Get', 'Post', 'Put', 'Patch', 'Delete']);
 const CLAIM =
@@ -29,6 +31,7 @@ interface Route {
   route: string;
   successCode: number | 'no claim first';
   declared: number;
+  passthrough: boolean;
 }
 
 function decoratorsOf(node: ts.Node, sf: ts.SourceFile) {
@@ -75,6 +78,9 @@ function idempotentRoutes(
         );
         if (!claimed && !mentions) continue;
         const httpCode = decorators.find((d) => d.name === 'HttpCode');
+        const resArg = m.parameters
+          .flatMap((p) => decoratorsOf(p, sf))
+          .find((d) => d.name === 'Res')?.arg;
         const path = [controller.arg, verb.arg]
           .filter(Boolean)
           .map((p) => p!.replace(/^'|'$/g, ''))
@@ -87,6 +93,7 @@ function idempotentRoutes(
             : verb.name === 'Post'
               ? 201
               : 200,
+          passthrough: /passthrough:\s*true/.test(resArg ?? ''),
         };
       }
     }
@@ -122,7 +129,7 @@ describe('idempotent routes claim first, with the status they send (tx.3 #152)',
           return this.idempotency.runIdempotent(idempotencyParamsOf(req, 201), res, () => 1);
         }
         @Delete(':id')
-        late(@Req() req, @Res({ passthrough: true }) res) {
+        late(@Req() req, @Res() res) {
           const x = this.read();
           return this.idempotency.runIdempotent(idempotencyParamsOf(req, 200), res, () => x);
         }
@@ -130,16 +137,23 @@ describe('idempotent routes claim first, with the status they send (tx.3 #152)',
         list() { return []; }
       }`;
     expect(idempotentRoutes(src)).toEqual({
-      'C.create': { route: 'POST /things', successCode: 201, declared: 201 },
+      'C.create': {
+        route: 'POST /things',
+        successCode: 201,
+        declared: 201,
+        passthrough: true,
+      },
       'C.accept': {
         route: 'POST /things/:id/accept',
         successCode: 201,
         declared: 202,
+        passthrough: true,
       },
       'C.late': {
         route: 'DELETE /things/:id',
         successCode: 'no claim first',
         declared: 200,
+        passthrough: false,
       },
     });
   });
@@ -152,10 +166,11 @@ describe('idempotent routes claim first, with the status they send (tx.3 #152)',
     const summary = Object.fromEntries(
       Object.entries(found).map(([name, r]) => [
         name,
-        `${r.route} ${r.successCode}${r.successCode === r.declared ? '' : ` (declares ${r.declared})`}`,
+        `${r.route} ${r.successCode}${r.successCode === r.declared ? '' : ` (declares ${r.declared})`}${r.passthrough ? '' : ' (no @Res passthrough)'}`,
       ]),
     );
     // The 38 routes that carried `@UseInterceptors(IdempotencyInterceptor)` before tx.3.
+    // 37 are live: `PurchasingController` is registered in no module (dead code, follow-up).
     expect(summary).toEqual({
       'CustomersController.create': 'POST /customers 201',
       'CustomersController.update': 'PATCH /customers/:id 200',

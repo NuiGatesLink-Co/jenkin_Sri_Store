@@ -227,22 +227,37 @@ voidSale(@Param('id') id: string, @Body() body: unknown, @Req() req: Authenticat
   **concrete** `METHOD baseUrl+path` (never `req.route.path` — two bills' `/void` would share
   one fingerprint, #75) and the body hash.
 - 🔴 `IdempotencyService.runIdempotent(params, res, work)` opens `TenantService.runTx` itself and
-  runs claim → `work` → complete **on that one manager**, the claim first. Every service
+  runs claim → `work` → complete **on that one manager**; the claim is the first statement of the
+  handler body (parameter pipes would run before it — none exist today). Every service
   `runTx` inside `work` joins it, so nothing a service reads or locks comes before the claim,
   a refused write rolls the claim back with it (the `409 CREDIT_LIMIT_EXCEEDED` → same key +
   `overrideCreditLimit` counter path depends on that), and a service that calls another write
   path (`QuotesService.convert → SalesService.create`) never claims twice — only controllers call
   `runIdempotent`. Until `tx.4` its `runTx` joins the middleware's transaction; after it, it is
   the transaction. `test/idempotency-money.e2e-spec.ts` pins both shapes against the tables.
-- A replay sets the stored status on `res` (hence `@Res({ passthrough: true })`) and returns the
-  stored body; the global `EnvelopeInterceptor` wraps it exactly like the original.
+- A replay sets the stored status on `res` (hence `@Res({ passthrough: true })` — a plain
+  `@Res()` would leave the response unsent and hang the request) and returns the stored body;
+  the global `EnvelopeInterceptor` wraps it exactly like the original. The stored
+  `response_code` **is** what goes on the wire: Nest sets the route's status before the handler
+  and sends with none, so `res.status(stored)` wins. That was measured, not read —
+  `test/idempotency.e2e-spec.ts` › *the stored status reaches the wire on replay* patches a
+  record to 201 under a `@HttpCode(202)` route and sees 201; without the `res.status` call it
+  sees 202.
 - 🔴 `successCode` must equal the route's `@HttpCode` (else 201 for POST, 200 otherwise).
   `src/idempotency/idempotency-routes.spec.ts` checks every call site against its decorators,
-  checks the claim is the handler's first statement, and pins the list of idempotent routes, so
-  a route that loses its claim fails there. Regression accepted in `tx.3`: the interceptor read
-  the status at request time; a stored record now carries the code the route declared when it
-  ran, so a deploy that changes a route's `@HttpCode` between a request and its retry replays
-  the old code.
+  checks the claim is the handler's first statement, requires `passthrough: true` on `@Res`, and
+  pins the list of idempotent routes, so a route that loses its claim fails there (a brand-new
+  write that never had one does not). What changed from the interceptor is only *where the code
+  comes from*: it read `@HttpCode` metadata when the original request ran, a call site now passes
+  a literal. Both store the code of the original request and replay it, so a deploy that changes
+  a route's `@HttpCode` between a request and its retry replays the old code either way; the new
+  risk is a literal drifting from its decorator, which the scan catches.
+- 🔴 **tx.5 (#154):** everything in `work` runs inside the transaction holding the claim row. For
+  `POST /sales/:id/void` that includes `assertManagerPin → verifyPassword` (argon2), so tx.5's
+  "argon2 outside the transaction" cannot be two short nested `runTx` calls — they would join.
+  The PIN check has to move ahead of `runIdempotent` in `SalesController.voidSale`, which changes
+  one behaviour: a wrong PIN on a replayed key then gets 403 (and a denial audit row) instead of
+  the replay. tx.4's "longest void transaction" measurement still includes argon2.
 
 - **Postgres is the authority.** `idempotency_keys`'s primary key `(tenant_id, key)` is
   the whole concurrency mechanism: a second request carrying a live key blocks on the

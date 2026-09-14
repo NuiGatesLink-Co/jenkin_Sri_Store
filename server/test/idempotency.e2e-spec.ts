@@ -255,6 +255,30 @@ describe('idempotency (e2e)', () => {
     expect(replay.body).toEqual({ status: 'success', data: { note: 'accepted' } });
   });
 
+  it('the stored status reaches the wire on replay, not the route default (#152 review)', async () => {
+    // The case above cannot tell "the stored code was replayed" from "the route's own
+    // @HttpCode(202) was sent again" — both are 202. Here the record says 201 while the
+    // route still declares 202, so only a replay that really sets the stored status passes.
+    const key = `k-stored-${Date.now()}`;
+    const send = () =>
+      request(app.getHttpServer())
+        .post('/api/v1/test-accepted')
+        .set('x-test-tenant', TENANT_A)
+        .set('Idempotency-Key', key)
+        .send({ note: 'stored' });
+    expect((await send()).status).toBe(202);
+    await asTenant(TENANT_A, (qr) =>
+      qr.query(
+        `UPDATE idempotency_keys SET response_code = 201
+          WHERE tenant_id = $1::uuid AND key = $2`,
+        [TENANT_A, key],
+      ),
+    );
+    const replay = await send();
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual({ status: 'success', data: { note: 'stored' } });
+  });
+
   it('the same key and body on a different endpoint replays nothing — 409', async () => {
     const key = `k-endpoint-${Date.now()}`;
     const body = { note: 'crossed' };

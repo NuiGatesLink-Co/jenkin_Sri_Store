@@ -4,21 +4,8 @@ import {
   IdempotencyService,
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_KEY_MAX_LENGTH,
+  type IdempotencyParams,
 } from './idempotency.service.js';
-
-/** Everything HTTP about a request that its idempotency record needs (tx.3, #152). */
-export interface IdempotencyParams {
-  key: string;
-  /** The CONCRETE target — method and path with its parameters filled in. */
-  endpoint: string;
-  requestHash: string;
-  /**
-   * The status this route answers with on success, stored and replayed to a retry. It must
-   * equal the route's `@HttpCode` (else 201 for POST, 200 otherwise) —
-   * `idempotency-routes.spec.ts` checks every call site against its decorators.
-   */
-  successCode: number;
-}
 
 /**
  * Reads the `Idempotency-Key` header and fingerprints the request, exactly as
