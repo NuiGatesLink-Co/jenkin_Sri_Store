@@ -209,3 +209,157 @@ describe('RuntimeConfigService', () => {
     expect((service as any).isStopped).toBe(true);
   });
 });
+
+describe('RuntimeConfigService watch resume (#120)', () => {
+  const keyBase64 = Buffer.from(LOG_LEVEL_KEY).toString('base64');
+  const b64 = (v: string) => Buffer.from(v).toString('base64');
+  const hang = () => new Promise<Response>(() => {});
+  let logger: Partial<Logger> & { level: string };
+  let service: RuntimeConfigService;
+
+  const json = (body: unknown) =>
+    ({ ok: true, status: 200, json: async () => body }) as Response;
+
+  /** A watch response whose body emits the given NDJSON lines, then ends. */
+  const stream = (...payloads: unknown[]) => {
+    const enc = new TextEncoder();
+    return {
+      ok: true,
+      status: 200,
+      body: new ReadableStream({
+        start(c) {
+          for (const p of payloads) {
+            c.enqueue(enc.encode(JSON.stringify(p) + '\n'));
+          }
+          c.close();
+        },
+      }),
+    } as unknown as Response;
+  };
+
+  const watchBodies = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls
+      .filter(([url]) => String(url).endsWith('/v3/watch'))
+      .map(([, init]) => JSON.parse((init as RequestInit).body as string));
+
+  const until = async (cond: () => boolean) => {
+    for (let i = 0; i < 200 && !cond(); i++) {
+      await new Promise((r) => setTimeout(r, 1));
+    }
+    expect(cond()).toBe(true);
+  };
+
+  beforeEach(() => {
+    logger = {
+      level: 'info',
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    service = new RuntimeConfigService(
+      { etcdUrl: 'http://127.0.0.1:2379' } as AppConfig,
+      logger as Logger,
+    );
+    vi.spyOn(service, 'backoffDelay').mockReturnValue(0);
+  });
+
+  afterEach(() => {
+    service.onModuleDestroy();
+    vi.restoreAllMocks();
+  });
+
+  it('starts the watch at range header.revision + 1 so no event between get and watch is lost', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ header: { revision: '41' }, kvs: [] }))
+      .mockImplementation(hang);
+
+    await service.start();
+    await until(() => watchBodies(fetchSpy).length === 1);
+
+    expect(service.latestRevision).toBe(41);
+    expect(watchBodies(fetchSpy)[0].create_request).toEqual({
+      key: keyBase64,
+      start_revision: '42',
+    });
+  });
+
+  it('resumes a reconnect after the last event revision it applied', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ header: { revision: '10' }, kvs: [] }))
+      .mockResolvedValueOnce(
+        stream({
+          result: {
+            events: [
+              {
+                type: 'PUT',
+                kv: { key: keyBase64, value: b64('debug'), mod_revision: '15' },
+              },
+            ],
+          },
+        }),
+      )
+      .mockImplementation(hang);
+
+    await service.start();
+    await until(() => watchBodies(fetchSpy).length === 2);
+
+    expect(logger.level).toBe('debug');
+    expect(watchBodies(fetchSpy)[1].create_request.start_revision).toBe('16');
+  });
+
+  it('keeps retrying after an initial connect failure and applies the level once etcd is up', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockRejectedValueOnce(new Error('ECONNREFUSED'))
+      .mockResolvedValueOnce(
+        json({
+          header: { revision: '7' },
+          kvs: [{ key: keyBase64, value: b64('warn') }],
+        }),
+      )
+      .mockImplementation(hang);
+
+    await service.start();
+    await until(() => watchBodies(fetchSpy).length === 1);
+
+    expect(logger.level).toBe('warn');
+    expect(watchBodies(fetchSpy)[0].create_request.start_revision).toBe('8');
+  });
+
+  it('re-reads the key when the watch start revision was compacted', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(json({ header: { revision: '5' }, kvs: [] }))
+      .mockResolvedValueOnce(
+        stream({ result: { canceled: true, compact_revision: '90' } }),
+      )
+      .mockResolvedValueOnce(
+        json({
+          header: { revision: '100' },
+          kvs: [{ key: keyBase64, value: b64('error') }],
+        }),
+      )
+      .mockImplementation(hang);
+
+    await service.start();
+    await until(() => watchBodies(fetchSpy).length === 2);
+
+    expect(logger.level).toBe('error');
+    expect(watchBodies(fetchSpy)[1].create_request.start_revision).toBe('101');
+  });
+
+  it('backs off exponentially between 1s and 30s with jitter', () => {
+    vi.mocked(service.backoffDelay).mockRestore();
+    const random = vi.spyOn(Math, 'random').mockReturnValue(1);
+    expect(service.backoffDelay(0)).toBe(1_000);
+    expect(service.backoffDelay(3)).toBe(8_000);
+    expect(service.backoffDelay(20)).toBe(30_000);
+    random.mockReturnValue(0);
+    expect(service.backoffDelay(0)).toBe(1_000);
+    expect(service.backoffDelay(3)).toBe(4_000);
+  });
+});
