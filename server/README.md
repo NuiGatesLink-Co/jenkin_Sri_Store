@@ -269,8 +269,12 @@ The addendum separates **who decides** the tenant from **who executes** `set_con
   throws if there is none. A `runTx(tid, fn)` shape lets any call site name another shop's
   uuid and get its rows back with no error, which is the one thing ADR-0003 exists to
   prevent. Since `tx.1` (#150) `src/common/database/tenant.service.ts` has only `runTx(fn)`
-  (the old `run(tid, fn)` / `runTx(tid, fn)` had no caller and are gone); no service calls
-  it yet — `tx.2` (#151) starts that.
+  (the old `run(tid, fn)` / `runTx(tid, fn)` had no caller and are gone). Since `tx.2`
+  (#151) every service and controller that reads `currentRequestContext()` wraps each
+  public method in it ("public wrapper + private `*In`"); until `tx.4` each of those calls
+  joins the middleware's transaction, and `test/runtx-join.e2e-spec.ts` pins that a void
+  or a device retirement holds one `pos_app` connection, not two. A new public method that
+  reads `currentRequestContext()` needs the same wrapper, or it 500s once `tx.4` lands.
 - **`runTx` joins, it does not nest.** A `runTx` inside an open transaction (the
   middleware's, until `tx.4`, or an outer `runTx`) reuses its manager. That is what lets
   `tx.1`–`tx.3` land with no behaviour change, and it is what stops
