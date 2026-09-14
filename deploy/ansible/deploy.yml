@@ -94,8 +94,13 @@
       args:
         chdir: "{{ app_dir }}"
 
-    - name: Ensure backing datastores and certgen are running
-      ansible.builtin.command: "docker compose {{ compose_files }} up -d postgres redis-cache redis-queue certgen"
+    # etcd-init is a one-shot job (like certgen) that bootstraps the etcd root user/auth —
+    # #64/#66. Nothing later in this playbook depends on it finishing (RuntimeConfigService
+    # fails open with no etcd at all), but without it here etcd never starts on the VM at
+    # all: every later step in this playbook uses --no-deps, so a service missing from this
+    # one `up -d` line is never brought up by anything else.
+    - name: Ensure backing datastores, certgen and etcd are running
+      ansible.builtin.command: "docker compose {{ compose_files }} up -d postgres redis-cache redis-queue certgen etcd etcd-init"
       environment:
         IMAGE_TAG: "{{ image_tag }}"
       args:

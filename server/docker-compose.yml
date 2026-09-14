@@ -20,8 +20,8 @@ x-app-env: &app-env
   REDIS_QUEUE_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis-queue:6379
   LOG_LEVEL: ${LOG_LEVEL:-info}
   # Dynamic config (#64/#66, 07_CICD_DEPLOY.md §8): the URL is not a secret (internal
-  # compose DNS name), the root password is — same variable the `etcd` service below
-  # bootstraps auth with, so RuntimeConfigService authenticates against the same store.
+  # compose DNS name), the root password is — same variable `etcd-init` below bootstraps
+  # the store's root user with, so RuntimeConfigService authenticates against the same store.
   ETCD_URL: http://etcd:2379
   ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
 
@@ -220,35 +220,76 @@ services:
   # source of truth for anything a shop's day depends on; nothing business-shaped goes here.
   # No `ports:` — reachable only inside the compose network, same as Postgres/Redis.
   #
-  # Pinned to the etcd 3.5 line, not 3.6+: RuntimeConfigService talks to etcd's v3
-  # gRPC-gateway HTTP API (`/v3/kv/range`, `/v3/watch`), which later etcd releases drop.
-  # `bitnamilegacy/etcd` (not `bitnami/etcd`, discontinued 2025) is the still-pullable image
-  # with a built-in `ETCD_ROOT_PASSWORD` bootstrap (creates the root user + `auth enable` once
-  # against the data volume — idempotent across restarts); a bare etcd image ships no shell to
-  # script that bootstrap with, and no `docker-entrypoint-initdb.d`-style hook exists for it
-  # the way `../postgres/init/` uses for Postgres. It is frozen (no further security patches
-  # from upstream) — swap it for a maintained equivalent if one appears; see the PR notes.
+  # gcr.io/etcd-development/etcd is the etcd project's own official image (Trivy: 30 fixed
+  # HIGH/CRITICAL findings, 0 critical, no OS layer to patch — a maintained, tag-bumpable
+  # image, unlike a frozen vendor rebuild). It still serves the v3 gRPC-gateway HTTP API
+  # RuntimeConfigService talks to with plain `fetch` (`/v3/kv/range`, `/v3/watch`) — verified
+  # directly against v3.6.12 with curl, not assumed from changelog text.
+  #
+  # It ships no shell (just the etcd/etcdctl/etcdutl binaries) and has no
+  # `docker-entrypoint-initdb.d`-style hook the way `../postgres/init/` has for Postgres, so
+  # auth bootstrap (create the root user, enable RBAC) is a separate one-shot job below
+  # (`etcd-init`), the same shape as `certgen` bootstrapping the TLS cert.
+  #
+  # No non-root `user:` here: `/var/lib/etcd` in the image, and any fresh named volume
+  # mounted over it, is root:root 0755 — an unprivileged uid cannot write there without an
+  # extra chown step this ticket doesn't add (nothing else in this compose file runs as a
+  # pinned non-root user either).
   etcd:
-    image: bitnamilegacy/etcd:3.5.21-debian-12-r0
+    image: gcr.io/etcd-development/etcd:v3.6.12
     restart: unless-stopped
     mem_limit: 256m
+    command:
+      - /usr/local/bin/etcd
+      - --data-dir=/etcd-data
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=default=http://etcd:2380
     environment:
-      ALLOW_NONE_AUTHENTICATION: "no"
-      ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
-      ETCD_ADVERTISE_CLIENT_URLS: http://etcd:2379
       # `endpoint health` performs a linearizable read, which etcd's RBAC refuses
       # anonymously once auth is enabled ("user name is empty") — ETCDCTL_USER (not a CLI
       # arg) authenticates the healthcheck below without the password landing in a command
-      # line, same reasoning as REDISCLI_AUTH for Redis.
+      # line, same reasoning as REDISCLI_AUTH for Redis. Harmless before `etcd-init` has run
+      # (auth disabled): etcd does not check credentials it isn't enforcing yet.
+      #
+      # 🔴 This is also the value RBAC actually holds — it is fixed at first bootstrap, not
+      # kept in sync with this variable. Changing ETCD_ROOT_PASSWORD later without also
+      # rotating it inside etcd (`etcdctl user passwd`) or resetting the `etcd-data` volume
+      # makes THIS healthcheck itself start failing auth ("invalid user ID or password"),
+      # which is how a silent mismatch becomes visible here — see `etcd-init.sh` and
+      # `server/README.md` *Dynamic config* for what RuntimeConfigService does with the same
+      # mismatch (fails open, one warning, no restart is possible into a working state).
       ETCDCTL_USER: root:${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
     volumes:
-      - etcd-data:/bitnami/etcd
+      - etcd-data:/etcd-data
     healthcheck:
       test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
       interval: 15s
       timeout: 3s
       retries: 10
       start_period: 10s
+
+  # One-shot: creates the etcd root user and enables RBAC auth on first boot, then asserts it
+  # (root authenticates, an anonymous request is refused) — see `docker/etcd/etcd-init.sh`.
+  # Idempotent: a re-run against an already-bootstrapped volume short-circuits immediately.
+  # Nothing depends on this succeeding (`condition: service_completed_successfully` is
+  # deliberately not used anywhere) — the whole point of RuntimeConfigService's fail-open
+  # design is that the API must boot with no working etcd at all.
+  etcd-init:
+    image: curlimages/curl:8.16.0
+    restart: "no"
+    mem_limit: 32m
+    entrypoint: sh
+    command: ["/etcd-init.sh"]
+    environment:
+      ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
+    volumes:
+      - ./docker/etcd/etcd-init.sh:/etcd-init.sh:ro
+    depends_on:
+      etcd:
+        condition: service_healthy
 
 # Fixed subnet so the api instances can hold static addresses (see nginx.conf).
 networks:

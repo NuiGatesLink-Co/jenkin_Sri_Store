@@ -95,37 +95,65 @@ stays the source of truth for anything a shop's day depends on (ADR-0013, `07_CI
 §8). This is the store side (#64); `src/config/runtime-config.service.ts` (#66, merged first)
 is the consumer that reads it at boot and watches it live.
 
-- `etcd` runs on the compose network only — no `ports:`, same as Postgres/Redis. Auth is on:
-  `ALLOW_NONE_AUTHENTICATION=no` + `ETCD_ROOT_PASSWORD` (from `.env`, fails fast if unset,
-  exactly like the other datastore passwords). `x-app-env` gives every api/worker instance
-  `ETCD_URL=http://etcd:2379` (not a secret — an internal compose DNS name) and the same
-  `ETCD_ROOT_PASSWORD` so `RuntimeConfigService` can authenticate.
+- `etcd` runs on the compose network only — no `ports:`, same as Postgres/Redis. `x-app-env`
+  gives every api/worker instance `ETCD_URL=http://etcd:2379` (not a secret — an internal
+  compose DNS name) and `ETCD_ROOT_PASSWORD` (from `.env`, fails fast if unset, exactly like
+  the other datastore passwords) so `RuntimeConfigService` can authenticate.
 - **The app must boot without etcd.** `RuntimeConfigService` logs one warning and keeps the
   `LOG_LEVEL` environment value if etcd is unreachable — there is no `depends_on` from any
-  `api-*`/`worker` service onto `etcd`, deliberately, so a slow or crashed store can never hold
-  up the app.
-- Image: `bitnamilegacy/etcd:3.5.21-debian-12-r0`, pinned to the **3.5** line — etcd 3.6+ drops
-  the v3 gRPC-gateway HTTP API (`/v3/kv/range`, `/v3/watch`) that `RuntimeConfigService` talks to
-  with plain `fetch` (ADR-0013 rules out the `etcd3` package: CJS + grpc-js on an ESM build).
-  `bitnami/etcd` (no image with that plain name) was discontinued in 2025; `bitnamilegacy/etcd`
-  is the still-pullable, but frozen (no further security patches), successor — it is the only
-  free image found that bootstraps RBAC auth from an env var the way both Redis containers do
-  from `REDIS_PASSWORD`. A bare etcd image ships no shell to script that bootstrap with by hand,
-  and etcd has no `docker-entrypoint-initdb.d`-style hook the way `docker/postgres/init/` uses.
+  `api-*`/`worker` service onto `etcd` or `etcd-init`, deliberately, so a slow or crashed store
+  can never hold up the app.
+- Image: `gcr.io/etcd-development/etcd:v3.6.12` — the etcd project's own official image, tag-
+  pinned like every other image in this file, so a CVE is answered by bumping the tag (the
+  repo's "bump, never suppress" rule) rather than by a frozen vendor rebuild with nothing to
+  bump to. It still serves the v3 gRPC-gateway HTTP API `RuntimeConfigService` talks to with
+  plain `fetch` (`/v3/kv/range`, `/v3/watch`; ADR-0013 rules out the `etcd3` package — CJS +
+  grpc-js on an ESM build) — verified directly against this exact tag with `curl`, since the
+  gateway's removal only affects some later etcd releases and guessing which ones from a
+  changelog is exactly how this file got it wrong once already.
+- This official image ships no shell — just the `etcd`/`etcdctl`/`etcdutl` binaries — and etcd
+  has no `docker-entrypoint-initdb.d`-style hook the way `docker/postgres/init/` uses, so
+  bootstrapping the root user and enabling RBAC is a separate one-shot `etcd-init` job
+  (`docker/etcd/etcd-init.sh`, image `curlimages/curl`), the same shape as `certgen`
+  bootstrapping the TLS cert. It drives etcd's HTTP API directly (`/v3/auth/user/add`,
+  `/v3/auth/role/add`, `/v3/auth/user/grant`, `/v3/auth/enable`), then **asserts** the result —
+  root authenticates, an anonymous request is refused — rather than trusting the bootstrap
+  calls succeeded. It is idempotent: re-run against an already-bootstrapped volume (a restart,
+  not a fresh one) short-circuits at the first authenticate call.
 - `etcdctl endpoint health` needs credentials once auth is enabled (it performs a linearizable
   read) — the healthcheck sets `ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD` as an environment
   variable so the password never lands in a process argument, same reasoning as
-  `REDISCLI_AUTH` for Redis.
-- Verify by hand from the compose network:
+  `REDISCLI_AUTH` for Redis. This is harmless before `etcd-init` has run (auth disabled: etcd
+  does not check credentials it isn't enforcing yet).
+- 🔴 **The root password is applied only once, when `etcd-init` first bootstraps the volume.**
+  `ETCD_ROOT_PASSWORD` in `.env` is not kept in sync with what etcd actually holds — changing
+  it later does **not** rotate the stored password. Tested directly: with a changed
+  `ETCD_ROOT_PASSWORD` and the same `etcd-data` volume, `etcd`'s own healthcheck starts failing
+  auth (`"authentication failed, invalid user ID or password"` in its health log) since the
+  healthcheck now presents the new value against the old stored one, and a subsequent
+  `etcd-init` run correctly fails loud (`root cannot authenticate`, exit 1) rather than
+  papering over it — but nothing depends on `etcd-init` succeeding, so this is visible in
+  `docker compose ps`/logs, never in the API's own health check. Meanwhile
+  `RuntimeConfigService` also cannot authenticate with the new value and fails open exactly as
+  it does with no etcd at all: one warning at boot, `LOG_LEVEL` from the environment, no retry.
+  To actually rotate it: `etcdctl user passwd root` against the running store (out of scope
+  here — no ticket owns it yet), or reset the `etcd-data` volume and let `etcd-init` re-bootstrap.
+- Verify by hand — write and read with root credentials **on the etcd container** (its
+  environment already carries `ETCDCTL_USER`), then prove the refusal from a **separate**
+  container on the compose network so it starts with no credentials of its own (`docker compose
+  exec etcd etcdctl …` would inherit the first container's `ETCDCTL_USER` and wrongly succeed):
   ```
-  docker compose exec -e ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD etcd \
-    etcdctl --endpoints=http://127.0.0.1:2379 put /pos/config/log_level debug
-  docker compose exec -e ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD etcd \
-    etcdctl --endpoints=http://127.0.0.1:2379 get /pos/config/log_level
+  docker compose exec etcd etcdctl --endpoints=http://127.0.0.1:2379 put /pos/config/log_level debug
   docker compose exec etcd etcdctl --endpoints=http://127.0.0.1:2379 get /pos/config/log_level
+
+  docker run --rm --network <project>_default --entrypoint etcdctl \
+    gcr.io/etcd-development/etcd:v3.6.12 --endpoints=http://etcd:2379 get /pos/config/log_level
   # → refused: "rpc error: code = InvalidArgument desc = etcdserver: user name is empty"
   ```
-  and watch the running API's logs pick up the change within a few seconds (#66).
+  (`<project>_default` is `srisurart-pos_default` for this stack's own network; `docker compose
+  exec -e ETCDCTL_USER= etcd etcdctl …` is an equivalent one-liner if a second container isn't
+  convenient — both were verified to refuse identically.) Then watch the running API's logs
+  pick up the change within a few seconds (#66).
 - Seeding the key on a fresh deploy is `cd.2`'s job, not this one's — this ships an empty,
   working store; `RuntimeConfigService` simply keeps the environment `LOG_LEVEL` until a value
   is written.

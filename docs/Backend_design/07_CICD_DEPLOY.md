@@ -112,7 +112,7 @@ GitHub Environment `demo` ถือ secret ทั้งหมด (ไม่ม�
 | secret | ใช้ทำอะไร |
 |---|---|
 | `DEMO_SSH_HOST`, `DEMO_SSH_USER`, `DEMO_SSH_KEY` | Ansible เข้าเครื่อง (user แรกต้องมี sudo — เจ้าของโปรเจกต์ใส่เอง) |
-| `DEMO_ENV_FILE` | เนื้อหา `server/.env` ทั้งไฟล์ (Postgres/Redis password, JWT keys, `CORS_ORIGINS`, Grafana admin, etcd root) — Ansible template ลง VM ด้วย mode 0600 |
+| `DEMO_ENV_FILE` | เนื้อหา `server/.env` ทั้งไฟล์ (Postgres/Redis password, JWT keys, `CORS_ORIGINS`, Grafana admin, `ETCD_ROOT_PASSWORD`) — Ansible template ลง VM ด้วย mode 0600. 🔴 **ก่อน merge #64 ต้องเพิ่ม `ETCD_ROOT_PASSWORD` เข้าไปในค่านี้** — ไม่งั้นทุกคำสั่ง `docker compose` บน VM (รวม `deploy.yml` เอง) fail ตั้งแต่ interpolation |
 
 **งบ RAM บน VM** (mem_limit ปัจจุบันรวม 3,392 MB — รวม etcd 256m แล้ว, #64): เพิ่ม Prometheus 512m
 (`--storage.tsdb.retention.time=7d --storage.tsdb.retention.size=2GB`) · Grafana 256m ·
@@ -200,26 +200,46 @@ on:
 สถานะ 2026-09-14: **ทั้งสองฝั่งอยู่บน `main` แล้ว** — service (#64) และ `RuntimeConfigService` (#66,
 merge มาก่อนตามแผนใน PR #109) มาบรรจบกันที่ `x-app-env` ใน `docker-compose.yml`
 
-* service `etcd` บน compose network เท่านั้น (ไม่มี `ports:`), auth เปิด
-  (`ALLOW_NONE_AUTHENTICATION=no` + root password จาก `.env` ตัวแปร `ETCD_ROOT_PASSWORD` — ตัว
-  เดียวกับที่ `x-app-env` ส่งให้ api/worker ทุกตัวใช้ authenticate), `mem_limit 256m`
-* image: `bitnamilegacy/etcd:3.5.21-debian-12-r0` — ปักหมุดสาย **3.5** เพราะ etcd 3.6+ ตัด
-  gRPC-gateway HTTP API ทิ้ง (ดูข้อถัดไป) · `bitnami/etcd` เฉย ๆ ถูกเลิกให้ดึงฟรีตั้งแต่ปี 2025,
-  `bitnamilegacy/etcd` คือตัวที่ยังดึงได้แต่ **frozen** (ไม่มี patch ความปลอดภัยเพิ่มแล้ว) — เลือกเพราะ
-  เป็น image ฟรีตัวเดียวที่ bootstrap RBAC ด้วย env var ได้แบบเดียวกับที่ทั้งสอง Redis ทำด้วย
-  `REDIS_PASSWORD`; image เปล่าของ etcd เองไม่มี shell ให้ script การสร้าง root user เอง และ etcd
-  ก็ไม่มี hook แบบ `docker-entrypoint-initdb.d` ที่ `docker/postgres/init/` ใช้
+* service `etcd` บน compose network เท่านั้น (ไม่มี `ports:`), auth เปิดผ่าน job แยก `etcd-init`
+  (ดูข้อถัดไป) ด้วย root password จาก `.env` ตัวแปร `ETCD_ROOT_PASSWORD` — ตัวเดียวกับที่
+  `x-app-env` ส่งให้ api/worker ทุกตัวใช้ authenticate, `mem_limit 256m`
+* image: `gcr.io/etcd-development/etcd:v3.6.12` — image ทางการของโปรเจกต์ etcd เอง ปักหมุด tag
+  แบบเดียวกับ image อื่นในไฟล์นี้ ทำให้ CVE แก้ด้วยการ**บั๊มป์ tag**ได้ (กติกาเดิม "bump, never
+  suppress") แทนที่จะเป็น image เวนเดอร์ที่ frozen ไม่มีอะไรให้บั๊มป์ · **ยังเสิร์ฟ gRPC-gateway HTTP
+  API อยู่** (`/v3/kv/range`, `/v3/watch`) — ตรวจด้วย `curl` ตรง ๆ กับ tag นี้แล้ว ไม่ได้เดาจาก
+  changelog (ฉบับก่อนของเอกสารนี้เข้าใจผิดว่า etcd 3.6+ ตัด gRPC-gateway ทิ้งทั้งสาย ซึ่งไม่จริง —
+  v3.6.12 ยังเสิร์ฟให้)
+* image ทางการไม่มี shell (มีแค่ไบนารี `etcd`/`etcdctl`/`etcdutl`) และ etcd ก็ไม่มี hook แบบ
+  `docker-entrypoint-initdb.d` ที่ `docker/postgres/init/` ใช้ — การสร้าง root user + เปิด RBAC
+  จึงเป็น job แยก `etcd-init` (image `curlimages/curl`, รูปแบบเดียวกับ `certgen`) ที่ยิง HTTP API
+  ตรง (`/v3/auth/user/add`, `/v3/auth/role/add`, `/v3/auth/user/grant`, `/v3/auth/enable`) แล้ว
+  **assert ผลจริง** (root authenticate ได้, อ่านแบบไม่ auth ถูกปฏิเสธ) ไม่ใช่เชื่อว่าคำสั่ง bootstrap
+  ผ่านเฉย ๆ · idempotent — รันซ้ำกับ volume ที่ bootstrap แล้วจะ short-circuit ที่ authenticate ครั้งแรก
 * ฝั่ง NestJS: `RuntimeConfigService` อ่านตอน boot แล้ว **watch** ผ่าน gRPC-gateway HTTP ของ etcd v3
   (`/v3/kv/range`, `/v3/watch`) ด้วย `fetch` — ไม่ใช้แพ็กเกจ `etcd3` (CJS + grpc-js บน build ESM)
 * **ไม่มี etcd แอปต้อง boot ได้** — log เตือนครั้งเดียว ใช้ค่าจาก env · การเช็ค `required()` ของ env เดิม
   ไม่เปลี่ยน (smoke ใน `server.yml` พึ่งพฤติกรรมนั้น) · ไม่มี `depends_on` จาก `api-*`/`worker` ไปยัง
-  `etcd` และ `/health/ready` **ไม่** เช็ค etcd ด้วยเหตุผลเดียวกัน (`server/README.md` *Invariants*)
+  `etcd`/`etcd-init` และ `/health/ready` **ไม่** เช็ค etcd ด้วยเหตุผลเดียวกัน (`server/README.md`
+  *Invariants*)
+* 🔴 **root password ถูกใช้ตอน bootstrap ครั้งแรกเท่านั้น** — เปลี่ยน `ETCD_ROOT_PASSWORD` ใน `.env`
+  ทีหลัง**ไม่**ทำให้รหัสผ่านจริงใน etcd เปลี่ยนตาม (ทดสอบจริงแล้ว): healthcheck ของ `etcd` เองจะเริ่ม
+  fail auth ("invalid user ID or password"), และ `etcd-init` ที่รันซ้ำจะ fail ดัง ๆ (exit 1) — แต่ไม่มี
+  อะไร depends_on `etcd-init` จึงเห็นได้แค่ใน `docker compose ps`/log ไม่ใช่ health ของ API · ฝั่ง
+  `RuntimeConfigService` ก็ authenticate ไม่ได้เหมือนไม่มี etcd เลย คือ fail-open เงียบ ๆ ด้วย log
+  เตือนครั้งเดียว ไม่มี retry · จะหมุนรหัสผ่านจริงต้อง `etcdctl user passwd root` กับ store ที่รันอยู่
+  (ยังไม่มี ticket) หรือรีเซ็ต volume `etcd-data` ให้ `etcd-init` bootstrap ใหม่ — ดูรายละเอียดใน
+  `server/README.md` *Dynamic config*
 * key แรกและตัวเดียวในรอบนี้: **`/pos/config/log_level`** (`info`/`debug`) — service ต้องเรียก
   `logger.level = …` ให้เห็นผลใน log ทันที (สาธิตได้: `etcdctl put` แล้วดู log เปลี่ยน — คำสั่งจริงอยู่ใน
   `server/README.md` *Dynamic config (etcd, #64/#66)*)
 * **ไม่ทำ:** maintenance mode (ต้องมีข้อความไทยหน้าเคาน์เตอร์ใหม่ — `CLAUDE.md` ห้ามแต่งเอง),
   ค่า rate limit (ไม่มีผู้ใช้ — ADR-0006 เก็บโควตาใน `tenants.plan`), อะไรก็ตามที่เป็นข้อมูลธุรกิจ ·
   seed key แรกตอน deploy ยังเป็นของ `cd.2` (#67) ไม่ใช่ของรอบนี้ — #64 ส่งมอบ store เปล่าที่ทำงานได้
+* **VM (`demo`):** `deploy/ansible/deploy.yml`'s "Ensure backing datastores, certgen and etcd
+  are running" step now also brings up `etcd` + `etcd-init` — ทุก step หลังจากนั้นใน playbook ใช้
+  `--no-deps` ดังนั้น service ที่ไม่อยู่ใน `up -d` บรรทัดนี้จะไม่มีวันถูกสร้างขึ้นเลยบน VM · **ก่อน merge
+  ต้องเพิ่ม `ETCD_ROOT_PASSWORD` ลงใน secret `DEMO_ENV_FILE`** (§5) ไม่งั้นทุกคำสั่ง `docker compose`
+  บน VM จะ fail ตั้งแต่ interpolation (`required variable ETCD_ROOT_PASSWORD is missing a value`)
 
 ---
 
