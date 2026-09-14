@@ -5,11 +5,12 @@
 //  • Writes results through to Drift immediately.
 //  • Supports offline read fallback from Drift cache.
 
-import '../../core/network/api_exception.dart';
 import 'package:drift/drift.dart';
 
 import '../../core/network/api_client.dart';
+import '../../core/network/api_exception.dart';
 import '../db/database.dart';
+import 'api/api_wire.dart';
 import 'customers_repository.dart';
 
 class ApiCustomersRepository extends CustomersRepository {
@@ -25,19 +26,11 @@ class ApiCustomersRepository extends CustomersRepository {
     final phone = json['phone'] as String?;
     final address = json['address'] as String?;
     final points = (json['points'] as num?)?.toInt() ?? 0;
-    final totalSpend = json['totalSpend'] is num
-        ? (json['totalSpend'] as num).toDouble()
-        : double.tryParse('${json['totalSpend']}') ?? 0.0;
+    final totalSpend = money(json['totalSpend']);
     final createdAt = (json['createdAt'] ?? json['created_at'] ?? '') as String;
 
-    DateTime? updatedAt;
-    if (json['updatedAt'] != null) {
-      updatedAt = DateTime.tryParse(json['updatedAt'].toString());
-    }
-    DateTime? deletedAt;
-    if (json['deletedAt'] != null) {
-      deletedAt = DateTime.tryParse(json['deletedAt'].toString());
-    }
+    final updatedAt = stampOrNull(json['updatedAt']);
+    final deletedAt = stampOrNull(json['deletedAt']);
 
     return CustomersCompanion(
       id: Value(id),
@@ -56,22 +49,56 @@ class ApiCustomersRepository extends CustomersRepository {
 
   Future<void> syncFromServer() async {
     try {
-      final res = await apiClient.get('/api/v1/customers');
-      if (res is List) {
-        await db.batch((batch) {
-          for (final item in res) {
-            if (item is Map) {
-              final comp = _customerToCompanion(Map<String, dynamic>.from(item));
-              batch.insert(
-                db.customers,
-                comp,
-                onConflict: DoUpdate((old) => comp),
-              );
-            }
-          }
-        });
+      String? updatedSince;
+      final latestRow = await (db.select(db.customers)
+            ..where((t) => t.updatedAt.isNotNull())
+            ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)])
+            ..limit(1))
+          .getSingleOrNull();
+
+      if (latestRow?.updatedAt != null) {
+        updatedSince = latestRow!.updatedAt!.toUtc().toIso8601String();
       }
-    } catch (_) {}
+
+      bool hasMore = true;
+      int page = 1;
+
+      while (hasMore) {
+        final queryParams = <String, dynamic>{
+          'limit': 100,
+          'page': page,
+        };
+        if (updatedSince != null) {
+          queryParams['updatedSince'] = updatedSince;
+        }
+
+        final res = await apiClient.getPaginated('/api/v1/customers', queryParameters: queryParams);
+        final items = res.data;
+
+        if (items.isNotEmpty) {
+          await db.batch((batch) {
+            for (final item in items) {
+              if (item is Map) {
+                final comp = _customerToCompanion(Map<String, dynamic>.from(item));
+                batch.insert(
+                  db.customers,
+                  comp,
+                  onConflict: DoUpdate((old) => comp),
+                );
+              }
+            }
+          });
+        }
+
+        if (page >= res.totalPages || items.isEmpty) {
+          hasMore = false;
+        } else {
+          page++;
+        }
+      }
+    } catch (_) {
+      // Network failure or degraded mode: gracefully ignore and rely on Drift cache
+    }
   }
 
   @override
@@ -122,7 +149,9 @@ class ApiCustomersRepository extends CustomersRepository {
       }
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
-    } catch (_) {}
+    } catch (_) {
+      // Offline fallback
+    }
 
     await super.updateCustomer(id, patch);
   }
@@ -131,13 +160,20 @@ class ApiCustomersRepository extends CustomersRepository {
   Future<void> deleteCustomer(String id) async {
     try {
       await apiClient.delete('/api/v1/customers/$id');
-    } catch (_) {}
-
-    await (db.update(db.customers)..where((t) => t.id.equals(id))).write(
-      CustomersCompanion(
-        deletedAt: Value(DateTime.now()),
-        updatedAt: Value(DateTime.now()),
-      ),
-    );
+      await (db.update(db.customers)..where((t) => t.id.equals(id))).write(
+        CustomersCompanion(
+          deletedAt: Value(DateTime.now()),
+        ),
+      );
+    } on ApiException catch (e) {
+      rethrowServerRefusal(e);
+    } catch (_) {
+      // Offline fallback
+      await (db.update(db.customers)..where((t) => t.id.equals(id))).write(
+        CustomersCompanion(
+          deletedAt: Value(DateTime.now()),
+        ),
+      );
+    }
   }
 }

@@ -8,13 +8,10 @@ import type { EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
-import {
-  currentRequestContext,
-  onTransactionCommit,
-} from '../common/request-context.js';
+import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
-import { ProductsService } from '../products/products.service.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import {
   MOVEMENT_COLUMNS,
   movementOut,
@@ -96,7 +93,7 @@ const INT4_MAX = 2_147_483_647;
 export class PurchaseOrdersService {
   constructor(
     private readonly docNumbers: DocNumberService,
-    private readonly products: ProductsService,
+    private readonly cache: TenantCache,
     private readonly audit: AuditService,
   ) {}
 
@@ -134,6 +131,24 @@ export class PurchaseOrdersService {
       items: rows.map((r) => toPurchaseOrder(r, lines.get(r.id) ?? [])),
       total: totals[0]?.n ?? 0,
     };
+  }
+
+  async get(id: string): Promise<PurchaseOrder> {
+    const { tenantId, manager } = currentRequestContext();
+    const rows = (await manager.query(
+      `SELECT id, po_no, supplier, status, created_at, received_at, cancelled_at
+         FROM purchase_orders
+        WHERE tenant_id = $1::uuid AND id = $2`,
+      [tenantId, id],
+    )) as PoRow[];
+    if (rows.length === 0) {
+      throw new HttpException(
+        { code: 'PO_NOT_FOUND', message: `purchase order ${id} not found` },
+        HttpStatus.NOT_FOUND,
+      );
+    }
+    const lines = await this.linesOf(manager, tenantId, [id]);
+    return toPurchaseOrder(rows[0], lines.get(id) ?? []);
   }
 
   /** `savePO`: server-minted id and PO number, status `open`. Touches no stock. */
@@ -342,7 +357,7 @@ export class PurchaseOrdersService {
     });
 
     if (touched.length > 0) {
-      onTransactionCommit(() => this.products.invalidateCache(tenantId));
+      this.cache.invalidateAfterCommit(tenantId, 'products');
     }
 
     return {

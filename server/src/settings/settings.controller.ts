@@ -5,10 +5,11 @@ import {
   Get,
   Patch,
   Req,
+  Res,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
 import { parseSettingsPatch, type Settings } from './settings.dto.js';
@@ -24,8 +25,10 @@ export class SettingsController {
   constructor(private readonly settingsService: SettingsService) {}
 
   @Get()
-  getSettings(): Promise<Settings> {
-    return this.settingsService.getSettings();
+  async getSettings(@Res({ passthrough: true }) res: Response): Promise<Settings> {
+    const result = await this.settingsService.getSettingsCached();
+    res.setHeader('X-Cache', result.fromCache ? 'HIT' : 'MISS');
+    return result.settings;
   }
 
   @Patch()

@@ -1,0 +1,107 @@
+# Monitoring overlay (#63 `ops.1`, 07_CICD_DEPLOY.md §10, ADR-0013).
+# Node Exporter (host metrics) + Prometheus + Grafana, on top of the base stack:
+#
+#   docker compose -f server/docker-compose.yml -f deploy/compose/monitoring.yml up -d
+#
+# On the VM this is composed alongside vm.override.yml too (cd.2's job, 07 §6 steps 2 and 6):
+#
+#   docker compose -f docker-compose.yml -f vm.override.yml -f monitoring.yml up -d
+#
+# Nothing here is exposed beyond what Bull-Board already does: Prometheus and Grafana publish
+# on host loopback only, reached over an SSH tunnel (server/README.md, 07 §7); node-exporter
+# publishes nothing at all and is reached only over the compose network, by Prometheus.
+# `server/.env` (or the VM's copy) must carry GRAFANA_ADMIN_PASSWORD — see .env.example.
+#
+# Memory budget (07 §5): node-exporter 64m + prometheus 512m + grafana 256m = 832m, on top of
+# the base stack's ~3.1 GB — well inside the ~4.2 GB / 6 GB target once etcd (#64) also lands.
+
+name: srisurart-pos
+
+services:
+  # Host CPU / memory / disk only — no container-level metrics are collected here, and no
+  # Postgres/Redis exporter is added (out of scope, 07_CICD_DEPLOY.md §1).
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    restart: unless-stopped
+    mem_limit: 64m
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--path.rootfs=/rootfs"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9100/metrics"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    # No `ports:` — reachable only on the compose network, scraped by `prometheus` below.
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    restart: unless-stopped
+    mem_limit: 512m
+    depends_on:
+      node-exporter: { condition: service_healthy }
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # Time AND size retention (07 §5) — a service without a cap is what turns a full disk
+      # into a dead POS.
+      - "--storage.tsdb.retention.time=7d"
+      - "--storage.tsdb.retention.size=2GB"
+    volumes:
+      # Relative paths in a Compose file resolve against the *project directory*, which
+      # defaults to the directory of the FIRST `-f` file — `server/` in every documented
+      # invocation above (never this file's own `deploy/compose/` directory). Hence `../deploy/…`.
+      - ../deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/healthy"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    ports:
+      # Host loopback only, same pattern as Bull-Board — reach it via
+      # `ssh -L 9090:127.0.0.1:9090 …` (server/README.md, 07 §7). Never the public interface.
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    mem_limit: 256m
+    depends_on:
+      prometheus: { condition: service_healthy }
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      # No default: an unset admin password must stop the stack, exactly like the datastore
+      # passwords already do (POS_APP_PASSWORD, REDIS_PASSWORD, ...) — never fall back silently.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      # Datasource + dashboard provider config: file-based, read-only, so a rebuilt Grafana
+      # volume comes back identical with no manual step. (See the path note on `prometheus`
+      # above — these resolve against `server/`, not this file's own directory.)
+      - ../deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # Grafana's own state (users, sessions) — provisioning above is independent of this.
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    ports:
+      # Host loopback only — reach it via `ssh -L 3000:127.0.0.1:3000 …` (07 §7).
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  prometheus-data:
+  grafana-data:

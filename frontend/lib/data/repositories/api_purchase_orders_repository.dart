@@ -4,14 +4,16 @@
 //  • Server is the source of truth for weighted-average cost and PO state.
 //  • receivePO writes through server's updated {stockAfter, costAfter} directly to products.
 //  • NO client code re-computes weighted average cost.
+//  • Server-provided movements are ingested directly; no client clock stamping on updatedAt.
 
-import '../../core/network/api_exception.dart';
 import 'package:drift/drift.dart';
 
 import '../../core/network/api_client.dart';
+import '../../core/network/api_exception.dart';
 import '../../core/utils/ids.dart';
 import '../../domain/models/aggregates.dart';
 import '../db/database.dart';
+import 'api/api_wire.dart';
 import 'movements_repository.dart';
 import 'purchase_orders_repository.dart';
 
@@ -22,74 +24,81 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
 
   Future<void> syncFromServer() async {
     try {
-      final res = await apiClient.get('/api/v1/purchase-orders');
-      if (res is List) {
-        for (final item in res) {
-          if (item is Map) {
-            final map = Map<String, dynamic>.from(item);
-            final poId = map['id'] as String;
-            final poNo = (map['poNo'] ?? map['po_no'] ?? '') as String;
-            final supplier = (map['supplier'] ?? '') as String;
-            final status = (map['status'] ?? 'open') as String;
-            final createdAtStr = map['createdAt'] ?? map['created_at'];
-            final createdAt = createdAtStr != null
-                ? DateTime.tryParse(createdAtStr.toString()) ?? DateTime.now()
-                : DateTime.now();
-            final receivedAtStr = map['receivedAt'] ?? map['received_at'];
-            final receivedAt = receivedAtStr != null
-                ? DateTime.tryParse(receivedAtStr.toString())
-                : null;
-            final cancelledAtStr = map['cancelledAt'] ?? map['cancelled_at'];
-            final cancelledAt = cancelledAtStr != null
-                ? DateTime.tryParse(cancelledAtStr.toString())
-                : null;
+      bool hasMore = true;
+      int page = 1;
 
-            await db.into(db.purchaseOrders).insert(
-                  PurchaseOrdersCompanion(
-                    id: Value(poId),
-                    poNo: Value(poNo),
-                    supplier: Value(supplier),
-                    status: Value(status),
-                    createdAt: Value(createdAt),
-                    receivedAt: Value(receivedAt),
-                    cancelledAt: Value(cancelledAt),
-                  ),
-                  onConflict: DoUpdate((old) => PurchaseOrdersCompanion(
-                        status: Value(status),
-                        receivedAt: Value(receivedAt),
-                        cancelledAt: Value(cancelledAt),
-                      )),
-                );
+      while (hasMore) {
+        final res = await apiClient.getPaginated(
+          '/api/v1/purchase-orders',
+          queryParameters: {'page': page, 'limit': 100},
+        );
+        final items = res.data;
 
-            final items = item['items'];
-            if (items is List) {
-              await (db.delete(db.poItems)..where((t) => t.poId.equals(poId))).go();
-              for (final line in items) {
-                if (line is Map) {
-                  final lineMap = Map<String, dynamic>.from(line);
-                  final partNo = (lineMap['partNo'] ?? lineMap['part_no'] ?? '') as String;
-                  final name = (lineMap['name'] ?? '') as String;
-                  final qty = (lineMap['qty'] as num?)?.toInt() ?? 0;
-                  final cost = lineMap['cost'] is num
-                      ? (lineMap['cost'] as num).toDouble()
-                      : double.tryParse('${lineMap['cost']}') ?? 0.0;
+        if (items.isNotEmpty) {
+          for (final item in items) {
+            if (item is Map) {
+              final map = Map<String, dynamic>.from(item);
+              final poId = map['id'] as String;
+              final poNo = (map['poNo'] ?? map['po_no'] ?? '') as String;
+              final supplier = (map['supplier'] ?? '') as String;
+              final status = (map['status'] ?? 'open') as String;
+              final createdAt = stampOrNull(map['createdAt'] ?? map['created_at']) ?? DateTime.now();
+              final receivedAt = stampOrNull(map['receivedAt'] ?? map['received_at']);
+              final cancelledAt = stampOrNull(map['cancelledAt'] ?? map['cancelled_at']);
 
-                  await db.into(db.poItems).insert(
-                        PoItemsCompanion.insert(
-                          poId: poId,
-                          partNo: partNo,
-                          name: name,
-                          qty: qty,
-                          cost: cost,
-                        ),
-                      );
+              await db.into(db.purchaseOrders).insert(
+                    PurchaseOrdersCompanion(
+                      id: Value(poId),
+                      poNo: Value(poNo),
+                      supplier: Value(supplier),
+                      status: Value(status),
+                      createdAt: Value(createdAt),
+                      receivedAt: Value(receivedAt),
+                      cancelledAt: Value(cancelledAt),
+                    ),
+                    onConflict: DoUpdate((old) => PurchaseOrdersCompanion(
+                          status: Value(status),
+                          receivedAt: Value(receivedAt),
+                          cancelledAt: Value(cancelledAt),
+                        )),
+                  );
+
+              final poLines = item['items'];
+              if (poLines is List) {
+                await (db.delete(db.poItems)..where((t) => t.poId.equals(poId))).go();
+                for (final line in poLines) {
+                  if (line is Map) {
+                    final lineMap = Map<String, dynamic>.from(line);
+                    final partNo = (lineMap['partNo'] ?? lineMap['part_no'] ?? '') as String;
+                    final name = (lineMap['name'] ?? '') as String;
+                    final qty = (lineMap['qty'] as num?)?.toInt() ?? 0;
+                    final cost = money(lineMap['cost']);
+
+                    await db.into(db.poItems).insert(
+                          PoItemsCompanion.insert(
+                            poId: poId,
+                            partNo: partNo,
+                            name: name,
+                            qty: qty,
+                            cost: cost,
+                          ),
+                        );
+                  }
                 }
               }
             }
           }
         }
+
+        if (page >= res.totalPages || items.isEmpty) {
+          hasMore = false;
+        } else {
+          page++;
+        }
       }
-    } catch (_) {}
+    } catch (_) {
+      // Network failure or degraded mode: gracefully ignore and rely on Drift cache
+    }
   }
 
   @override
@@ -104,11 +113,11 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
       final body = {
         'supplier': input.supplier,
         'items': input.items
-            .map((item) => {
-                  'partNo': item.partNo,
-                  'name': item.name,
-                  'qty': item.qty,
-                  'cost': item.cost.toStringAsFixed(2),
+            .map((i) => {
+                  'partNo': i.partNo,
+                  'name': i.name,
+                  'qty': i.qty,
+                  'cost': wireMoney(i.cost),
                 })
             .toList(),
       };
@@ -116,27 +125,28 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
       final res = await apiClient.post('/api/v1/purchase-orders', body: body);
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
-        final poId = (resMap['id'] ?? newId('po')) as String;
-        final poNo = (resMap['poNo'] ?? resMap['po_no'] ?? docNo('PO')) as String;
-        final createdAtStr = resMap['createdAt'] ?? resMap['created_at'];
-        final createdAt = createdAtStr != null
-            ? DateTime.tryParse(createdAtStr.toString()) ?? DateTime.now()
-            : DateTime.now();
+        final realId = (resMap['id'] ?? newId('po')) as String;
+        final realPoNo = (resMap['poNo'] ?? resMap['po_no'] ?? docNo('PO')) as String;
+        final status = (resMap['status'] ?? 'open') as String;
+        final createdAt = stampOrNull(resMap['createdAt'] ?? resMap['created_at']) ?? DateTime.now();
 
-        final row = PurchaseOrderRow(
-          id: poId,
-          poNo: poNo,
+        final poRow = PurchaseOrderRow(
+          id: realId,
+          poNo: realPoNo,
           supplier: input.supplier,
+          status: status,
           createdAt: createdAt,
-          status: 'open',
+          receivedAt: null,
+          cancelledAt: null,
         );
 
-        await db.into(db.purchaseOrders).insertOnConflictUpdate(row);
+        await db.into(db.purchaseOrders).insertOnConflictUpdate(poRow);
+        await (db.delete(db.poItems)..where((t) => t.poId.equals(realId))).go();
 
         for (final item in input.items) {
           await db.into(db.poItems).insert(
                 PoItemsCompanion.insert(
-                  poId: poId,
+                  poId: realId,
                   partNo: item.partNo,
                   name: item.name,
                   qty: item.qty,
@@ -145,7 +155,7 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
               );
         }
 
-        return row;
+        return poRow;
       }
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
@@ -176,31 +186,53 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
         final supplier = po?.supplier ?? '';
         final poNo = po?.poNo ?? '';
 
-        // 2. Patch updated products directly with server's new stock and cost
+        // 2. Patch updated products directly with server's new stock and cost (ADR-0010: no client clock on updatedAt)
         final updated = resMap['updated'];
         if (updated is List) {
           for (final u in updated) {
             if (u is Map) {
               final uMap = Map<String, dynamic>.from(u);
+              final prodId = uMap['productId'] as String?;
               final partNo = (uMap['partNo'] ?? uMap['part_no'] ?? '') as String;
               final stockAfter = (uMap['stockAfter'] ?? uMap['stock_after'] as num?)?.toInt();
-              final costAfter = uMap['costAfter'] is num
-                  ? (uMap['costAfter'] as num).toDouble()
-                  : double.tryParse('${uMap['costAfter'] ?? uMap['cost_after']}');
+              final costAfter = moneyOrNull(uMap['costAfter'] ?? uMap['cost_after']);
 
-              final product = await (db.select(db.products)
-                    ..where((t) => t.partNo.equals(partNo)))
-                  .getSingleOrNull();
+              ProductRow? product;
+              if (prodId != null && prodId.isNotEmpty) {
+                product = await (db.select(db.products)..where((t) => t.id.equals(prodId))).getSingleOrNull();
+              }
+              product ??= await (db.select(db.products)..where((t) => t.partNo.equals(partNo))).getSingleOrNull();
 
               if (product != null && stockAfter != null && costAfter != null) {
-                await (db.update(db.products)..where((t) => t.id.equals(product.id))).write(
+                await (db.update(db.products)..where((t) => t.id.equals(product!.id))).write(
                   ProductsCompanion(
                     stock: Value(stockAfter),
                     cost: Value(costAfter),
-                    updatedAt: Value(now),
                   ),
                 );
+              }
+            }
+          }
+        }
 
+        // 3. Ingest movements from server if present; fallback to local movement if absent
+        final movements = resMap['movements'];
+        if (movements is List && movements.isNotEmpty) {
+          for (final mv in movements) {
+            if (mv is Map<String, dynamic>) {
+              await db.into(db.movements).insertOnConflictUpdate(movementRowFromWire(mv));
+            }
+          }
+        } else if (updated is List) {
+          for (final u in updated) {
+            if (u is Map) {
+              final uMap = Map<String, dynamic>.from(u);
+              final partNo = (uMap['partNo'] ?? uMap['part_no'] ?? '') as String;
+              final stockAfter = (uMap['stockAfter'] ?? uMap['stock_after'] as num?)?.toInt();
+              final costAfter = moneyOrNull(uMap['costAfter'] ?? uMap['cost_after']);
+
+              final product = await (db.select(db.products)..where((t) => t.partNo.equals(partNo))).getSingleOrNull();
+              if (product != null && stockAfter != null && costAfter != null) {
                 final delta = stockAfter - product.stock;
                 await MovementsRepository(db).addMovement(
                   productId: product.id,
@@ -208,7 +240,7 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
                   name: product.name,
                   delta: delta,
                   type: 'receive',
-                  note: 'PO $poNo จาก $supplier · ทุนใหม่ ฿${costAfter.toStringAsFixed(2)}',
+                  note: 'PO $poNo จาก $supplier · ทุนใหม่ ฿${wireMoney(costAfter)}',
                   stockAfter: stockAfter,
                 );
               }
@@ -235,6 +267,13 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
   Future<void> cancelPO(String id) async {
     try {
       await apiClient.post('/api/v1/purchase-orders/$id/cancel');
+      await (db.update(db.purchaseOrders)..where((t) => t.id.equals(id))).write(
+        PurchaseOrdersCompanion(
+          status: const Value('cancelled'),
+          cancelledAt: Value(DateTime.now()),
+        ),
+      );
+      return;
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
     } catch (_) {}
@@ -246,6 +285,9 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
   Future<void> deletePO(String id) async {
     try {
       await apiClient.delete('/api/v1/purchase-orders/$id');
+      await (db.delete(db.poItems)..where((t) => t.poId.equals(id))).go();
+      await (db.delete(db.purchaseOrders)..where((t) => t.id.equals(id))).go();
+      return;
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
     } catch (_) {}

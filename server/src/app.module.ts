@@ -11,6 +11,7 @@ import { HealthModule } from './health/health.module.js';
 import { DbModule } from './infra/db.module.js';
 import { LOGGER } from './infra/logger.provider.js';
 import { RedisModule } from './infra/redis.module.js';
+import { TenantCacheModule } from './infra/tenant-cache.module.js';
 import { AuditModule } from './audit/audit.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { PlatformModule } from './platform/platform.module.js';
@@ -116,6 +117,7 @@ export class AppModule implements NestModule {
         CoreModule.forRoot(config, logger),
         DbModule,
         RedisModule,
+        TenantCacheModule,
         HealthModule,
         PlatformModule,
         AuditModule,

@@ -1,6 +1,7 @@
 import { HttpException, HttpStatus, Injectable } from '@nestjs/common';
 import { newId } from '../common/ids.js';
 import { currentRequestContext } from '../common/request-context.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import { returning } from '../common/sql.js';
 import type { SaleWithItems } from '../sales/sale-reads.service.js';
 import { SaleReadsService } from '../sales/sale-reads.service.js';
@@ -52,15 +53,32 @@ const COLUMNS = `id, code, name, name_th, nickname, shop_name, phone, note,
 
 @Injectable()
 export class MechanicsService {
-  constructor(private readonly saleReads: SaleReadsService) {}
+  constructor(
+    private readonly saleReads: SaleReadsService,
+    private readonly cache: TenantCache,
+  ) {}
 
   async list(query: {
     search?: string;
     updatedSince?: string;
     page: number;
     limit: number;
-  }): Promise<{ items: Mechanic[]; total: number }> {
+  }): Promise<{ items: Mechanic[]; total: number; fromCache: boolean }> {
     const { tenantId, manager } = currentRequestContext();
+    // #32: cache-aside on `t:{tid}:mechanics:g:{token}:list:…`. The prefix is taken
+    // before the query — see `TenantCache.prefix` for why that order matters.
+    const prefix = await this.cache.prefix(tenantId, 'mechanics');
+    const key =
+      prefix === null
+        ? null
+        : `${prefix}list:` +
+          (query.search ? `s:${encodeURIComponent(query.search)}:` : '') +
+          (query.updatedSince ? `u:${encodeURIComponent(query.updatedSince)}:` : '') +
+          `${query.page}:${query.limit}`;
+    if (key !== null) {
+      const cached = await this.cache.get<{ items: Mechanic[]; total: number }>(key);
+      if (cached) return { ...cached, fromCache: true };
+    }
     const params: unknown[] = [tenantId];
     const where = [
       'tenant_id = $1::uuid',
@@ -89,7 +107,9 @@ export class MechanicsService {
         LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params,
     )) as MechanicRow[];
-    return { items: rows.map(toMechanic), total: totals[0].n };
+    const page = { items: rows.map(toMechanic), total: totals[0].n };
+    if (key !== null) await this.cache.set(key, page, 'mechanics');
+    return { ...page, fromCache: false };
   }
 
   async byId(id: string): Promise<Mechanic> {
@@ -134,6 +154,7 @@ export class MechanicsService {
         input.creditLimit,
       ],
     )) as MechanicRow[];
+    this.cache.invalidateAfterCommit(tenantId, 'mechanics');
     return toMechanic(rows[0]);
   }
 
@@ -164,6 +185,7 @@ export class MechanicsService {
       ),
     );
     if (rows.length === 0) throw mechanicNotFound();
+    this.cache.invalidateAfterCommit(tenantId, 'mechanics');
     return toMechanic(rows[0]);
   }
 
@@ -176,6 +198,7 @@ export class MechanicsService {
         WHERE tenant_id = $1::uuid AND id = $2`,
       [tenantId, id],
     );
+    this.cache.invalidateAfterCommit(tenantId, 'mechanics');
     return { id, deleted: true };
   }
 

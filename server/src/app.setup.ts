@@ -59,11 +59,12 @@ export async function configureApp(
       'Content-Type',
       'Authorization',
       'Idempotency-Key',
+      'If-None-Match',
       'X-Device-Id',
       'X-Client-Version',
       'X-Correlation-ID',
     ],
-    exposedHeaders: ['Idempotency-Key', 'Retry-After', 'X-Correlation-ID'],
+    exposedHeaders: ['Idempotency-Key', 'Retry-After', 'X-Correlation-ID', 'ETag'],
   });
 
   app.use(requestLogger(logger));
@@ -76,7 +77,7 @@ export async function configureApp(
   // Order matters: the envelope wraps whatever comes back, the transaction ends
   // inside it, and every route-scoped interceptor (IdempotencyInterceptor above all)
   // runs inside the transaction — its record must commit with the work it describes.
-  app.useGlobalInterceptors(new EnvelopeInterceptor(), new TransactionInterceptor());
+  app.useGlobalInterceptors(new EnvelopeInterceptor(), new TransactionInterceptor(logger));
   app.useGlobalFilters(new HttpExceptionFilter(logger));
   app.enableShutdownHooks();
   await app.init();

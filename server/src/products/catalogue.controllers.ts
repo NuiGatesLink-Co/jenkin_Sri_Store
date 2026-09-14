@@ -8,9 +8,11 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Paginated, pageParams } from '../common/paginated.js';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
@@ -33,8 +35,10 @@ export class CategoriesController {
   constructor(private readonly categories: CategoriesService) {}
 
   @Get()
-  list(): Promise<Category[]> {
-    return this.categories.list();
+  async list(@Res({ passthrough: true }) res: Response): Promise<Category[]> {
+    const result = await this.categories.listCached();
+    res.setHeader('X-Cache', result.fromCache ? 'HIT' : 'MISS');
+    return result.categories;
   }
 
   @Post()

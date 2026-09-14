@@ -8,6 +8,7 @@ import { fromSatang, pointsFor, satangOf } from '../common/money.js';
 import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import { JOB_SALE_CREATED, QUEUE_SALE_POST } from '../queue/queue.constants.js';
 import type { CreateSale, SaleLine } from './sales.dto.js';
@@ -199,6 +200,7 @@ export class SalesService {
     private readonly docNumbers: DocNumberService,
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
+    private readonly cache: TenantCache,
     @Optional() @InjectQueue(QUEUE_SALE_POST) private readonly salePostQueue?: Queue,
   ) {}
 
@@ -297,6 +299,13 @@ export class SalesService {
         },
       });
     }
+
+    // #32: every line's stock moved, and the customer's spend/points and the mechanic's
+    // totals/tab with it — stale once this commits. A refusal above (409) or a rollback
+    // below never runs the hooks.
+    this.cache.invalidateAfterCommit(tenantId, 'products');
+    if (dto.customerId !== null) this.cache.invalidateAfterCommit(tenantId, 'customers');
+    if (dto.mechanicId !== null) this.cache.invalidateAfterCommit(tenantId, 'mechanics');
 
     if (this.salePostQueue) {
       const queue = this.salePostQueue;

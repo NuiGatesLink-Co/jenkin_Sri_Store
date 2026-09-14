@@ -390,3 +390,44 @@ export async function asTenant<T>(
     await qr.release();
   }
 }
+
+/** Inserts or updates tenant settings. */
+export async function seedSettings(
+  admin: DataSource,
+  tenantId: string,
+  s: {
+    shopName?: string;
+    shopNameEn?: string;
+    taxRate?: number;
+    quoteValidDays?: number;
+    address?: string | null;
+    phone?: string | null;
+    cashierName?: string | null;
+    taxId?: string | null;
+    branchNo?: string | null;
+  } = {},
+): Promise<void> {
+  await admin.query(
+    `INSERT INTO settings (tenant_id, shop_name, shop_name_en, tax_rate, quote_valid_days,
+                           address, phone, cashier_name, tax_id, branch_no)
+          VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     ON CONFLICT (tenant_id) DO UPDATE SET
+          shop_name = EXCLUDED.shop_name, shop_name_en = EXCLUDED.shop_name_en,
+          tax_rate = EXCLUDED.tax_rate, quote_valid_days = EXCLUDED.quote_valid_days,
+          address = EXCLUDED.address, phone = EXCLUDED.phone,
+          cashier_name = EXCLUDED.cashier_name, tax_id = EXCLUDED.tax_id,
+          branch_no = EXCLUDED.branch_no`,
+    [
+      tenantId,
+      s.shopName ?? 'SriSurart Autopart',
+      s.shopNameEn ?? '',
+      s.taxRate ?? 7,
+      s.quoteValidDays ?? 30,
+      s.address ?? null,
+      s.phone ?? null,
+      s.cashierName ?? null,
+      s.taxId ?? null,
+      s.branchNo ?? null,
+    ],
+  );
+}

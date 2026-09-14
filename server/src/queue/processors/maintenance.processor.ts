@@ -86,7 +86,11 @@ export class MaintenanceProcessor extends WorkerHost {
       const result = await em.query(
         `DELETE FROM quotes
           WHERE tenant_id = $1::uuid
-            AND date < now() - ($2::int * interval '1 day')
+            AND (
+              (status = 'converted' AND COALESCE(converted_at, date) < now() - ($2::int * interval '1 day'))
+              OR
+              (status != 'converted' AND valid_until < now() - ($2::int * interval '1 day'))
+            )
           RETURNING id`,
         [job.data.tenantId, olderThanDays],
       );

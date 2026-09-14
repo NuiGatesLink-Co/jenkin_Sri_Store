@@ -7,9 +7,11 @@ import {
   Patch,
   Post,
   Query,
+  Res,
   UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Paginated, pageParams } from '../common/paginated.js';
 import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
@@ -28,10 +30,11 @@ export class CustomersController {
 
   @Get()
   async list(
-    @Query('search') search?: string,
-    @Query('updatedSince') updatedSince?: string,
-    @Query('page') page?: string,
-    @Query('limit') limit?: string,
+    @Query('search') search: string | undefined,
+    @Query('updatedSince') updatedSince: string | undefined,
+    @Query('page') page: string | undefined,
+    @Query('limit') limit: string | undefined,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Paginated<Customer>> {
     const parsed = pageParams(page, limit);
     const result = await this.customers.list({
@@ -39,6 +42,7 @@ export class CustomersController {
       updatedSince: isoDate(updatedSince, 'updatedSince'),
       ...parsed,
     });
+    res.setHeader('X-Cache', result.fromCache ? 'HIT' : 'MISS');
     return new Paginated(result.items, { total: result.total, ...parsed });
   }
 

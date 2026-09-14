@@ -510,21 +510,22 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | GET | `/devices` 🆕 | owner | ทั้งคู่ | – | – | – |
 | POST | `/devices` `{label, role}` 🆕 | owner | ทั้งคู่ | – | – | ✔ |
 | POST | `/devices/{id}/retire` 🆕 | owner | ทั้งคู่ | – | – | ✔ |
+| **GET** | **`/bootstrap`** 🆕 (#25) | ✔ | ทั้งคู่ | `ETag`/`304`, ไม่ใช่ Redis — ดู §3.1 (#32 ไม่ทำ Redis cache ให้ bootstrap — ไม่มีใน §5) | – | – |
 | GET | `/products` (`?search=` / `?partNo=` / `?updatedSince=`) | ✔ | ทั้งคู่ | ✅ 5m | – | – |
 | GET | `/products/:id` | ✔ | ทั้งคู่ | ✅ 5m | – | – |
 | POST | `/products` | manager | ทั้งคู่ | invalidate | – | ✔ |
 | PATCH | `/products/:id` | manager | ทั้งคู่ | invalidate | – | ✔ |
 | DELETE | `/products/:id` | manager | ทั้งคู่ | invalidate | – | ✔ |
 | POST | `/products/:id/adjust-stock` | manager | ทั้งคู่ | invalidate | – | ✔ |
-| GET | `/categories` (คืน `[{name,color}]`) | ✔ | ทั้งคู่ | ✅ 1h | – | – |
+| GET | `/categories` (คืน `[{name,color}]`) | ✔ | ทั้งคู่ | ✅ 3600s ±10% (#32) | – | – |
 | POST/DELETE | `/categories` | manager | ทั้งคู่ | invalidate | – | ✔ |
 | GET | `/products/:id/suppliers` | ✔ | ทั้งคู่ | – | – | – |
 | POST/PATCH/DELETE | `/suppliers/:id?` | manager | ทั้งคู่ | – | – | ✔ |
 | GET | `/movements` | ✔ | ทั้งคู่ | – | – | – |
-| GET | `/customers` | ✔ | ทั้งคู่ | ✅ 1m | – | – |
+| GET | `/customers` | ✔ | ทั้งคู่ | ✅ 1m ±10% (#32 — เฉพาะ list; ล้างเมื่อ customers CRUD / ขาย / void / คืน ที่ระบุลูกค้า / import) | – | – |
 | POST/PATCH/DELETE | `/customers/:id?` | ✔ | ทั้งคู่ | invalidate | – | ✔ |
 | GET | `/customers/:id/sales` | ✔ | ทั้งคู่ | – | – | – |
-| GET | `/mechanics` | ✔ | ทั้งคู่ | ✅ 1m | – | – |
+| GET | `/mechanics` | ✔ | ทั้งคู่ | ✅ 1m ±10% (#32 — เฉพาะ list; ล้างเมื่อ mechanics CRUD / ขาย / void / คืน ที่ระบุช่าง / credit-payments / import) | – | – |
 | POST/PATCH/DELETE | `/mechanics/:id?` | manager | ทั้งคู่ | invalidate | – | ✔ |
 | POST | `/mechanics/:id/credit-payments` | ✔ | **pos เท่านั้น** | invalidate | – | **✔ บังคับ** |
 | **POST** | **`/sales`** | ✔ | **pos เท่านั้น** | invalidate | ✅ post-process | **✔ บังคับ** |
@@ -544,8 +545,9 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | GET | `/parked-sales` · POST · DELETE | ✔ | **pos เท่านั้น** | – | – | ✔ |
 | GET | `/shifts/current` · `/shifts/history` | ✔ | ทั้งคู่ | – | – | – |
 | POST | `/shifts/open` · `/close` · `/current/entries` | ✔ | **pos เท่านั้น** | – | – | ✔ |
-| GET | `/reports/*` | ✔ | ทั้งคู่ | ✅ 5–15m | – | – |
-| GET/PATCH | `/settings` | manager | ทั้งคู่ | ✅ 1h / invalidate | – | ✔ |
+| GET | `/reports/*` | ✔ | ทั้งคู่ | – *(ยังไม่ cache — §5 บอก "ปล่อยหมดอายุเอง" ขัดกับ AC3 ของ #32 ที่ให้อ่านหลังเขียนต้องสด → คำถามถึงเจ้าของโปรเจกต์ ดู `server/README.md` The server cache)* | – | – |
+| GET | `/settings` | ✔ (ทุก role) | ทั้งคู่ | ✅ 3600s ±10% (#32) | – | – |
+| PATCH | `/settings` | manager | ทั้งคู่ | invalidate (#32) | – | ✔ |
 | POST | `/backup/export` | **owner เท่านั้น** | ทั้งคู่ | – | ✅ `tenant-export` | ✔ |
 | ~~POST~~ | ~~`/backup/import`~~ → ย้ายไป **§4.1 admin plane** | – | – | – | – | – |
 | **GET** | **`/doc-counters`** 🆕 | ✔ | **pos เท่านั้น** | – | – | – |
@@ -596,11 +598,14 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 
 | Key | ข้อมูล | TTL | ล้างเมื่อ |
 |---|---|---|---|
-| `t:{tid}:products:p{page}:l{limit}:c{cat}` | หน้ารายการสินค้า | 300s **+ jitter ±60s** | ขาย / คืน / รับของ / แก้สินค้า |
-| `t:{tid}:product:{id}` | สินค้ารายชิ้น | 300s + jitter | เหมือนบน |
-| `t:{tid}:categories` | หมวดหมู่ | 3600s | เพิ่ม/ลบหมวด |
-| `t:{tid}:settings` | ตั้งค่าร้าน | 3600s | `PATCH /settings` |
-| `t:{tid}:reports:summary:{from}:{to}` | KPI | 300s | (ปล่อยหมดอายุเอง) |
+| `t:{tid}:{ns}:gen` | generation token ต่อ namespace (#32) | 3600s ± 300s | ถูก `SET` เป็น token ใหม่ = invalidate ทั้ง namespace |
+| `t:{tid}:products:g:{token}:list:…` | หน้ารายการสินค้า | 300s **+ jitter ±60s** | ขาย / void / คืน / รับของ / แก้สินค้า / ปรับสต็อก / import |
+| `t:{tid}:products:g:{token}:item:{id}` | สินค้ารายชิ้น | 300s + jitter | เหมือนบน |
+| `t:{tid}:categories:g:{token}:list` | หมวดหมู่ | 3600s ± 360s | เพิ่ม/ลบหมวด / import |
+| `t:{tid}:settings:g:{token}:row` | ตั้งค่าร้าน | 3600s ± 360s | `PATCH /settings` / import |
+| `t:{tid}:customers:g:{token}:list:…` | รายชื่อลูกค้า | 60s ± 6s | ดูตาราง write path ใน `server/README.md` |
+| `t:{tid}:mechanics:g:{token}:list:…` | รายชื่อช่าง | 60s ± 6s | เหมือนบน |
+| `t:{tid}:reports:summary:{from}:{to}` | KPI | 300s | (ปล่อยหมดอายุเอง) *(ยังไม่ทำ — ขัดกับ AC3 ของ #32 รอเจ้าของโปรเจกต์ตัดสิน)* |
 | `t:{tid}:idem:{key}` | ผลลัพธ์ idempotency (ชั้นเร็ว) | 24h | – |
 | `t:{tid}:status` | สถานะร้าน (`active`/`suspended`/`closed`) | 300s + jitter (แก้ 2026-09-04 — เดิม "ไม่หมดอายุ" ขัดกฎด้านล่างเอง) | `PATCH /platform/tenants/{id}/status` ล้างทันที (ADR-0003) · **miss / Redis ล่ม → อ่าน `tenants` ด้วย PK เสมอ ห้าม fail-open** (ADR-0003 ข้อ 5) |
 | `t:{tid}:rl:{route}:{window}` | ตัวนับ rate limit ต่อ tenant (ADR-0006) | 1 window (เช่น 60s) | หมดอายุเองตาม window |
@@ -611,6 +616,12 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 * **key ต้องขึ้นต้นด้วย `t:{tid}:` เสมอ** — cache รั่วข้ามร้านคือบั๊กที่แย่ที่สุดที่จะเกิดได้ในระบบ multi-tenant
 * invalidate ต้องทำ**หลัง `COMMIT`** เท่านั้น (ถ้าล้างก่อนแล้ว transaction rollback = cache ค้างข้อมูลเก่า)
 * อย่าใช้ `KEYS` ใน production — ใช้ `SCAN` หรือเก็บ tag set (`SADD t:{tid}:tags:products <key>`)
+
+> **ที่ทำจริง (#32, 2026-09-14) — แจ้งเจ้าของโปรเจกต์:** ไม่ใช้ tag set แต่ใช้ **generation token ต่อ tenant ต่อ namespace**
+> (`products` / `settings` / `customers` / `mechanics`) — invalidate = `SET t:{tid}:{ns}:gen <token ใหม่>` ครั้งเดียว ไม่มี `KEYS` ไม่มี `SCAN`
+> เหตุผลหลัก: `redis-cache` เป็น `allkeys-lru` ถ้า tag set ถูก evict key ที่มันจดไว้จะค้างและไม่มีใครหาเจอเพื่อลบ
+> (generation ที่ถูก evict = token สุ่มใหม่ = invalidate ในตัว) และ reader อ่าน token **ก่อน** query จึงกัน read-populate race ได้ด้วย
+> ไม่มี ADR ข้อไหนบังคับ tag set — ข้อความข้างบนแค่ยกเป็นทางเลือกแทน `KEYS` ตาราง write path → key อยู่ใน `server/README.md` *The server cache (#32)*
 
 ### 5.1 Rate limit ต่อ tenant (ADR-0006) — บังคับ 2 ชั้น คนละหน้าที่
 
@@ -635,7 +646,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 
 | Queue | Job | Trigger | ทำอะไร |
 |---|---|---|---|
-| `sale-post` | `sale.created` | หลังขายสำเร็จ | invalidate cache, อัปเดต materialized report, LINE notify ยอดขาย, พิมพ์สำรอง |
+| `sale-post` | `sale.created` | หลังขายสำเร็จ | อัปเดต materialized report, LINE notify ยอดขาย, พิมพ์สำรอง (invalidate cache **ไม่ได้อยู่ที่นี่** — ทำใน request หลัง commit, #32) |
 | `sale-post` | `return.created` | หลังคืนสำเร็จ | เหมือนบน |
 | `inventory` | `po.received` | รับของ | คำนวณต้นทุนใหม่, เตือนของใกล้หมด |
 | `maintenance` | `quotes.purge` | manual / cron | ลบใบเสนอราคาเก่า |

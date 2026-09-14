@@ -38,7 +38,7 @@ export class PlatformAuthService {
     );
 
     // Platform audit log requirement
-    await this.auditService.log({
+    await this.auditService.log(this.adminDs, {
       tenantId: '00000000-0000-0000-0000-000000000000',
       platformAdminId: admin.id,
       action: 'platform.auth.login',

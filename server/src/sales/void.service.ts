@@ -2,6 +2,7 @@ import { HttpException, HttpStatus, Inject, Injectable } from '@nestjs/common';
 import { DataSource, type EntityManager } from 'typeorm';
 import { AuditService } from '../audit/audit.service.js';
 import { AUDIT_DATA_SOURCE } from '../infra/db.module.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
 import { verifyPassword } from '../common/password.js';
@@ -60,6 +61,7 @@ export class VoidService {
     private readonly shifts: ShiftsService,
     @Inject(AUDIT_DATA_SOURCE) private readonly auditDs: DataSource,
     private readonly rateLimit: RateLimitService,
+    private readonly cache: TenantCache,
   ) {}
 
   async void(saleId: string, actor: VoidActor): Promise<SaleWithItems> {
@@ -140,6 +142,10 @@ export class VoidService {
 
     await this.restoreStock(manager, tenantId, saleId);
     await this.reverseLedger(manager, tenantId, sale);
+    // #32: stock put back and the ledger reversed — drop those cached pages after commit.
+    this.cache.invalidateAfterCommit(tenantId, 'products');
+    if (sale.customer_id !== null) this.cache.invalidateAfterCommit(tenantId, 'customers');
+    if (sale.mechanic_id !== null) this.cache.invalidateAfterCommit(tenantId, 'mechanics');
 
     const voided = returning<{ voided_at: Date }>(
       await manager.query(

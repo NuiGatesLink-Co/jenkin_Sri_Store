@@ -19,17 +19,19 @@ export class BootstrapController {
     const hash = createHash('sha256').update(bodyStr).digest('hex');
     const etag = `"${hash}"`;
 
+    res.setHeader('Cache-Control', 'private, no-cache');
+    res.setHeader('ETag', etag);
+
     const ifNoneMatch = req.headers['if-none-match'];
     if (ifNoneMatch) {
       const rawMatch = Array.isArray(ifNoneMatch) ? ifNoneMatch[0] : ifNoneMatch;
       const normalized = rawMatch.replace(/^W\//, '').trim();
-      if (normalized === etag || normalized === hash || normalized === `"${hash}"`) {
+      if (normalized === etag || normalized === hash || normalized === `"${hash}"` || normalized === '*') {
         res.status(304);
         return;
       }
     }
 
-    res.setHeader('ETag', etag);
     return data;
   }
 }

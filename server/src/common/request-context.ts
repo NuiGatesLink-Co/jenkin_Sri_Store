@@ -83,6 +83,11 @@ export function currentRequestTransaction(): EntityManager | undefined {
   return storage.getStore()?.manager;
 }
 
+/** Whether a request scope exists — so `onTransactionCommit` would actually wait for a commit. */
+export function hasRequestContext(): boolean {
+  return storage.getStore() !== undefined;
+}
+
 /** Names the tenant on the current request. `TenantGuard` only (ADR-0003). */
 export function setRequestTenant(tenantId: string): void {
   requireScope().tenantId = tenantId;
@@ -118,7 +123,9 @@ export function onTransactionCommit(hook: () => Promise<void> | void): void {
 }
 
 /** Executes all registered post-commit hooks safely. Called ONLY by TransactionInterceptor. */
-export async function executePostCommitHooks(): Promise<void> {
+export async function executePostCommitHooks(
+  onError?: (err: unknown) => void,
+): Promise<void> {
   const store = storage.getStore();
   if (!store?.postCommitHooks || store.postCommitHooks.length === 0) return;
   const hooks = store.postCommitHooks;
@@ -126,8 +133,9 @@ export async function executePostCommitHooks(): Promise<void> {
   for (const hook of hooks) {
     try {
       await hook();
-    } catch {
+    } catch (err) {
       // Post-commit failures should never throw to disrupt response of committed transactions
+      onError?.(err);
     }
   }
 }

@@ -60,7 +60,7 @@ describe('CategoriesService.list', () => {
     query.mockResolvedValueOnce(
       Array.from({ length: 12 }, (_, i) => ({ name: `c${i}` })),
     );
-    const out = await new CategoriesService().list();
+    const out = await new CategoriesService({} as never).list();
     expect(query).toHaveBeenCalledTimes(1);
     expect(out).toHaveLength(12);
     expect(out[11]).toEqual({ name: 'c11', color: CAT_PALETTE[1] });
@@ -68,7 +68,7 @@ describe('CategoriesService.list', () => {
 
   it('stands the five seed categories in when the table is empty', async () => {
     query.mockResolvedValueOnce([]);
-    const out = await new CategoriesService().list();
+    const out = await new CategoriesService({} as never).list();
     expect(out.map((c) => c.name)).toEqual([
       'เครื่องยนต์',
       'ไฟฟ้า',

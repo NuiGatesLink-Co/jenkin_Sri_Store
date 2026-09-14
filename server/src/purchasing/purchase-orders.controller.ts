@@ -49,6 +49,11 @@ export class PurchaseOrdersController {
     return new Paginated(result.items, { total: result.total, ...parsed });
   }
 
+  @Get(':id')
+  get(@Param('id') id: string): Promise<PurchaseOrder> {
+    return this.orders.get(id);
+  }
+
   @Post()
   @UseInterceptors(IdempotencyInterceptor)
   create(

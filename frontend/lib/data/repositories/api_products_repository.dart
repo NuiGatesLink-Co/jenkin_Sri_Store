@@ -11,6 +11,7 @@ import 'package:drift/drift.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/api_exception.dart';
 import '../db/database.dart';
+import 'api/api_wire.dart';
 import 'movements_repository.dart';
 import 'products_repository.dart';
 
@@ -27,26 +28,16 @@ class ApiProductsRepository extends ProductsRepository {
     final nameTH = (json['nameTH'] ?? json['name_t_h'] ?? json['nameTh'] ?? '') as String;
     final category = (json['category'] ?? '') as String;
     final brand = (json['brand'] ?? '') as String;
-    final price = json['price'] is num
-        ? (json['price'] as num).toDouble()
-        : double.tryParse('${json['price']}') ?? 0.0;
-    final cost = json['cost'] is num
-        ? (json['cost'] as num).toDouble()
-        : double.tryParse('${json['cost']}') ?? 0.0;
+    final price = money(json['price']);
+    final cost = money(json['cost']);
     final stock = (json['stock'] as num?)?.toInt() ?? 0;
     final minStock = (json['minStock'] ?? json['min_stock'] as num?)?.toInt() ?? 0;
     final compat = json['compat'] as String?;
     final zone = json['zone'] as String?;
     final offlineOk = (json['offlineOk'] ?? json['offline_ok'] as bool?) ?? false;
 
-    DateTime? updatedAt;
-    if (json['updatedAt'] != null) {
-      updatedAt = DateTime.tryParse(json['updatedAt'].toString());
-    }
-    DateTime? deletedAt;
-    if (json['deletedAt'] != null) {
-      deletedAt = DateTime.tryParse(json['deletedAt'].toString());
-    }
+    final updatedAt = stampOrNull(json['updatedAt']);
+    final deletedAt = stampOrNull(json['deletedAt']);
 
     return ProductsCompanion(
       id: Value(id),
@@ -67,36 +58,71 @@ class ApiProductsRepository extends ProductsRepository {
     );
   }
 
-  /// Write-through sync: attempts to pull recent updates from server and patch Drift.
+  /// Write-through sync: pulls updates from server and patches Drift.
+  /// Walks keyset cursor or offset pages to completion.
   Future<void> syncFromServer({bool forceFull = false}) async {
     try {
-      final queryParams = <String, dynamic>{};
+      String? updatedSince;
+      String? afterId;
+
       if (!forceFull) {
-        // Find latest updatedAt among local products to build ?updatedSince= cursor
         final latestRow = await (db.select(db.products)
-              ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)])
+              ..where((t) => t.updatedAt.isNotNull())
+              ..orderBy([(t) => OrderingTerm.desc(t.updatedAt), (t) => OrderingTerm.desc(t.id)])
               ..limit(1))
             .getSingleOrNull();
 
         if (latestRow?.updatedAt != null) {
-          queryParams['updatedSince'] = latestRow!.updatedAt!.toUtc().toIso8601String();
+          updatedSince = latestRow!.updatedAt!.toUtc().toIso8601String();
+          afterId = latestRow.id;
         }
       }
 
-      final response = await apiClient.get('/api/v1/products', queryParameters: queryParams);
-      if (response is List) {
-        await db.batch((batch) {
-          for (final item in response) {
-            if (item is Map) {
-              final comp = _productToCompanion(Map<String, dynamic>.from(item));
-              batch.insert(
-                db.products,
-                comp,
-                onConflict: DoUpdate((old) => comp),
-              );
+      bool hasMore = true;
+      int page = 1;
+
+      while (hasMore) {
+        final queryParams = <String, dynamic>{'limit': 100};
+        if (updatedSince != null) {
+          queryParams['updatedSince'] = updatedSince;
+          if (afterId != null) queryParams['afterId'] = afterId;
+        } else {
+          queryParams['page'] = page;
+        }
+
+        final res = await apiClient.getPaginated('/api/v1/products', queryParameters: queryParams);
+        final items = res.data;
+
+        if (items.isNotEmpty) {
+          await db.batch((batch) {
+            for (final item in items) {
+              if (item is Map) {
+                final comp = _productToCompanion(Map<String, dynamic>.from(item));
+                batch.insert(
+                  db.products,
+                  comp,
+                  onConflict: DoUpdate((old) => comp),
+                );
+              }
             }
+          });
+        }
+
+        final next = res.nextCursor;
+        if (updatedSince != null) {
+          if (next != null && next['updatedSince'] != null) {
+            updatedSince = next['updatedSince'] as String;
+            afterId = next['afterId'] as String?;
+          } else {
+            hasMore = false;
           }
-        });
+        } else {
+          if (page >= res.totalPages || items.isEmpty) {
+            hasMore = false;
+          } else {
+            page++;
+          }
+        }
       }
     } catch (_) {
       // Network failure or degraded mode: gracefully ignore and rely on Drift cache
@@ -154,8 +180,8 @@ class ApiProductsRepository extends ProductsRepository {
         'nameTH': data.nameTH.present ? data.nameTH.value : '',
         'category': data.category.present ? data.category.value : '',
         'brand': data.brand.present ? data.brand.value : '',
-        'price': data.price.present ? data.price.value.toStringAsFixed(2) : '0.00',
-        'cost': data.cost.present ? data.cost.value.toStringAsFixed(2) : '0.00',
+        'price': data.price.present ? wireMoney(data.price.value) : '0.00',
+        'cost': data.cost.present ? wireMoney(data.cost.value) : '0.00',
         'stock': data.stock.present ? data.stock.value : 0,
         'minStock': data.minStock.present ? data.minStock.value : 0,
         if (data.compat.present && data.compat.value != null) 'compat': data.compat.value,
@@ -168,11 +194,12 @@ class ApiProductsRepository extends ProductsRepository {
         return (db.select(db.products)..where((t) => t.id.equals(comp.id.value))).getSingle();
       }
     } on ApiException catch (e) {
-      if (e.statusCode == 409) return null; // Duplicate partNo
-      rethrow;
+      rethrowServerRefusal(e);
+    } catch (_) {
+      // Offline fallback
     }
 
-    return null;
+    return super.add(data);
   }
 
   @override
@@ -184,8 +211,8 @@ class ApiProductsRepository extends ProductsRepository {
       if (patch.nameTH.present) body['nameTH'] = patch.nameTH.value;
       if (patch.category.present) body['category'] = patch.category.value;
       if (patch.brand.present) body['brand'] = patch.brand.value;
-      if (patch.price.present) body['price'] = patch.price.value.toStringAsFixed(2);
-      if (patch.cost.present) body['cost'] = patch.cost.value.toStringAsFixed(2);
+      if (patch.price.present) body['price'] = wireMoney(patch.price.value);
+      if (patch.cost.present) body['cost'] = wireMoney(patch.cost.value);
       if (patch.minStock.present) body['minStock'] = patch.minStock.value;
       if (patch.compat.present) body['compat'] = patch.compat.value;
 
@@ -197,24 +224,34 @@ class ApiProductsRepository extends ProductsRepository {
       }
       return true;
     } on ApiException catch (e) {
-      if (e.statusCode == 409) return false;
-      rethrow;
+      rethrowServerRefusal(e);
+    } catch (_) {
+      // Offline fallback
     }
+
+    return super.update(id, patch);
   }
 
   @override
   Future<void> delete(String id) async {
     try {
       await apiClient.delete('/api/v1/products/$id');
-    } catch (_) {}
-
-    // ADR-0010: soft-delete locally by setting deletedAt
-    await (db.update(db.products)..where((t) => t.id.equals(id))).write(
-      ProductsCompanion(
-        deletedAt: Value(DateTime.now()),
-        updatedAt: Value(DateTime.now()),
-      ),
-    );
+      // ADR-0010: soft-delete locally by setting deletedAt WITHOUT stamping client clock on updatedAt
+      await (db.update(db.products)..where((t) => t.id.equals(id))).write(
+        ProductsCompanion(
+          deletedAt: Value(DateTime.now()),
+        ),
+      );
+    } on ApiException catch (e) {
+      rethrowServerRefusal(e);
+    } catch (_) {
+      // Offline fallback
+      await (db.update(db.products)..where((t) => t.id.equals(id))).write(
+        ProductsCompanion(
+          deletedAt: Value(DateTime.now()),
+        ),
+      );
+    }
   }
 
   @override
@@ -226,9 +263,6 @@ class ApiProductsRepository extends ProductsRepository {
   ) async {
     final p = await (db.select(db.products)..where((t) => t.id.equals(productId))).getSingleOrNull();
     if (p == null) return;
-
-    int newStock = p.stock + delta;
-    if (newStock < 0) newStock = 0;
 
     try {
       final body = <String, dynamic>{
@@ -243,19 +277,42 @@ class ApiProductsRepository extends ProductsRepository {
       );
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
-        if (resMap['stockAfter'] != null) {
-          newStock = (resMap['stockAfter'] as num).toInt();
+        final stockAfter = (resMap['stockAfter'] as num?)?.toInt() ?? (p.stock + delta);
+        // Patch row directly without client clock stamping on updatedAt (ADR-0010 §5)
+        await (db.update(db.products)..where((t) => t.id.equals(productId))).write(
+          ProductsCompanion(
+            stock: Value(stockAfter),
+          ),
+        );
+
+        final mv = resMap['movement'];
+        if (mv is Map<String, dynamic>) {
+          await db.into(db.movements).insertOnConflictUpdate(movementRowFromWire(mv));
+        } else {
+          await MovementsRepository(db).addMovement(
+            productId: productId,
+            partNo: p.partNo,
+            name: p.name,
+            delta: delta,
+            type: type,
+            note: note,
+            stockAfter: stockAfter,
+          );
         }
+        return;
       }
+    } on ApiException catch (e) {
+      rethrowServerRefusal(e);
     } catch (_) {
-      // Degraded / offline
+      // Offline fallback: only when server was never reached
     }
 
-    // ADR-0010: Patch row directly without invoking Drift's transactional service
+    int fallbackStock = p.stock + delta;
+    if (fallbackStock < 0) fallbackStock = 0;
+
     await (db.update(db.products)..where((t) => t.id.equals(productId))).write(
       ProductsCompanion(
-        stock: Value(newStock),
-        updatedAt: Value(DateTime.now()),
+        stock: Value(fallbackStock),
       ),
     );
 
@@ -266,7 +323,7 @@ class ApiProductsRepository extends ProductsRepository {
       delta: delta,
       type: type,
       note: note,
-      stockAfter: newStock,
+      stockAfter: fallbackStock,
     );
   }
 

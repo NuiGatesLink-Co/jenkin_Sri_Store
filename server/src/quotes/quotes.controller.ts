@@ -89,6 +89,7 @@ export class QuotesController {
 
   @Post('purge')
   @HttpCode(HttpStatus.ACCEPTED)
+  @UseInterceptors(IdempotencyInterceptor)
   async purgeQuotes(@Req() req: AuthenticatedRequest, @Body() dto: PurgeQuotesDto) {
     const role = req.user?.role;
     if (role !== 'manager' && role !== 'owner') {
@@ -101,6 +102,10 @@ export class QuotesController {
     const { tenantId } = currentRequestContext();
     const olderThanDays = Math.max(1, Number(dto?.olderThanDays ?? 90));
     const correlationId = newId('quote_');
+    const idemKey = req.headers['idempotency-key'];
+    const jobIdKey = idemKey
+      ? (Array.isArray(idemKey) ? idemKey[0] : idemKey)
+      : new Date().toISOString().slice(0, 10);
 
     const job = await this.maintenanceQueue.add(
       JOB_QUOTES_PURGE,
@@ -110,7 +115,7 @@ export class QuotesController {
         olderThanDays,
       } satisfies QuotesPurgeJobPayload,
       {
-        jobId: `quotes-purge:${tenantId}:${Date.now()}`,
+        jobId: `quotes-purge:${tenantId}:${jobIdKey}`,
       },
     );
 

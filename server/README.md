@@ -62,8 +62,26 @@ corepack pnpm test:e2e      # against the compose Postgres/Redis — no mocks; t
 ```
 
 `.github/workflows/server.yml` (#38) runs the same three as separate jobs — lint, unit,
-integration — on every push/PR touching `server/**`, starting the compose Postgres + both
-Redis (with the dev overlay, so the runner can reach them) and applying the migrations first.
+integration — starting the compose Postgres + both Redis (with the dev overlay, so the runner
+can reach them) and applying the migrations first. Since #39 (`ci.2`), path filtering happens
+*inside* the workflow, not on the trigger: a `changes` job (pull_request only, `dorny/paths-filter`
+with job-level `permissions: pull-requests: read` since it calls the PR-files API) gates `lint`,
+`audit` and `unit` on `server/**` having changed via `if: ${{ !cancelled() && (github.event_name
+!= 'pull_request' || needs.changes.outputs.server == 'true') }}` — the `!cancelled()` half matters
+because plain `needs: [changes]` would implicitly require `changes` to have *succeeded*, and on a
+push it's skipped (not failed) by its own `if:`, which would otherwise skip every gated job on
+every push too. **`integration` is never path-gated** — it carries the cross-tenant isolation
+tests in `test/security.e2e-spec.ts`, which must run on every PR regardless of what changed (the
+sixth multi-tenant rule). A push to `main` never filters at all, so every commit on main runs the
+full workflow (and `concurrency.group` on main is keyed by commit SHA, so two quick merges don't
+have the second evict the first's in-progress image build). The one required GitHub check is
+`server-ci-status`, appended at the end of the workflow — it `needs` every job including `changes`
+itself, uses `if: always()` (not `!cancelled()`, which GitHub would skip — and treat as passing —
+if the whole run were cancelled) paired with an explicit loop over every `needs.<job>.result` that
+passes only `success`/`skipped` and fails on anything else. `flutter.yml` has the mirror-image
+`flutter-ci-status`. Branch protection on `main` should require exactly those two checks — see
+`docs/Backend_design/07_CICD_DEPLOY.md` §4 for the table and the exact `gh api` command to set it
+(not run by this repo's CI work — it's a repo-settings change for the project owner).
 
 ## Schema and migrations (#15)
 
@@ -135,7 +153,8 @@ is the consumer that reads it at boot and watches it live.
   papering over it — but nothing depends on `etcd-init` succeeding, so this is visible in
   `docker compose ps`/logs, never in the API's own health check. Meanwhile
   `RuntimeConfigService` also cannot authenticate with the new value and fails open exactly as
-  it does with no etcd at all: one warning at boot, `LOG_LEVEL` from the environment, no retry.
+  it does with no etcd at all: one warning, `LOG_LEVEL` from the environment, then retries with
+  backoff (1–30 s, logged at debug after the first warning — #120) that keep failing until the password matches.
   To actually rotate it: `etcdctl user passwd root` against the running store (out of scope
   here — no ticket owns it yet), or reset the `etcd-data` volume and let `etcd-init` re-bootstrap.
 - Verify by hand — write and read with root credentials **on the etcd container** (its
@@ -756,6 +775,57 @@ every case of `frontend/test/products_repository_test.dart` at the HTTP seam.
 - `PATCH /products/:id` never reads `stock` — stock moves only through writes that log a movement.
 - Product money is now a string on the wire (`price`/`cost`, §1.1); it was a number before #16.
 
+## Bootstrap and settings (#25)
+
+`src/bootstrap/` and `src/settings/` — Checkout's one-shot read (`02_API_SCREENS.md §3.1`) and
+the per-tenant shop-settings row (`01_DATABASE.md §5.7`), ported from `settings_repository.dart`.
+
+- **`GET /bootstrap`** answers `{ products, categories, customers, mechanics, settings }` —
+  every list unpaginated, tombstones excluded — reusing each entity's own `GET` endpoint column
+  list and row mapper verbatim (`products.service.ts`/`customers.service.ts`/
+  `mechanics.service.ts` export `COLUMNS` + `toProduct`/`toCustomer`/`toMechanic` for exactly
+  this), so the shape the client writes into Drift can never drift from what
+  `GET /products`/`/customers`/`/mechanics` would answer on their own. Field names are the
+  contract (ADR-0010): see `02_API_SCREENS.md §3.1` for the full JSON shape.
+- **Not included: the current shift.** Per `02_API_SCREENS.md §3.1` and `03_ARCHITECTURE.md:81`,
+  shifts are not cached and are per-device — the client reads `GET /shifts/current` for that,
+  same as it always has.
+- **The `ETag` is a strong hash of the exact response body**, not a Redis-backed cache: two
+  requests answer the same ETag iff they would answer the same bytes, so "any included entity
+  changing changes the ETag" holds with no separate invalidation bookkeeping to keep in step
+  across five tables. A `304` therefore still costs the same reads as a `200`; only the body is
+  skipped. #32 did not add a `t:{tid}:bootstrap` Redis cache (02_API_SCREENS.md §5's sequence
+  diagram sketches one, but neither §4.2 nor §5 assigns it) — see *The server cache (#32)*.
+  🔴 **A cross-origin dev client needs both CORS entries `app.setup.ts` carries for this:**
+  `If-None-Match` in `allowedHeaders` (or the preflight for the conditional re-fetch is refused)
+  and `ETag` in `exposedHeaders` (or `fetch()` hides the header the client needs to echo back
+  next time). Production is same-origin (nginx serves the client), so neither matters there.
+- All five reads run on the single transaction the request already has open
+  (`common/request-context.ts`) — `READ COMMITTED`, not one atomic cross-statement snapshot,
+  since `TenantGuard` has already issued a query on it by the time a handler starts and isolation
+  can no longer be raised. This is the same consistency level every other multi-entity path in
+  this codebase (the sale path's lock order included) already operates under.
+- **`GET/PATCH /settings`**: `GET` is open to both roles (both device roles too, like every
+  other plain read); `PATCH` is `manager`/`owner`, `Idempotency-Key` mandatory, and writes one
+  `stock.adjust`-style `settings.update` audit row (#43) naming only the fields actually
+  touched. `updated_at` is stamped on every write. A missing settings row answers
+  `404 SETTINGS_NOT_FOUND` — not a code a client should ever see or need to handle, since
+  `POST /platform/tenants` inserts `tenants`+`users`+`settings` transactionally
+  (`02_API_SCREENS.md §4.1`); it exists so a data-integrity fault is loud rather than a bare 500,
+  which is why it carries no `02_API_SCREENS.md §8.1` entry — that section is for errors a
+  client is expected to branch on.
+- 🔴 **`PATCH /settings` validates more strictly than the Dart client
+  (`settings_screen.dart:570-583`).** The Dart `_save()` accepts a blank `shopName`, any
+  `double` for `taxRate` (any sign, any precision), and any `int` for `quoteValidDays`
+  (including zero or negative) — whatever `double.tryParse`/`int.tryParse` returns, unchecked.
+  The server requires a non-empty `shopName` (nothing in `01_DATABASE.md §5.7` or
+  `02_API_SCREENS.md` says it may be blank), `taxRate` in `[0, 100]` at two decimals, and
+  `quoteValidDays` a positive integer up to 3650. This is deliberate (validate before storing,
+  not clamp — the same lesson as #22's `RETURN_PRICE_MISMATCH`), but it means a value the
+  offline Drift build accepts today answers `400` from the server — #55/#56's client work needs
+  to know this before wiring `PATCH /settings` through, and the Drift build itself enforces
+  none of it (the phase-1 divergence this ticket accepts, same shape as #24's).
+
 ## Quotes and parked sales (#27)
 
 `src/quotes/` and `src/parked-sales/`, ported from `quotes_repository.dart` /
@@ -817,6 +887,161 @@ ledger's row count across the whole lifecycle.
   Whether a till may see another device's cart is an open question for the owner. **`DELETE` returns the deleted row, so the delete is the
   recall.** When two tills recall the same bill, one `DELETE … RETURNING` finds it and the other
   gets `404 PARKED_SALE_NOT_FOUND`.
+
+## The server cache (#32)
+
+`src/infra/tenant-cache.service.ts` (`TenantCache`, global via `TenantCacheModule`). Cache-aside
+on `redis-cache`. Every Redis failure fails open: a read goes to Postgres, and a write is still
+answered.
+
+**What is cached** (`02_API_SCREENS.md §4.2/§5`). Every cached response carries `X-Cache: HIT|MISS`.
+
+| Read | Namespace | TTL | Source |
+|---|---|---|---|
+| `GET /products`, `GET /products/:id` | `products` | 300 s ± 60 s | §5 (a flat 60 s before #32) |
+| `GET /categories` | `categories` | 3600 s ± 360 s | §5 TTL, ±10 % |
+| `GET /settings` | `settings` | 3600 s ± 360 s | §5 TTL; §5 gives no jitter amount, so ±10 % |
+| `GET /customers` (list only) | `customers` | 60 s ± 6 s | §4.2 "1m", ±10 % |
+| `GET /mechanics` (list only) | `mechanics` | 60 s ± 6 s | §4.2 "1m", ±10 % |
+
+The TTLs are in one table, `CACHE_TTL`. These are **not** cached: `GET /customers/:id`,
+`GET /mechanics/:id`, the `/:id/sales` reads, report summaries, and `/bootstrap`
+(see *Not done*).
+
+**Every namespace has its own generation key.**
+
+```
+t:{tid}:{ns}:gen                              random token, 1 h ± 5 min
+t:{tid}:products:g:{token}:list:[s:…][n:…][c:…][u:…][a:…]{page}:{limit}
+t:{tid}:products:g:{token}:item:{id}
+t:{tid}:categories:g:{token}:list
+t:{tid}:settings:g:{token}:row
+t:{tid}:customers:g:{token}:list:[s:…][u:…]{page}:{limit}
+t:{tid}:mechanics:g:{token}:list:[s:…][u:…]{page}:{limit}
+```
+
+Invalidating a namespace is **one `SET` of a new token**. Nothing is deleted and nothing is
+scanned. The old keys become unreachable at once and expire on their own TTL. `KEYS` is gone from
+`src/`; the test fixture's `clearTenantCache` still uses it, but that is not production code.
+
+**Why a generation instead of §5's tag set** (`SADD t:{tid}:tags:products <key>`):
+- 🔴 `redis-cache` is `allkeys-lru`. If Redis evicts a tag set, the keys it listed stay readable
+  and nothing can find them to delete them. If Redis evicts a generation, the next reader creates
+  a new random token, and that invalidates everything.
+  - The token is random rather than an `INCR` counter for the same reason: a counter restarts
+    at 1 after eviction and brings back the keys written under 1.
+- 🔴 **The read-populate race.** A reader misses and reads the rows, a writer commits and
+  invalidates, and then the reader stores its now-stale rows for a whole TTL.
+  - `TenantCache.prefix()` is called **before** the query, so the reader's late write lands under
+    the token the writer already replaced.
+  - *read-populate race* in `test/cache-invalidation.e2e-spec.ts` proves it: the test fails when
+    the prefix is taken after the query.
+- No ADR requires tag sets. §5 lists them as one way to avoid `KEYS`. This deviation is recorded in
+  §5 for the owner.
+
+**Invalidation runs only after commit.**
+- Request-scoped writes call `TenantCache.invalidateAfterCommit(tid, ns)`. It goes through
+  `onTransactionCommit`, the same hook the BullMQ enqueues use, so "after the transaction" is
+  defined in one place.
+- `TransactionInterceptor` runs the hooks after `COMMIT` and before the response is sent, so a
+  read right after a `201` is already fresh.
+- A rollback (a thrown error, or a 409) drops the hooks. Each call is also placed after every
+  refusal check.
+- 🔴 `invalidateAfterCommit` **throws outside a request context.** There, `onTransactionCommit`
+  would run the hook immediately, which is before the caller's own commit.
+- The platform import runs its own `ADMIN_DATA_SOURCE` transaction. It calls `invalidate()` for all
+  four namespaces after `await adminDs.transaction(…)` resolves.
+- A failed invalidation `SET` is logged as `cache invalidation failed`. A failed post-commit hook of
+  any kind is logged as `post-commit hook failed`.
+
+**Reads that bypass the cache on purpose.** `SettingsService.get()` stays a plain read, and
+`GET /settings` uses `getCached()`.
+- `PATCH /settings` reads its audit before-image inside the write transaction.
+- `/bootstrap` hashes a fresh body for its `ETag`. It reads customers and mechanics straight from
+  Postgres too.
+
+`t:{tid}:status` belongs to `TenantGuard` and `PATCH /platform/tenants/:id/status` (a `DEL`). It is
+a separate key, so the two paths cannot interfere.
+
+### Write path → cache keys
+
+"`products`" in the Keys column means `t:{tid}:products:gen` is replaced. That covers every cached
+key of that namespace, for that tenant only. Each row has a case in
+`test/cache-invalidation.e2e-spec.ts`: prime to a HIT, write, and the next read must be a MISS
+showing the new value.
+
+| Write path | What moves | Keys invalidated | Where |
+|---|---|---|---|
+| `POST /products` · `PATCH` · `DELETE /products/:id` | product row | `products` | `products.service.ts` |
+| `POST /products/:id/adjust-stock` | stock | `products` | `adjustStock` |
+| `POST /purchase-orders/:id/receive` | stock + cost (only when a line matched) | `products` | `purchase-orders.service.ts` |
+| `POST /sales` (and `POST /quotes/:id/convert`, which sells through it) | stock; customer points/spend; mechanic totals/tab | `products`; `customers` if the bill names a customer; `mechanics` if it names a mechanic | `sales.service.ts` |
+| `POST /sales/:id/void` | stock restored; ledger reversed | same rule as the sale | `void.service.ts` |
+| `POST /returns` | stock restored; ledger reversed in proportion | same rule, from the original bill | `returns.service.ts` |
+| `POST /mechanics/:id/credit-payments` | mechanic tab | `mechanics` | `credit-payments.service.ts` |
+| `POST /customers` · `PATCH` · `DELETE /customers/:id` | customer row | `customers` | `customers.service.ts` |
+| `POST /mechanics` · `PATCH` · `DELETE /mechanics/:id` | mechanic row | `mechanics` | `mechanics.service.ts` |
+| `PATCH /settings` | settings row | `settings` | `settings.service.ts` |
+| `POST /categories` · `DELETE /categories/:name` | category list | `categories` | `categories.service.ts` |
+| `POST /platform/tenants/:id/import` | all five tables | `products`, `categories`, `customers`, `mechanics`, `settings` (directly, after its own commit) | `tenant-import.service.ts` |
+
+These write paths invalidate nothing, because nothing they change is cached:
+- suppliers
+- shifts and drawer entries
+- quotes: create, update, delete, duplicate, purge
+- parked sales
+- PO create, cancel and delete
+- backup export
+- `POST /platform/tenants`: its `settings` row belongs to a brand-new tenant, which has no keys yet.
+
+Negatives, all in the same spec:
+- `409 INSUFFICIENT_STOCK` and `409 CREDIT_LIMIT_EXCEEDED` keep the products generation.
+- `409 CREDIT_LIMIT_EXCEEDED` on a bill naming a customer and a mechanic keeps both people
+  generations, and the mechanic's cached tab is still the old one.
+- `409 CREDIT_PAYMENT_EXCEEDS_BALANCE` keeps the mechanics generation.
+- A walk-in sale (no customer, no mechanic) leaves the people caches as HITs.
+- A probe route writes, registers invalidation for all four namespaces, then throws. Every
+  generation is unchanged.
+- A sale in tenant A leaves tenant B's generation alone, and B still reads a HIT with its own rows.
+
+### Not done / known limits
+
+- **Report summaries are not cached. Owner question:** §5's `t:{tid}:reports:summary:{from}:{to}`
+  row says *"let it expire"* (300 s), but #32's AC3 says *"a read immediately after a write
+  returns the new value, for every cached endpoint"*. Those cannot both hold.
+  - Caching summaries per AC3 means every sale, void and return invalidates them, which leaves
+    little to cache during business hours.
+  - Caching them per §5 means a summary up to five minutes stale.
+  - The owner decides. Until then they stay live SQL.
+- **`GET /bootstrap` gets no Redis cache.** Neither §4.2 nor §5 assigns one to #32; its body-hash
+  `ETag` (#25) stays.
+- **No stampede lock** (§5: `SET key NX PX 5000` on a miss). Not in #32's criteria, and a lock
+  held across a DB read on every miss needs its own design (what a waiter does on timeout, and how
+  it interacts with the generation check) — a follow-up ticket, not a drive-by.
+- **Fail-open on invalidation.** If Redis rejects the generation `SET`, a cached value can outlive
+  the write by up to its TTL (≤ 360 s for products, ≤ 66 s for people, ≤ 3960 s for settings).
+  It is logged.
+- A read that populates the cache **inside a write transaction** would cache uncommitted rows under
+  the current generation, and a rollback would not replace them. No route does this: only the
+  `GET` handlers read through the cache. Keep it that way.
+- 🔴 **For #55:** the import writes rows with the snapshot's own `updated_at`, often in the past.
+  A device whose `?updatedSince=` cursor is already later never sees them. The cache is
+  invalidated, but a cache cannot fix the sync cursor.
+- **Fixed by #123 (PR #130):** platform writes used to log `audit_log` **after** their own write
+  committed, so an admin deleted while their token was still valid committed the write and then got
+  500 on `audit_log_platform_admin_id_fkey`. Now:
+  - 🔴 `platform/audit.service.ts` is `log(runner, input)`, with no default connection. `createTenant`,
+    `updateStatus` and the import pass the transaction's `manager`, so a failed audit rolls the write
+    back. The cache purge and invalidation still run **after** commit. `e2e` proves the rollback for all
+    three by pre-seeding `pa:<id>:exists='1'` for an admin id with no row.
+  - `listTenants` and login pass `adminDs`; `listTenants` logs a warning on an audit failure instead of
+    failing the read.
+  - `PlatformAuthGuard` checks `platform_admins` (`id` + `is_active`), cached in `REDIS_CACHE` as
+    `pa:<id>:exists` for 60s, falling back to the DB if Redis errors. **Nothing deactivates an admin
+    today; a future deactivate path must `DEL pa:<id>:exists`**, or the admin can still write for 60s.
+  - `audit_log.ip` stores null for a value containing `%` (an IPv6 zone id passes `net.isIP` but
+    Postgres `inet` rejects it, and inside the transaction that rolled back the write).
+    **Still open:** the stored IP is the *leftmost* `X-Forwarded-For` entry, which the client controls.
 
 ## Conventions these slices set
 
@@ -918,3 +1143,56 @@ for s in api-1 api-2 api-3; do docker compose up -d --no-deps $s; sleep 5; done
 ```
 
 Each instance keeps its static address (`172.30.0.11–13`), so Nginx needs no reload.
+
+## Monitoring overlay (#63 `ops.1`)
+
+Node Exporter + Prometheus + Grafana as a separate compose overlay, so it can sit next to the
+stack above without touching it:
+
+```
+cd server
+docker compose -f docker-compose.yml -f ../deploy/compose/monitoring.yml up -d
+```
+
+(On the VM, `vm.override.yml` goes in between.) **`GRAFANA_ADMIN_PASSWORD` is required** in
+`.env`, the same way `POS_APP_PASSWORD`/`REDIS_PASSWORD`/`BULL_BOARD_PASSWORD` already are —
+the stack fails fast if it's unset.
+
+🔴 **Not wired into the deploy playbook, and no open ticket owns that wiring.** `#67` `cd.2`
+merged (PR #108) without adding this overlay: `deploy/ansible/deploy.yml`'s `compose_files` is
+still `-f docker-compose.yml -f vm.override.yml` only, and the playbook copies neither
+`deploy/prometheus/` nor `deploy/grafana/` to `/opt/pos/`. Whoever picks this up next needs a
+new issue, and a trap to avoid: on the VM every compose file lands flat at `/opt/pos/*.yml`, so
+if `monitoring.yml` is copied there the same way, its relative `../deploy/prometheus/…` and
+`../deploy/grafana/…` paths resolve against `/opt/pos/` and land on `/opt/deploy/…`, which
+won't exist — `deploy/prometheus/` and `deploy/grafana/` have to be mirrored to that same
+relative location (or the compose invocation needs `--project-directory`), not just the one
+`monitoring.yml` file.
+
+**Nothing new is reachable from outside the host.** `node-exporter` publishes no port at all
+(Prometheus reaches it on the compose network); `prometheus` (`127.0.0.1:9090`) and `grafana`
+(`127.0.0.1:3000`) are loopback-only, same pattern as Bull-Board:
+
+```
+ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -L 3100:127.0.0.1:3100 deploy@<vm>
+```
+
+Grafana's datasource and its one dashboard (`deploy/grafana/dashboards/pos-overview.json`) are
+provisioned from files under `deploy/grafana/provisioning/` — nothing to click, and a rebuilt
+Grafana volume comes back identical. The dashboard has the VM's CPU/memory/disk (live from
+node-exporter) plus two SLI panels — success rate and p95 — that read "no data" until #34/#35
+add a real `/metrics` endpoint; `deploy/prometheus/prometheus.yml` has that scrape job
+commented out, ready to enable.
+
+🔴 **Prometheus's `up` reflects whether the response body parses as its text format, not just
+the HTTP status.** `/health/ready` answers 200 with a JSON body, which fails that parse, so the
+interim `api-readiness` job (scraping `/health/ready` directly on `api-1..3:3000`) shows all
+three instances as DOWN in the Prometheus UI even while the API is actually up — confirmed
+against a real `prom/prometheus` container while building this overlay. This is a known,
+accepted gap (adding `blackbox_exporter` to work around it would be scope beyond what #63
+asks for) that closes itself once the commented `api-metrics` job above is turned on.
+
+Every relative path in `monitoring.yml` is written against `server/`, not against
+`deploy/compose/` where the file itself lives — Compose resolves bind-mount paths against the
+*project directory*, which defaults to the directory of the **first** `-f` file. Always list
+`docker-compose.yml` first.
