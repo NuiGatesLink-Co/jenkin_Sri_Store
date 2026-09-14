@@ -150,7 +150,7 @@ GitHub Environment `demo` ถือ secret ทั้งหมด (ไม่ม�
 | secret | ใช้ทำอะไร |
 |---|---|
 | `DEMO_SSH_HOST`, `DEMO_SSH_USER`, `DEMO_SSH_KEY` | Ansible เข้าเครื่อง (user แรกต้องมี sudo — เจ้าของโปรเจกต์ใส่เอง) |
-| `DEMO_ENV_FILE` | เนื้อหา `server/.env` ทั้งไฟล์ (Postgres/Redis password, JWT keys, `CORS_ORIGINS`, Grafana admin, `ETCD_ROOT_PASSWORD`) — Ansible template ลง VM ด้วย mode 0600. 🔴 **ก่อน merge #64 ต้องเพิ่ม `ETCD_ROOT_PASSWORD` เข้าไปในค่านี้** — ไม่งั้นทุกคำสั่ง `docker compose` บน VM (รวม `deploy.yml` เอง) fail ตั้งแต่ interpolation |
+| `DEMO_ENV_FILE` | เนื้อหา `server/.env` ทั้งไฟล์ (Postgres/Redis password, JWT keys, `CORS_ORIGINS`, Grafana admin, `ETCD_ROOT_PASSWORD`) — Ansible template ลง VM ด้วย mode 0600. 🔴 **#64 merge แล้ว (PR #113) — ก่อน deploy ครั้งถัดไปต้องเพิ่ม `ETCD_ROOT_PASSWORD` และ `GRAFANA_ADMIN_PASSWORD` เข้าไปในค่านี้ แล้วรัน `provision.yml` ใหม่** — ไม่งั้นทุกคำสั่ง `docker compose` บน VM (รวม `deploy.yml` เอง) fail ตั้งแต่ interpolation |
 
 **งบ RAM บน VM** (mem_limit ปัจจุบันรวม 3,392 MB — รวม etcd 256m แล้ว, #64): เพิ่ม Prometheus 512m
 (`--storage.tsdb.retention.time=7d --storage.tsdb.retention.size=2GB`) · Grafana 256m ·
@@ -282,8 +282,8 @@ merge มาก่อนตามแผนใน PR #109) มาบรรจบ�
   seed key แรกตอน deploy ยังเป็นของ `cd.2` (#67) ไม่ใช่ของรอบนี้ — #64 ส่งมอบ store เปล่าที่ทำงานได้
 * **VM (`demo`):** `deploy/ansible/deploy.yml`'s "Ensure backing datastores, certgen and etcd
   are running" step now also brings up `etcd` + `etcd-init` — ทุก step หลังจากนั้นใน playbook ใช้
-  `--no-deps` ดังนั้น service ที่ไม่อยู่ใน `up -d` บรรทัดนี้จะไม่มีวันถูกสร้างขึ้นเลยบน VM · **ก่อน merge
-  ต้องเพิ่ม `ETCD_ROOT_PASSWORD` ลงใน secret `DEMO_ENV_FILE`** (§5) ไม่งั้นทุกคำสั่ง `docker compose`
+  `--no-deps` ดังนั้น service ที่ไม่อยู่ใน `up -d` บรรทัดนี้จะไม่มีวันถูกสร้างขึ้นเลยบน VM · **ก่อน deploy
+  ครั้งถัดไป (merge แล้ว) ต้องเพิ่ม `ETCD_ROOT_PASSWORD` ลงใน secret `DEMO_ENV_FILE`** (§5) ไม่งั้นทุกคำสั่ง `docker compose`
   บน VM จะ fail ตั้งแต่ interpolation (`required variable ETCD_ROOT_PASSWORD is missing a value`)
 
 ---
@@ -352,7 +352,7 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
   ปิดได้ด้วย `-e enable_monitoring=false` (หรือ `ENABLE_MONITORING=false`) ซึ่ง `rm -sf` container
   monitoring ที่ค้างจาก deploy ก่อน · สลับ flag บน VM ที่รัน SHA นั้นอยู่แล้วไม่มีผลจน release ถัดไป
   (§6 ข้อ 1 จบ play ก่อน)
-* 🔴 **ก่อน merge/deploy ครั้งแรกหลัง #121:** เพิ่ม `GRAFANA_ADMIN_PASSWORD` ใน secret `DEMO_ENV_FILE`
+* 🔴 **ก่อน deploy ครั้งแรกหลัง #121 (merge แล้ว, PR #135):** เพิ่ม `GRAFANA_ADMIN_PASSWORD` ใน secret `DEMO_ENV_FILE`
   แล้วรัน `provision.yml` ใหม่ (`.env` บน VM มาจาก secret นี้ทางเดียว) ไม่งั้นคำสั่ง compose แรก (pull)
   fail ก่อนเปลี่ยนอะไร — คู่กับ `ETCD_ROOT_PASSWORD` ของ PR #113
 * 🔴 **path ของ bind mount คือ `${MONITORING_CONFIG_DIR:-../deploy}/…`** — path สัมพัทธ์ resolve กับ
