@@ -21,10 +21,7 @@ const WRAPPER =
   /^\{\s*return this\.tenants\.runTx\(\(\) =>\s*this\.(\w+)In\([^)]*\),?\s*\);\s*\}$/;
 
 /** `Class.method` → why it may read the context without the wrapper. */
-const UNWRAPPED_ALLOWED: Record<string, string> = {
-  'IdempotencyInterceptor.intercept':
-    'claims and completes on the request transaction the handler joins; tx.3 (#152) moves the claim into each handler runTx and removes this interceptor.',
-};
+const UNWRAPPED_ALLOWED: Record<string, string> = {};
 
 /** Every non-private method that reaches `currentRequestContext()` without the wrapper. */
 function unwrappedReaders(source: string, file = 'x.ts'): string[] {

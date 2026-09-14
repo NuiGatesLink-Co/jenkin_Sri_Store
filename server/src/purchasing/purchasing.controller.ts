@@ -8,12 +8,13 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import {
   PurchaseOrderOut,
   ReceivePOResult,
@@ -49,7 +50,10 @@ function extractActor(req: AuthenticatedRequest): { userId: string; deviceId: st
 @Controller('purchase-orders')
 @UseGuards(TenantGuard)
 export class PurchasingController {
-  constructor(private readonly purchasingService: PurchasingService) {}
+  constructor(
+    private readonly purchasingService: PurchasingService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   @Get()
   list(
@@ -77,14 +81,20 @@ export class PurchasingController {
   }
 
   @Post(':id/receive')
-  @UseInterceptors(IdempotencyInterceptor)
   receive(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<ReceivePOResult> {
-    requireManager(req);
-    const actor = extractActor(req);
-    return this.purchasingService.receive(id, actor);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        requireManager(req);
+        const actor = extractActor(req);
+        return this.purchasingService.receive(id, actor);
+      },
+    );
   }
 
   @Post(':id/cancel')

@@ -15,10 +15,9 @@ import { currentRequestTransaction, executePostCommitHooks } from './request-con
  * rollback on error — **before** the response is sent, so a client that reads 201
  * is reading committed data.
  *
- * Bind it globally after `EnvelopeInterceptor` so it nests inside the envelope and
- * outside every route-scoped interceptor. `IdempotencyInterceptor` in particular
- * must run inside this one: its record has to commit in the same transaction as the
- * work it describes.
+ * Bind it globally after `EnvelopeInterceptor` so it nests inside the envelope. A
+ * handler's `IdempotencyService.runIdempotent` joins this transaction until tx.4 (#153),
+ * so its record still commits here, together with the work it describes.
  */
 @Injectable()
 export class TransactionInterceptor implements NestInterceptor {

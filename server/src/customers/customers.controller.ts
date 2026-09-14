@@ -7,14 +7,15 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Paginated, pageParams } from '../common/paginated.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import {
   isoDate,
   parseCustomerCreate,
@@ -26,7 +27,10 @@ import type { SaleWithItems } from '../sales/sale-reads.service.js';
 @Controller('customers')
 @UseGuards(TenantGuard)
 export class CustomersController {
-  constructor(private readonly customers: CustomersService) {}
+  constructor(
+    private readonly customers: CustomersService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   @Get()
   async list(
@@ -63,20 +67,48 @@ export class CustomersController {
   }
 
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
-  create(@Body() body: unknown): Promise<Customer> {
-    return this.customers.create(parseCustomerCreate(body));
+  create(
+    @Body() body: unknown,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<Customer> {
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        return this.customers.create(parseCustomerCreate(body));
+      },
+    );
   }
 
   @Patch(':id')
-  @UseInterceptors(IdempotencyInterceptor)
-  update(@Param('id') id: string, @Body() body: unknown): Promise<Customer> {
-    return this.customers.update(id, parseCustomerPatch(body));
+  update(
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<Customer> {
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        return this.customers.update(id, parseCustomerPatch(body));
+      },
+    );
   }
 
   @Delete(':id')
-  @UseInterceptors(IdempotencyInterceptor)
-  delete(@Param('id') id: string): Promise<{ id: string; deleted: true }> {
-    return this.customers.delete(id);
+  delete(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ id: string; deleted: true }> {
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        return this.customers.delete(id);
+      },
+    );
   }
 }

@@ -7,14 +7,15 @@ import {
   Param,
   Post,
   Req,
+  Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import {
   ParkedSalesService,
   parseParkBody,
@@ -33,7 +34,10 @@ interface AuthenticatedRequest extends Request {
 @UseGuards(TenantGuard)
 @RequireDeviceRole('pos')
 export class ParkedSalesController {
-  constructor(private readonly parked: ParkedSalesService) {}
+  constructor(
+    private readonly parked: ParkedSalesService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   @Get()
   list(): Promise<ParkedSale[]> {
@@ -41,19 +45,34 @@ export class ParkedSalesController {
   }
 
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
   park(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<ParkedSale> {
-    if (!req.user.deviceId) throw new DeviceRoleForbiddenException();
-    return this.parked.park(parseParkBody(body), req.user.deviceId);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        if (!req.user.deviceId) throw new DeviceRoleForbiddenException();
+        return this.parked.park(parseParkBody(body), req.user.deviceId);
+      },
+    );
   }
 
   @Delete(':id')
   @HttpCode(200)
-  @UseInterceptors(IdempotencyInterceptor)
-  remove(@Param('id') id: string): Promise<ParkedSale> {
-    return this.parked.remove(id);
+  remove(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<ParkedSale> {
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        return this.parked.remove(id);
+      },
+    );
   }
 }

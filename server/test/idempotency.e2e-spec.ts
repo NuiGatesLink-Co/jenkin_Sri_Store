@@ -4,7 +4,8 @@ import {
   HttpCode,
   Module,
   Post,
-  UseInterceptors,
+  Req,
+  Res,
   type INestApplication,
   type CallHandler,
   type ExecutionContext,
@@ -14,14 +15,15 @@ import {
 } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { pino } from 'pino';
+import type { Request, Response } from 'express';
 import type { Observable } from 'rxjs';
 import request from 'supertest';
 import { DataSource, type QueryRunner } from 'typeorm';
 import { AppModule } from '../src/app.module.js';
 import { configureApp } from '../src/app.setup.js';
 import { loadConfig } from '../src/config/config.js';
-import { IdempotencyInterceptor } from '../src/idempotency/idempotency.interceptor.js';
 import { IdempotencyModule } from '../src/idempotency/idempotency.module.js';
+import { idempotencyParamsOf } from '../src/idempotency/idempotency.runner.js';
 import { IdempotencyService } from '../src/idempotency/idempotency.service.js';
 import {
   currentRequestContext,
@@ -61,42 +63,62 @@ class StandInTenantGuard implements NestInterceptor {
 /** The "one trivial write endpoint" #18 asks to be proved against. */
 @Controller('test-writes')
 class TestWriteController {
+  constructor(private readonly idempotency: IdempotencyService) {}
+
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
-  async create(
+  create(
     @Body() body: { note: string; slow?: boolean; fail?: boolean },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Record<string, unknown>> {
-    const { tenantId, manager } = currentRequestContext();
-    // Holds the claim's row lock long enough that a second request really does
-    // arrive mid-flight, instead of tidily after the first has committed.
-    if (body.slow) await manager.query(`SELECT pg_sleep(0.4)`);
-    await manager.query(
-      `INSERT INTO audit_log (tenant_id, action, entity, after)
-            VALUES ($1::uuid, 'system.test-write', 'test', $2::jsonb)`,
-      [tenantId, JSON.stringify(body)],
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      async () => {
+        const { tenantId, manager } = currentRequestContext();
+        // Holds the claim's row lock long enough that a second request really does
+        // arrive mid-flight, instead of tidily after the first has committed.
+        if (body.slow) await manager.query(`SELECT pg_sleep(0.4)`);
+        await manager.query(
+          `INSERT INTO audit_log (tenant_id, action, entity, after)
+                VALUES ($1::uuid, 'system.test-write', 'test', $2::jsonb)`,
+          [tenantId, JSON.stringify(body)],
+        );
+        if (body.fail) throw new Error('handler exploded after writing');
+        // Echoes the body minus the control flags, so a test can hand it a multi-key
+        // object and see what a replay does to key order.
+        const { slow: _slow, fail: _fail, ...data } = body;
+        return data;
+      },
     );
-    if (body.fail) throw new Error('handler exploded after writing');
-    // Echoes the body minus the control flags, so a test can hand it a multi-key
-    // object and see what a replay does to key order.
-    const { slow: _slow, fail: _fail, ...data } = body;
-    return data;
   }
 }
 
 /** A second route, with a non-default status, so the replayed code is observable. */
 @Controller('test-accepted')
 class TestAcceptedController {
+  constructor(private readonly idempotency: IdempotencyService) {}
+
   @Post()
   @HttpCode(202)
-  @UseInterceptors(IdempotencyInterceptor)
-  async create(@Body() body: { note: string }): Promise<{ note: string }> {
-    const { tenantId, manager } = currentRequestContext();
-    await manager.query(
-      `INSERT INTO audit_log (tenant_id, action, entity, after)
-            VALUES ($1::uuid, 'system.test-write', 'test', $2::jsonb)`,
-      [tenantId, JSON.stringify(body)],
+  create(
+    @Body() body: { note: string },
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ note: string }> {
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 202),
+      res,
+      async () => {
+        const { tenantId, manager } = currentRequestContext();
+        await manager.query(
+          `INSERT INTO audit_log (tenant_id, action, entity, after)
+                VALUES ($1::uuid, 'system.test-write', 'test', $2::jsonb)`,
+          [tenantId, JSON.stringify(body)],
+        );
+        return { note: body.note };
+      },
     );
-    return { note: body.note };
   }
 }
 
@@ -182,8 +204,8 @@ describe('idempotency (e2e)', () => {
     app = moduleRef.createNestApplication();
     ds = app.get(DataSource);
     // Registered before configureApp's, so it is the outermost interceptor and runs
-    // ahead of both the transaction interceptor and the route-scoped idempotency one
-    // — the position a real guard has, since guards run before every interceptor.
+    // ahead of the transaction interceptor and the handler's idempotency claim — the
+    // position a real guard has, since guards run before every interceptor.
     app.useGlobalInterceptors(new StandInTenantGuard());
     await configureApp(app, logger);
   });
@@ -231,6 +253,30 @@ describe('idempotency (e2e)', () => {
     const replay = await send();
     expect(replay.status).toBe(202);
     expect(replay.body).toEqual({ status: 'success', data: { note: 'accepted' } });
+  });
+
+  it('the stored status reaches the wire on replay, not the route default (#152 review)', async () => {
+    // The case above cannot tell "the stored code was replayed" from "the route's own
+    // @HttpCode(202) was sent again" — both are 202. Here the record says 201 while the
+    // route still declares 202, so only a replay that really sets the stored status passes.
+    const key = `k-stored-${Date.now()}`;
+    const send = () =>
+      request(app.getHttpServer())
+        .post('/api/v1/test-accepted')
+        .set('x-test-tenant', TENANT_A)
+        .set('Idempotency-Key', key)
+        .send({ note: 'stored' });
+    expect((await send()).status).toBe(202);
+    await asTenant(TENANT_A, (qr) =>
+      qr.query(
+        `UPDATE idempotency_keys SET response_code = 201
+          WHERE tenant_id = $1::uuid AND key = $2`,
+        [TENANT_A, key],
+      ),
+    );
+    const replay = await send();
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual({ status: 'success', data: { note: 'stored' } });
   });
 
   it('the same key and body on a different endpoint replays nothing — 409', async () => {
@@ -303,7 +349,7 @@ describe('idempotency (e2e)', () => {
       await idempotency.claim(qr.manager, {
         tenantId: TENANT_A,
         key,
-        // Exactly what the interceptor records for this route.
+        // Exactly what idempotencyParamsOf records for this route.
         endpoint: 'POST /api/v1/test-writes',
         requestHash: IdempotencyService.requestHash(body),
       });

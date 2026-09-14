@@ -8,13 +8,15 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Paginated, pageParams } from '../common/paginated.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import {
   requireManager,
   type AuthenticatedRequest,
@@ -33,7 +35,10 @@ import {
 @Controller('purchase-orders')
 @UseGuards(TenantGuard)
 export class PurchaseOrdersController {
-  constructor(private readonly orders: PurchaseOrdersService) {}
+  constructor(
+    private readonly orders: PurchaseOrdersService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   @Get()
   async list(
@@ -55,52 +60,76 @@ export class PurchaseOrdersController {
   }
 
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
   create(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<PurchaseOrder> {
-    requireManager(req);
-    const input = parsePoCreate(body);
-    // The PO number is issued in the calling device's series (ADR-0007), and the
-    // device comes from the token only (ADR-0004).
-    if (!req.user.deviceId) throw new DeviceRoleForbiddenException();
-    return this.orders.create(input, { deviceId: req.user.deviceId });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        requireManager(req);
+        const input = parsePoCreate(body);
+        // The PO number is issued in the calling device's series (ADR-0007), and the
+        // device comes from the token only (ADR-0004).
+        if (!req.user.deviceId) throw new DeviceRoleForbiddenException();
+        return this.orders.create(input, { deviceId: req.user.deviceId });
+      },
+    );
   }
 
   /** The one that matters: transactional, and idempotent by force (§4). */
   @Post(':id/receive')
   @HttpCode(200)
-  @UseInterceptors(IdempotencyInterceptor)
   receive(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<ReceiveResult> {
-    requireManager(req);
-    return this.orders.receive(id, {
-      userId: req.user.userId,
-      deviceId: req.user.deviceId,
-    });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.orders.receive(id, {
+          userId: req.user.userId,
+          deviceId: req.user.deviceId,
+        });
+      },
+    );
   }
 
   @Post(':id/cancel')
   @HttpCode(200)
-  @UseInterceptors(IdempotencyInterceptor)
   cancel(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<PurchaseOrder> {
-    requireManager(req);
-    return this.orders.cancel(id);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.orders.cancel(id);
+      },
+    );
   }
 
   @Delete(':id')
-  @UseInterceptors(IdempotencyInterceptor)
   delete(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ id: string; deleted: true }> {
-    requireManager(req);
-    return this.orders.delete(id);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.orders.delete(id);
+      },
+    );
   }
 }

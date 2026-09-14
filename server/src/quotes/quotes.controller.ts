@@ -11,10 +11,10 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { RequireDeviceRole } from '../common/decorators/device-role.decorator.js';
@@ -24,7 +24,8 @@ import { currentRequestContext } from '../common/request-context.js';
 import { TenantService } from '../common/database/tenant.service.js';
 import { newId } from '../common/ids.js';
 import { Paginated, pageParams } from '../common/paginated.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { isoDate } from '../people/people.dto.js';
 import {
   JOB_QUOTES_PURGE,
@@ -60,7 +61,7 @@ export interface PurgeQuotesDto {
 /**
  * Quotes (#27). Reads and edits are both device roles (ADR-0004: a quote touches
  * neither stock nor money); convert is `pos` only, because it rings up a bill.
- * Every write goes through `IdempotencyInterceptor` (02_API_SCREENS.md §4).
+ * Every write goes through `IdempotencyService.runIdempotent` (02_API_SCREENS.md §4).
  */
 @Controller('quotes')
 @UseGuards(TenantGuard)
@@ -69,6 +70,7 @@ export class QuotesController {
     @InjectQueue(QUEUE_MAINTENANCE) private readonly maintenanceQueue: Queue,
     private readonly quotes: QuotesService,
     private readonly tenants: TenantService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   @Get()
@@ -91,45 +93,58 @@ export class QuotesController {
 
   @Post('purge')
   @HttpCode(HttpStatus.ACCEPTED)
-  @UseInterceptors(IdempotencyInterceptor)
-  purgeQuotes(@Req() req: AuthenticatedRequest, @Body() dto: PurgeQuotesDto) {
-    return this.tenants.runTx(() => this.purgeQuotesIn(req, dto));
+  purgeQuotes(
+    @Req() req: AuthenticatedRequest,
+    @Body() dto: PurgeQuotesDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    return this.tenants.runTx(() => this.purgeQuotesIn(req, dto, res));
   }
 
-  private async purgeQuotesIn(req: AuthenticatedRequest, dto: PurgeQuotesDto) {
-    const role = req.user?.role;
-    if (role !== 'manager' && role !== 'owner') {
-      throw new ForbiddenException({
-        code: 'FORBIDDEN',
-        message: 'Manager role required',
-      });
-    }
+  private purgeQuotesIn(
+    req: AuthenticatedRequest,
+    dto: PurgeQuotesDto,
+    res: Response,
+  ) {
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, HttpStatus.ACCEPTED),
+      res,
+      async () => {
+        const role = req.user?.role;
+        if (role !== 'manager' && role !== 'owner') {
+          throw new ForbiddenException({
+            code: 'FORBIDDEN',
+            message: 'Manager role required',
+          });
+        }
 
-    const { tenantId } = currentRequestContext();
-    const olderThanDays = Math.max(1, Number(dto?.olderThanDays ?? 90));
-    const correlationId = newId('quote_');
-    const idemKey = req.headers['idempotency-key'];
-    const jobIdKey = idemKey
-      ? (Array.isArray(idemKey) ? idemKey[0] : idemKey)
-      : new Date().toISOString().slice(0, 10);
+        const { tenantId } = currentRequestContext();
+        const olderThanDays = Math.max(1, Number(dto?.olderThanDays ?? 90));
+        const correlationId = newId('quote_');
+        const idemKey = req.headers['idempotency-key'];
+        const jobIdKey = idemKey
+          ? (Array.isArray(idemKey) ? idemKey[0] : idemKey)
+          : new Date().toISOString().slice(0, 10);
 
-    const job = await this.maintenanceQueue.add(
-      JOB_QUOTES_PURGE,
-      {
-        tenantId,
-        correlationId,
-        olderThanDays,
-      } satisfies QuotesPurgeJobPayload,
-      {
-        jobId: `quotes-purge:${tenantId}:${jobIdKey}`,
+        const job = await this.maintenanceQueue.add(
+          JOB_QUOTES_PURGE,
+          {
+            tenantId,
+            correlationId,
+            olderThanDays,
+          } satisfies QuotesPurgeJobPayload,
+          {
+            jobId: `quotes-purge:${tenantId}:${jobIdKey}`,
+          },
+        );
+
+        return {
+          queued: true,
+          jobId: job.id,
+          olderThanDays,
+        };
       },
     );
-
-    return {
-      queued: true,
-      jobId: job.id,
-      olderThanDays,
-    };
   }
 
   @Get(':id')
@@ -138,48 +153,85 @@ export class QuotesController {
   }
 
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
   create(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Quote> {
-    return this.quotes.create(parseQuoteCreate(body), deviceIdOf(req));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        return this.quotes.create(parseQuoteCreate(body), deviceIdOf(req));
+      },
+    );
   }
 
   @Patch(':id')
-  @UseInterceptors(IdempotencyInterceptor)
-  update(@Param('id') id: string, @Body() body: unknown): Promise<Quote> {
-    return this.quotes.update(id, parseQuotePatch(body));
+  update(
+    @Param('id') id: string,
+    @Body() body: unknown,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<Quote> {
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        return this.quotes.update(id, parseQuotePatch(body));
+      },
+    );
   }
 
   @Delete(':id')
-  @UseInterceptors(IdempotencyInterceptor)
-  delete(@Param('id') id: string): Promise<{ id: string; deleted: true }> {
-    return this.quotes.delete(id);
+  delete(
+    @Param('id') id: string,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ id: string; deleted: true }> {
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        return this.quotes.delete(id);
+      },
+    );
   }
 
   @Post(':id/duplicate')
-  @UseInterceptors(IdempotencyInterceptor)
   duplicate(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Quote> {
-    return this.quotes.duplicate(id, deviceIdOf(req));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        return this.quotes.duplicate(id, deviceIdOf(req));
+      },
+    );
   }
 
   @Post(':id/convert')
   @RequireDeviceRole('pos')
-  @UseInterceptors(IdempotencyInterceptor)
   convert(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<ConvertQuoteResult> {
-    const deviceId = deviceIdOf(req);
-    return this.quotes.convert(id, parseQuoteConvert(body), {
-      userId: req.user!.userId!,
-      deviceId,
-    });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        const deviceId = deviceIdOf(req);
+        return this.quotes.convert(id, parseQuoteConvert(body), {
+          userId: req.user!.userId!,
+          deviceId,
+        });
+      },
+    );
   }
 }
 
