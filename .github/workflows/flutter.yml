@@ -238,6 +238,11 @@ jobs:
     # other non-success/non-skipped result) for every job in `needs` — bare
     # `always()` with no such check would itself be a false green.
     if: always()
+    # No checkout here, so `frontend/` doesn't exist — override the workflow-level
+    # working-directory or bash can't even start.
+    defaults:
+      run:
+        working-directory: .
     steps:
       - name: require every job above to have succeeded or been skipped
         run: |
