@@ -22,6 +22,14 @@
 > **Accepted** — เหลือ `tx.5` (#154) ⚠️ AC2 ของ `tx.4` (≲ 30 ms) วัดจริงได้ ~110 ms ทั้งก่อนและหลัง
 > เพราะ argon2 ยังอยู่ในทรานแซกชันของ `runIdempotent` (ตัวเลข 18–28 ms มาจาก prototype ที่ย้าย
 > argon2 ออกไปด้วย) — ตัวเลขนั้นเป็นของ `tx.5` ดูคอมเมนต์ใน #154
+>
+> **สถานะ 2026-09-15 (#154): ครบทั้ง 6 สไลซ์** — `tx.5` ไม่ได้ทำตาม §2 ตามตัวอักษร (`runTx` สั้น
+> สองใบซ้อนใน `runIdempotent` จะแค่ join) แต่ย้ายการเช็ค PIN ไป**ก่อน** `runIdempotent` ใน
+> `SalesController.voidSale`: `idempotencyParamsOf` → `VoidService.authorise` (`runTx` สั้นอ่าน
+> `pin_hash` → argon2 นอกทรานแซกชัน) → `runIdempotent(void)` · วัดด้วย `tx-hold-measure` (void 4 ตัว,
+> pool 2, 3 รอบ × 5 round): ทรานแซกชันยาวสุด ~101–131 → ~14–22 ms · latency 102/108/199/205 ms
+> (ขั้นบันได) → ~115/121/127/133 ms · ผลข้างเคียง: key ที่ done แล้วไม่ข้ามการเช็ค PIN อีก —
+> PIN ที่ไม่ผ่านได้ 403 + แถว `sale.void.denied` แทน replay (หรือแทน `409 IDEMPOTENCY_KEY_REUSED`)
 
 ---
 
@@ -174,6 +182,9 @@ test แดง สไลซ์นี้ถ้าพลาดจะพังแ�
 ---
 
 ### `tx.5` — ย้าย argon2 ออกนอกทรานแซกชัน
+
+> **ลงแล้ว (#154)** — รูปที่ลงจริงต่างจากข้อความข้างล่าง: การเช็ค PIN อยู่ก่อน `runIdempotent`
+> ไม่ใช่ระหว่าง `runTx` สองใบ ดูสถานะ 2026-09-15 ด้านบน
 
 **ทำ:** `VoidService.assertManagerPin` แยกเป็นสองท่อน — `runTx` สั้น ๆ อ่าน `pin_hash`
 (ตาราง `users` มี RLS จึงยังต้องมี tenant scope) แล้ว `verifyPassword` **นอกทรานแซกชัน**

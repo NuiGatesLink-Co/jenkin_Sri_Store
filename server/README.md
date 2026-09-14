@@ -256,13 +256,22 @@ voidSale(@Param('id') id: string, @Body() body: unknown, @Req() req: Authenticat
   a literal. Both store the code of the original request and replay it, so a deploy that changes
   a route's `@HttpCode` between a request and its retry replays the old code either way; the new
   risk is a literal drifting from its decorator, which the scan catches.
-- 🔴 **tx.5 (#154):** everything in `work` runs inside the transaction holding the claim row. For
-  `POST /sales/:id/void` that includes `assertManagerPin → verifyPassword` (argon2), so tx.5's
-  "argon2 outside the transaction" cannot be two short nested `runTx` calls — they would join.
-  The PIN check has to move ahead of `runIdempotent` in `SalesController.voidSale`, which changes
-  one behaviour: a wrong PIN on a replayed key then gets 403 (and a denial audit row) instead of
-  the replay. tx.4's "longest void transaction" measurement still includes argon2 (measured on
-  #153: ~110 ms before and after; one argon2 verify alone measures ~75–90 ms on the same machine).
+- 🔴 **Everything in `work` runs inside the transaction holding the claim row**, and a nested
+  `runTx` only joins it — so slow work that is not the write belongs *before* `runIdempotent`.
+  **`POST /sales/:id/void` is the one route that does that (tx.5, #154):**
+  `idempotencyParamsOf` (a bad key is still a 400 first) → `VoidService.authorise` (a short
+  `runTx` reads `pin_hash` and commits; then role, PIN rate limit and missing-PIN refusals in
+  their old order; then argon2 `verifyPassword` with **no transaction and no connection held**)
+  → `runIdempotent(… VoidService.void …)`. Strictly sequential, never `Promise.all`. `void` takes
+  the `AuthorisedVoid` that only `authorise` can build, so it cannot be reached without the PIN.
+  The PIN is an authorisation, not an invariant: nothing about the bill is read before the claim,
+  and the lock order inside the void is unchanged. `idempotency-routes.spec.ts` allows this
+  whole-body shape for `SalesController.voidSale` alone. **Consequence:** a done key no longer
+  skips the PIN — a resend whose PIN no longer verifies (the manager changed it) answers 403 plus
+  a `sale.void.denied` row instead of the stored 200, and the same key with a different wrong PIN
+  answers 403 instead of `409 IDEMPOTENCY_KEY_REUSED`; a correct-PIN replay spends one argon2 verify.
+  Measured with `test/tx-hold-measure.e2e-spec.ts` (4 voids, pool 2): longest transaction
+  ~101–131 ms → ~14–22 ms, latency 102/108/199/205 ms (a staircase) → ~115/121/127/133 ms.
 
 - **Postgres is the authority.** `idempotency_keys`'s primary key `(tenant_id, key)` is
   the whole concurrency mechanism: a second request carrying a live key blocks on the
@@ -303,7 +312,8 @@ checking `tenants.status`. Since `tx.4` (#153, 2026-09-14) the ADR-0003 addendum
 *"ใครตัดสิน กับ ใครลงมือ"* is **Accepted and in force**: the transaction lives in the
 handler, not around the request. The migration that got here is recorded in
 `docs/Backend_design/adr/0003-handler-scoped-migration-plan.md` (#149 → #154, parent #142);
-`tx.5` (#154, the manager PIN outside the void transaction) is still to come.
+its last slice, `tx.5` (#154), moved the void's manager-PIN check ahead of the transaction
+(see *Idempotency* above).
 
 | stage | does |
 |---|---|

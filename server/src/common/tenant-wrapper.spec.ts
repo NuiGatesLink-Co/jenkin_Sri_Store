@@ -21,7 +21,13 @@ const WRAPPER =
   /^\{\s*return this\.tenants\.runTx\(\(\) =>\s*this\.(\w+)In\([^)]*\),?\s*\);\s*\}$/;
 
 /** `Class.method` → why it may read the context without the wrapper. */
-const UNWRAPPED_ALLOWED: Record<string, string> = {};
+const UNWRAPPED_ALLOWED: Record<string, string> = {
+  // It does open its own runTx — the reader `pinHashIn` runs only inside it — but the body is
+  // not the whole-body wrapper, because argon2 has to run AFTER that transaction commits.
+  // Wrapping the whole method would put the ~75 ms verify back inside a held connection.
+  'VoidService.authorise':
+    'tx.5 (#154): a short runTx reads pin_hash, then verifyPassword runs with no transaction',
+};
 
 /** Every non-private method that reaches `currentRequestContext()` without the wrapper. */
 function unwrappedReaders(source: string, file = 'x.ts'): string[] {
@@ -111,5 +117,25 @@ describe('every request-context reader opens its own runTx (tx.2 #151)', () => {
     expect(
       Object.keys(UNWRAPPED_ALLOWED).filter((m) => !found.includes(m)),
     ).toEqual([]);
+  });
+
+  it('VoidService.authorise reaches the context only through its own runTx', () => {
+    // The allowlist entry above exempts the method from the whole-body shape, not from
+    // opening a transaction: its one context reader must be called inside `runTx`, and
+    // nowhere else in the method.
+    const source = readFileSync(join(SRC, 'sales/void.service.ts'), 'utf8');
+    const body =
+      /\n {2}async authorise\([^)]*\)[^{]*\{([\s\S]*?)\n {2}\}\n/.exec(
+        source,
+      )?.[1];
+    expect(body).toBeDefined();
+    expect(
+      body!.match(/this\.pinHashIn\(/g),
+      'pinHashIn is called once',
+    ).toHaveLength(1);
+    expect(body).toMatch(
+      /this\.tenants\.runTx\(\(\) =>\s*this\.pinHashIn\(actor\),?\s*\)/,
+    );
+    expect(body).not.toMatch(/currentRequestContext\s*\(/);
   });
 });

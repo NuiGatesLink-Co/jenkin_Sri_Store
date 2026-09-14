@@ -220,7 +220,7 @@ describe('runTx joins the open transaction instead of taking a second connection
       return fn();
     });
 
-  it('POST /sales/:id/void: one pos_app transaction while parked, one query runner for the whole request (void → byId)', async () => {
+  it('POST /sales/:id/void: one pos_app transaction while parked; two query runners, one after the other — the PIN read, then claim + void → byId (tx.5)', async () => {
     const saleId = await ringUp();
     const runners = vi.spyOn(ds, 'createQueryRunner');
 
@@ -235,7 +235,11 @@ describe('runTx joins the open transaction instead of taking a second connection
     expect(most).toBe(1);
 
     const result = await pending;
-    expect(runners).toHaveBeenCalledTimes(1);
+    // tx.5 (#154): the manager-PIN read commits and returns its runner before argon2 and
+    // before the claim, so the request asks for two, one after the other (`voidSale` awaits
+    // `authorise` before `runIdempotent`). `most` above saw one transaction while the void
+    // was parked on the sale lock, and a third runner would mean `byId` stopped joining.
+    expect(runners).toHaveBeenCalledTimes(2);
     expect(result.status).toBe(200);
     expect(result.body.data.voided).toBe(true);
     // `byId` ran after the lock: it read the uncommitted void on the same connection.
@@ -275,16 +279,19 @@ describe('runTx joins the open transaction instead of taking a second connection
   it('with no request transaction (the tx.4 shape), the outer runTx opens one and void → byId joins it', async () => {
     const saleId = await ringUp();
     const voids = app.get(VoidService);
-    const runners = refuseSecondRunner();
-
-    const voided = await inTenantScope(() =>
-      voids.void(saleId, {
+    // tx.5 (#154): the PIN check is its own short transaction, committed before the void's
+    // opens, so it is taken before the spy — this case counts the void's runners only.
+    const authorised = await inTenantScope(() =>
+      voids.authorise(saleId, {
         userId: fixture.userId,
         role: 'manager',
         deviceId: fixture.posDeviceId,
         pin: PIN,
       }),
     );
+    const runners = refuseSecondRunner();
+
+    const voided = await inTenantScope(() => voids.void(saleId, authorised));
 
     expect(voided.voided).toBe(true);
     expect(voided.items).toHaveLength(1);

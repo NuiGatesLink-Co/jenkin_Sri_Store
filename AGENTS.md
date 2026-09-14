@@ -296,10 +296,12 @@ executes `set_config`** (`TenantService.runTx`, inside the handler) keeps every 
 `RequestContextMiddleware`, `TransactionInterceptor`, `OWNED_BY_INTERCEPTOR`, `TENANT_ROUTES` and
 the `res.on('close')` backstop are deleted, so **a new `TenantGuard` controller needs no config
 entry**. The prototype measured the open-transaction hold of 4 concurrent voids at `DB_POOL_SIZE=2`
-dropping from 112 ms to 18–28 ms, but that prototype also had argon2 outside the transaction: on
-`main` after `tx.4` the void still holds ~110 ms because the manager-PIN argon2 runs inside
-`runIdempotent`'s transaction until `tx.5` (#154) moves the PIN check ahead of it; `POST /sales`
-went ~19 → ~16.5 ms (`server/test/tx-hold-measure.e2e-spec.ts`, `MEASURE_TX_HOLD=1`).
+dropping from 112 ms to 18–28 ms; on `main` that needed `tx.5` (#154) too, which moved the void's
+manager-PIN check **ahead of `runIdempotent`** (`VoidService.authorise`: a short `runTx` for
+`pin_hash`, then argon2 with no transaction) — longest void transaction ~110 → ~14–22 ms, no more
+latency staircase; `POST /sales` went ~19 → ~16.5 ms with `tx.4` (`server/test/tx-hold-measure.e2e-spec.ts`,
+`MEASURE_TX_HOLD=1`). 🔴 A done `Idempotency-Key` no longer skips the PIN: a void resent with a PIN
+that does not verify is a 403 + `sale.void.denied` row, not the replay.
 `onTransactionCommit` now **throws** with no open transaction (outside `runTx`), and the guard and
 `RateLimitService.readPlan` read `tenants` on the pool — the request's first connection, never a
 second. 🔴 **`runTx` must never take a `tid` argument** — the amendment is only safe because
@@ -308,8 +310,8 @@ second. 🔴 **`runTx` must never take a `tid` argument** — the amendment is o
 exactly what ADR-0003 banned, failing as a cross-tenant read that raises nothing. 🔴 Sibling
 `Promise.all([runTx(a), runTx(b)])` takes two connections at once (the #162 deadlock shape) — fold
 them into one `runTx`. The proving prototype is commit `0feaf94` on
-`worktree-agent-a1756ff02f223b4eb` (never merge it). The slices are #149 → #154 (parent #142); only
-`tx.5` is left. `server/README.md` *The request-context seam* describes the in-force mechanism.
+`worktree-agent-a1756ff02f223b4eb` (never merge it). The slices are #149 → #154 (parent #142), all
+landed. `server/README.md` *The request-context seam* describes the in-force mechanism.
 
 🔴 **The e2e suite cannot tolerate a second concurrent runner on the same database** —
 `test/schema.e2e-spec.ts` tears the schema down and re-applies it. CI is safe (one Postgres per job),

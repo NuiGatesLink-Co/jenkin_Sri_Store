@@ -1,6 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
+import { hashPassword } from '../src/common/password.js';
 import {
   accessToken,
   createTestApp,
@@ -719,6 +720,87 @@ describe('sale reads and void (e2e)', () => {
     expect(keyless.status).toBe(409);
     expect(keyless.body.error.code).toBe('SALE_VOIDED');
     expect(await stockOf('p1')).toBe(40);
+  });
+
+  /** Everything a void writes, for proving a second request wrote none of it. */
+  const voidFootprint = async (saleId: string) => {
+    const [sale] = await admin.query(
+      `SELECT voided, voided_at FROM sales WHERE tenant_id = $1::uuid AND id = $2`,
+      [TENANT, saleId],
+    );
+    const [counts] = await admin.query(
+      `SELECT
+         (SELECT count(*)::int FROM movements
+           WHERE tenant_id = $1::uuid AND ref_id = $2 AND type = 'void') AS movements,
+         (SELECT count(*)::int FROM audit_log
+           WHERE tenant_id = $1::uuid AND action = 'sale.void') AS voids`,
+      [TENANT, saleId],
+    );
+    return { sale, counts, stock: await stockOf('p1'), ledger: await ledger() };
+  };
+
+  const deniedReasons = async (): Promise<string[]> =>
+    (
+      (await admin.query(
+        `SELECT after->>'reason' AS reason FROM audit_log
+          WHERE tenant_id = $1::uuid AND action = 'sale.void.denied' ORDER BY id`,
+        [TENANT],
+      )) as { reason: string }[]
+    ).map((r) => r.reason);
+
+  const voidWithKey = (id: string, key: string, body: object) =>
+    request(app.getHttpServer())
+      .post(`/api/v1/sales/${id}/void`)
+      .set('Authorization', `Bearer ${posToken}`)
+      .set('Idempotency-Key', key)
+      .send(body);
+
+  // tx.5 (#154): the PIN is checked before the claim, so a key that is already done no longer
+  // skips it. Falsified by moving `authorise` back inside `runIdempotent`: the identical resend
+  // after the PIN change answers the stored 200, and the wrong-PIN resend 409 IDEMPOTENCY_KEY_REUSED.
+  it('tx.5: a done key with a PIN that no longer verifies is a 403 and a denial row, not a replay — the bill is unchanged', async () => {
+    await seedLedgerParties();
+    const sale = await onTheTab('เครดิตช่าง');
+    const key = `k-void-done-deny-${++keySeq}-${Date.now()}`;
+    expect((await voidWithKey(sale.id, key, { pin: PIN })).status).toBe(200);
+    const after = await voidFootprint(sale.id);
+    expect(after.sale.voided).toBe(true);
+    expect(await deniedReasons()).toEqual([]);
+
+    // The same request, byte for byte, after the manager's PIN changed: before tx.5 the
+    // claim found the done key first and replayed the 200.
+    await admin.query(
+      `UPDATE users SET pin_hash = $3 WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+      [TENANT, fixture.userId, await hashPassword('9999')],
+    );
+    const identical = await voidWithKey(sale.id, key, { pin: PIN });
+    expect(identical.status).toBe(403);
+    expect(identical.body.error.code).toBe('FORBIDDEN');
+
+    // The same key with a wrong PIN in the body: before tx.5, 409 IDEMPOTENCY_KEY_REUSED.
+    const wrong = await voidWithKey(sale.id, key, { pin: '0000' });
+    expect(wrong.status).toBe(403);
+    expect(wrong.body.error.code).toBe('FORBIDDEN');
+
+    expect(await deniedReasons()).toEqual(['pin', 'pin']);
+    expect(await voidFootprint(sale.id)).toEqual(after);
+  });
+
+  it('tx.5: a done key with the right PIN replays the stored 200 and re-runs nothing', async () => {
+    await seedLedgerParties();
+    const sale = await onTheTab('เครดิตช่าง');
+    const key = `k-void-done-replay-${++keySeq}-${Date.now()}`;
+    const first = await voidWithKey(sale.id, key, { pin: PIN });
+    expect(first.status).toBe(200);
+    const after = await voidFootprint(sale.id);
+    expect(after.counts).toEqual({ movements: 1, voids: 1 });
+
+    const replay = await voidWithKey(sale.id, key, { pin: PIN });
+    expect(replay.status).toBe(200);
+    expect(replay.body.data).toEqual(first.body.data);
+    // Stock restored once, one movement, one audit row, the ledger reversed once.
+    expect(await voidFootprint(sale.id)).toEqual(after);
+    expect(await deniedReasons()).toEqual([]);
   });
 
   it('a backoffice device cannot void, and an unknown bill 404s', async () => {
