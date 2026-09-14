@@ -212,10 +212,10 @@ describe('Worker Jobs & Queue Integration (e2e)', () => {
       const oldQuoteId = `quote-old-${Date.now()}`;
       const freshQuoteId = `quote-fresh-${Date.now()}`;
 
-      // Seed quote older than 90 days (100 days old)
+      // Seed quote older than 90 days (100 days old, valid_until expired 95 days ago)
       await fixture.admin.query(
         `INSERT INTO quotes (tenant_id, id, quote_no, status, date, valid_until, subtotal, discount, total)
-         VALUES ($1::uuid, $2, $3, 'open', now() - interval '100 days', now() - interval '70 days', 200, 0, 200)`,
+         VALUES ($1::uuid, $2, $3, 'open', now() - interval '100 days', now() - interval '95 days', 200, 0, 200)`,
         [TENANT_ID, oldQuoteId, `QT-OLD-${Date.now()}`],
       );
       await fixture.admin.query(
@@ -240,6 +240,7 @@ describe('Worker Jobs & Queue Integration (e2e)', () => {
       const res = await request(fixture.app.getHttpServer())
         .post('/api/v1/quotes/purge')
         .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', `purge-mgr-${Date.now()}`)
         .send({ olderThanDays: 90 });
 
       expect(res.status).toBe(202);
@@ -271,6 +272,63 @@ describe('Worker Jobs & Queue Integration (e2e)', () => {
       expect(freshQuote).toHaveLength(1);
     });
 
+    it('preserves valid open quotes and recently converted quotes even if created > 90 days ago (#122)', async () => {
+      const validOpenId = `quote-valid-open-${Date.now()}`;
+      const recentConvertedId = `quote-recent-conv-${Date.now()}`;
+      const oldConvertedId = `quote-old-conv-${Date.now()}`;
+
+      // Open quote created 100 days ago, but valid_until is 10 days in the future
+      await fixture.admin.query(
+        `INSERT INTO quotes (tenant_id, id, quote_no, status, date, valid_until, subtotal, discount, total)
+         VALUES ($1::uuid, $2, $3, 'open', now() - interval '100 days', now() + interval '10 days', 100, 0, 100)`,
+        [TENANT_ID, validOpenId, `QT-VALID-${Date.now()}`],
+      );
+
+      // Quote created 120 days ago, converted 10 days ago
+      await fixture.admin.query(
+        `INSERT INTO quotes (tenant_id, id, quote_no, status, date, valid_until, converted_at, subtotal, discount, total)
+         VALUES ($1::uuid, $2, $3, 'converted', now() - interval '120 days', now() - interval '100 days', now() - interval '10 days', 100, 0, 100)`,
+        [TENANT_ID, recentConvertedId, `QT-RCONV-${Date.now()}`],
+      );
+
+      // Quote created 150 days ago, converted 95 days ago
+      await fixture.admin.query(
+        `INSERT INTO quotes (tenant_id, id, quote_no, status, date, valid_until, converted_at, subtotal, discount, total)
+         VALUES ($1::uuid, $2, $3, 'converted', now() - interval '150 days', now() - interval '130 days', now() - interval '95 days', 100, 0, 100)`,
+        [TENANT_ID, oldConvertedId, `QT-OCONV-${Date.now()}`],
+      );
+
+      const res = await request(fixture.app.getHttpServer())
+        .post('/api/v1/quotes/purge')
+        .set('Authorization', `Bearer ${token}`)
+        .set('Idempotency-Key', `purge-invariants-${Date.now()}`)
+        .send({ olderThanDays: 90 });
+
+      expect(res.status).toBe(202);
+
+      await waitFor(async () => {
+        const rows = await fixture.admin.query(
+          `SELECT id FROM quotes WHERE tenant_id = $1::uuid AND id = $2`,
+          [TENANT_ID, oldConvertedId],
+        );
+        return rows.length === 0;
+      });
+
+      // Valid open quote must be preserved
+      const validOpenRows = await fixture.admin.query(
+        `SELECT id FROM quotes WHERE tenant_id = $1::uuid AND id = $2`,
+        [TENANT_ID, validOpenId],
+      );
+      expect(validOpenRows).toHaveLength(1);
+
+      // Recently converted quote must be preserved
+      const recentConvertedRows = await fixture.admin.query(
+        `SELECT id FROM quotes WHERE tenant_id = $1::uuid AND id = $2`,
+        [TENANT_ID, recentConvertedId],
+      );
+      expect(recentConvertedRows).toHaveLength(1);
+    });
+
     it('refuses quote purge requests from cashiers with 403 Forbidden', async () => {
       const cashierToken = accessToken({
         tenantId: tenantInfo.tenantId,
@@ -283,6 +341,7 @@ describe('Worker Jobs & Queue Integration (e2e)', () => {
       const res = await request(fixture.app.getHttpServer())
         .post('/api/v1/quotes/purge')
         .set('Authorization', `Bearer ${cashierToken}`)
+        .set('Idempotency-Key', `purge-cashier-${Date.now()}`)
         .send({ olderThanDays: 90 });
 
       expect(res.status).toBe(403);
@@ -292,11 +351,11 @@ describe('Worker Jobs & Queue Integration (e2e)', () => {
 
   describe('AC1: Handler idempotency', () => {
     it('running quotes.purge repeatedly produces no error and deletes 0 additional rows', async () => {
-      // Seed 1 old quote
+      // Seed 1 old quote (expired 95 days ago)
       const oldQuoteId = `quote-idem-${Date.now()}`;
       await fixture.admin.query(
         `INSERT INTO quotes (tenant_id, id, quote_no, status, date, valid_until, subtotal, discount, total)
-         VALUES ($1::uuid, $2, $3, 'open', now() - interval '100 days', now() - interval '70 days', 100, 0, 100)`,
+         VALUES ($1::uuid, $2, $3, 'open', now() - interval '100 days', now() - interval '95 days', 100, 0, 100)`,
         [TENANT_ID, oldQuoteId, `QT-IDEM-${Date.now()}`],
       );
 
