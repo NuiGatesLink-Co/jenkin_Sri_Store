@@ -12,6 +12,7 @@ import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import { JOB_SALE_CREATED, QUEUE_SALE_POST } from '../queue/queue.constants.js';
 import type { CreateSale, SaleLine } from './sales.dto.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /** Who is ringing the bill up — read from the token, never from the body. */
 export interface SaleActor {
@@ -201,10 +202,15 @@ export class SalesService {
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
     @Optional() @InjectQueue(QUEUE_SALE_POST) private readonly salePostQueue?: Queue,
   ) {}
 
-  async create(dto: CreateSale, actor: SaleActor): Promise<CreateSaleResult> {
+  create(dto: CreateSale, actor: SaleActor): Promise<CreateSaleResult> {
+    return this.tenants.runTx(() => this.createIn(dto, actor));
+  }
+
+  private async createIn(dto: CreateSale, actor: SaleActor): Promise<CreateSaleResult> {
     const { tenantId, manager } = currentRequestContext();
 
     // Arithmetic first: a 409 for a total that does not add up must not take

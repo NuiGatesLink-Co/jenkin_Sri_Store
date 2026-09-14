@@ -8,6 +8,7 @@ import {
   ShiftsService,
   type ShiftWithEntries,
 } from '../shifts/shifts.service.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 export type DeviceRole = 'pos' | 'backoffice';
 
@@ -70,10 +71,15 @@ export class DevicesService {
   constructor(
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
+    private readonly tenants: TenantService,
   ) {}
 
   /** Every device of the tenant, retired ones included, by `device_no`. */
-  async list(): Promise<Device[]> {
+  list(): Promise<Device[]> {
+    return this.tenants.runTx(() => this.listIn());
+  }
+
+  private async listIn(): Promise<Device[]> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT ${DEVICE_COLUMNS} FROM devices
@@ -94,7 +100,14 @@ export class DevicesService {
    * advisory lock — the pattern `customers.service.ts` uses for its code sequence — so two
    * owners pressing "add device" at once cannot both read the same max.
    */
-  async create(
+  create(
+    actor: DeviceActor,
+    input: { label: string; role: DeviceRole },
+  ): Promise<{ device: Device; enrolCode: string }> {
+    return this.tenants.runTx(() => this.createIn(actor, input));
+  }
+
+  private async createIn(
     actor: DeviceActor,
     input: { label: string; role: DeviceRole },
   ): Promise<{ device: Device; enrolCode: string }> {
@@ -201,7 +214,17 @@ export class DevicesService {
    * a new drawer is refused (`ShiftsService.open`). An access token already issued still
    * reads for up to 15 minutes — ADR-0009 has no denylist, by decision.
    */
-  async retire(
+  retire(
+    actor: DeviceActor,
+    deviceId: string,
+    physicalCashSatang: number | null,
+  ): Promise<{ device: Device; shift: ShiftWithEntries | null }> {
+    return this.tenants.runTx(() =>
+      this.retireIn(actor, deviceId, physicalCashSatang),
+    );
+  }
+
+  private async retireIn(
     actor: DeviceActor,
     deviceId: string,
     physicalCashSatang: number | null,

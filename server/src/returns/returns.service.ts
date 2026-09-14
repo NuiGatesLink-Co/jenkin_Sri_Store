@@ -22,6 +22,7 @@ import {
   type MovementRow,
 } from '../sales/sales.service.js';
 import type { CreateReturn, ReturnLine } from './returns.dto.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /** Who is taking the goods back — read from the token, never from the body. */
 export interface ReturnActor {
@@ -189,10 +190,18 @@ export class ReturnsService {
     private readonly docNumbers: DocNumberService,
     private readonly shifts: ShiftsService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
     @Optional() @InjectQueue(QUEUE_SALE_POST) private readonly salePostQueue?: Queue,
   ) {}
 
-  async create(
+  create(
+    dto: CreateReturn,
+    actor: ReturnActor,
+  ): Promise<CreateReturnResult> {
+    return this.tenants.runTx(() => this.createIn(dto, actor));
+  }
+
+  private async createIn(
     dto: CreateReturn,
     actor: ReturnActor,
   ): Promise<CreateReturnResult> {
@@ -360,7 +369,17 @@ export class ReturnsService {
    * history) and behave exactly as `GET /sales` does; `saleId` is the extra one
    * `POST /returns` needs to show a bill's own notes.
    */
-  async list(query: {
+  list(query: {
+    saleId?: string;
+    from?: string;
+    to?: string;
+    page: number;
+    limit: number;
+  }): Promise<{ items: ReturnWithItems[]; total: number }> {
+    return this.tenants.runTx(() => this.listIn(query));
+  }
+
+  private async listIn(query: {
     saleId?: string;
     from?: string;
     to?: string;

@@ -9,6 +9,7 @@ import { DocNumberService } from '../documents/doc-number.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import type { CreateCreditPayment } from './credit-payments.dto.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /** Who took the money — from the token, never from the body (ADR-0004). */
 export interface CreditPaymentActor {
@@ -80,9 +81,18 @@ export class CreditPaymentsService {
     private readonly shifts: ShiftsService,
     private readonly audit: AuditService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
   ) {}
 
-  async create(
+  create(
+    mechanicId: string,
+    dto: CreateCreditPayment,
+    actor: CreditPaymentActor,
+  ): Promise<CreateCreditPaymentResult> {
+    return this.tenants.runTx(() => this.createIn(mechanicId, dto, actor));
+  }
+
+  private async createIn(
     mechanicId: string,
     dto: CreateCreditPayment,
     actor: CreditPaymentActor,

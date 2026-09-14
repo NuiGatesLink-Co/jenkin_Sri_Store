@@ -5,6 +5,7 @@ import { newId } from '../common/ids.js';
 import { fromSatang } from '../common/money.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /** Who is at the drawer — from the token, never from the body. */
 export interface Actor {
@@ -72,8 +73,14 @@ const SHIFT_COLUMNS = `id, date_str, starting_cash, opened_at, closed_at,
  */
 @Injectable()
 export class ShiftsService {
+  constructor(private readonly tenants: TenantService) {}
+
   /** The tenant's current drawer with its entries, or null when none was ever opened. */
-  async current(): Promise<ShiftWithEntries | null> {
+  current(): Promise<ShiftWithEntries | null> {
+    return this.tenants.runTx(() => this.currentIn());
+  }
+
+  private async currentIn(): Promise<ShiftWithEntries | null> {
     const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT ${SHIFT_COLUMNS} FROM shifts
@@ -87,7 +94,14 @@ export class ShiftsService {
   }
 
   /** Archived shifts, newest first. Paginated — this table grows by one a day forever. */
-  async history(
+  history(
+    page: number,
+    limit: number,
+  ): Promise<{ items: ShiftWithEntries[]; total: number }> {
+    return this.tenants.runTx(() => this.historyIn(page, limit));
+  }
+
+  private async historyIn(
     page: number,
     limit: number,
   ): Promise<{ items: ShiftWithEntries[]; total: number }> {
@@ -116,7 +130,14 @@ export class ShiftsService {
    * button twice. A new day archives the previous shift **first**, flagged
    * `auto_archived` if it was never closed, so a day's takings are never lost.
    */
-  async open(
+  open(
+    actor: Actor,
+    startingCashSatang: number,
+  ): Promise<ShiftWithEntries> {
+    return this.tenants.runTx(() => this.openIn(actor, startingCashSatang));
+  }
+
+  private async openIn(
     actor: Actor,
     startingCashSatang: number,
   ): Promise<ShiftWithEntries> {
@@ -196,7 +217,14 @@ export class ShiftsService {
    * Stamps `closed_at` and the cash actually counted. The shift stays `is_active`:
    * it is still this device's drawer until tomorrow's open archives it.
    */
-  async close(
+  close(
+    deviceId: string,
+    physicalCashSatang: number,
+  ): Promise<ShiftWithEntries> {
+    return this.tenants.runTx(() => this.closeIn(deviceId, physicalCashSatang));
+  }
+
+  private async closeIn(
     deviceId: string,
     physicalCashSatang: number,
   ): Promise<ShiftWithEntries> {
@@ -249,7 +277,16 @@ export class ShiftsService {
    *
    * Returns the archived shift (`isActive: false`), or null when there was none.
    */
-  async closeForRetirement(
+  closeForRetirement(
+    deviceId: string,
+    physicalCashSatang: number | null,
+  ): Promise<ShiftWithEntries | null> {
+    return this.tenants.runTx(() =>
+      this.closeForRetirementIn(deviceId, physicalCashSatang),
+    );
+  }
+
+  private async closeForRetirementIn(
     deviceId: string,
     physicalCashSatang: number | null,
   ): Promise<ShiftWithEntries | null> {
@@ -303,7 +340,14 @@ export class ShiftsService {
   }
 
   /** Adds money in or out of the open drawer. */
-  async addEntry(
+  addEntry(
+    actor: Actor,
+    entry: { type: 'in' | 'out'; amountSatang: number; note: string | null },
+  ): Promise<DrawerEntry> {
+    return this.tenants.runTx(() => this.addEntryIn(actor, entry));
+  }
+
+  private async addEntryIn(
     actor: Actor,
     entry: { type: 'in' | 'out'; amountSatang: number; note: string | null },
   ): Promise<DrawerEntry> {

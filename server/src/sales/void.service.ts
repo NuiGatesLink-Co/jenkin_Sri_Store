@@ -16,6 +16,7 @@ import {
   type SaleWithItems,
 } from './sale-reads.service.js';
 import { MECHANIC_CREDIT } from './sales.service.js';
+import { TenantService } from '../common/database/tenant.service.js';
 
 /** The bill under its own row lock — everything the void has to undo. */
 interface LockedSale {
@@ -62,9 +63,14 @@ export class VoidService {
     @Inject(AUDIT_DATA_SOURCE) private readonly auditDs: DataSource,
     private readonly rateLimit: RateLimitService,
     private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
   ) {}
 
-  async void(saleId: string, actor: VoidActor): Promise<SaleWithItems> {
+  void(saleId: string, actor: VoidActor): Promise<SaleWithItems> {
+    return this.tenants.runTx(() => this.voidIn(saleId, actor));
+  }
+
+  private async voidIn(saleId: string, actor: VoidActor): Promise<SaleWithItems> {
     const { tenantId, manager } = currentRequestContext();
 
     await this.assertManagerPin(manager, tenantId, actor, saleId);
