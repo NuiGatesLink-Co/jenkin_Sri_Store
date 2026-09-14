@@ -9,5 +9,6 @@ import { PurchaseOrdersService } from './purchase-orders.service.js';
   imports: [DocumentsModule, IdempotencyModule, ProductsModule],
   controllers: [PurchaseOrdersController],
   providers: [PurchaseOrdersService],
+  exports: [PurchaseOrdersService],
 })
 export class PurchasingModule {}
