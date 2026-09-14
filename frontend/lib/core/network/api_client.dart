@@ -155,7 +155,38 @@ class ApiClient {
     );
   }
 
-  Future<dynamic> _sendWithRetry(
+  Future<PaginatedResult> getPaginated(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+    Map<String, String>? headers,
+    bool skipAuth = false,
+  }) async {
+    final response = await _executeWithRetry(
+      () async {
+        final uri = _buildUri(path, queryParameters);
+        final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
+        return _client.get(uri, headers: h);
+      },
+      path: path,
+      skipAuth: skipAuth,
+    );
+
+    final statusCode = response.statusCode;
+    if (statusCode >= 200 && statusCode < 300) {
+      final body = response.body.trim();
+      final decoded = jsonDecode(body);
+      if (decoded is Map<String, dynamic>) {
+        final data = decoded['data'] is List ? (decoded['data'] as List) : <dynamic>[];
+        final meta = decoded['meta'] is Map<String, dynamic>
+            ? (decoded['meta'] as Map<String, dynamic>)
+            : <String, dynamic>{};
+        return PaginatedResult(data: data, meta: meta);
+      }
+    }
+    return _handleResponse(response) as PaginatedResult;
+  }
+
+  Future<http.Response> _executeWithRetry(
     Future<http.Response> Function() execute, {
     required String path,
     required bool skipAuth,
@@ -166,12 +197,19 @@ class ApiClient {
     if (response.statusCode == 401 && !skipAuth && !_isAuthPath(path)) {
       final refreshed = await _handleTokenRefresh();
       if (refreshed) {
-        // Retry original request once with newly acquired access token
-        final retryResponse = await execute();
-        return _handleResponse(retryResponse);
+        return await execute();
       }
     }
 
+    return response;
+  }
+
+  Future<dynamic> _sendWithRetry(
+    Future<http.Response> Function() execute, {
+    required String path,
+    required bool skipAuth,
+  }) async {
+    final response = await _executeWithRetry(execute, path: path, skipAuth: skipAuth);
     return _handleResponse(response);
   }
 
@@ -246,6 +284,11 @@ class ApiClient {
       } catch (_) {
         decodedJson = body;
       }
+    }
+
+    // 304 Not Modified (e.g. conditional GET with If-None-Match)
+    if (statusCode == 304) {
+      return const {'notModified': true};
     }
 
     // Success responses (2xx)
@@ -323,4 +366,22 @@ class ApiClient {
       retryAfterSeconds: retryAfterSeconds,
     );
   }
+}
+
+/// Paginated API response containing items list and pagination metadata.
+class PaginatedResult {
+  final List<dynamic> data;
+  final Map<String, dynamic> meta;
+
+  const PaginatedResult({
+    required this.data,
+    required this.meta,
+  });
+
+  Map<String, dynamic>? get nextCursor =>
+      meta['nextCursor'] is Map ? Map<String, dynamic>.from(meta['nextCursor'] as Map) : null;
+
+  int get total => (meta['total'] as num?)?.toInt() ?? 0;
+  int get page => (meta['page'] as num?)?.toInt() ?? 1;
+  int get totalPages => (meta['totalPages'] as num?)?.toInt() ?? 1;
 }

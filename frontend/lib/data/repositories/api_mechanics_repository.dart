@@ -3,14 +3,15 @@
 // Complies with ADR-0010:
 //  • Server is the authority on mechanic credit balances and payment receipts (CP###).
 //  • Patches rows directly in Drift without dual-bookkeeping locally.
+//  • total_credit is struck (#11, ADR-0010 §6) — legacy alias of total_discount, never written.
 
-import '../../core/network/api_exception.dart';
 import 'package:drift/drift.dart';
 
 import '../../core/network/api_client.dart';
+import '../../core/network/api_exception.dart';
 import '../../core/utils/ids.dart';
-import 'api/api_wire.dart';
 import '../db/database.dart';
+import 'api/api_wire.dart';
 import 'mechanics_repository.dart';
 
 class ApiMechanicsRepository extends MechanicsRepository {
@@ -24,16 +25,6 @@ class ApiMechanicsRepository extends MechanicsRepository {
 
   /// Whether a credit payment is a server write — the `USE_API_WRITES` switch
   /// (`useApi`), the same one that moves sales, returns and shifts.
-  ///
-  /// 🔴 This class is ALSO the Drift build's mechanics repository: #55's read
-  /// switch (`useApiRepositories`) defaults to true. With this false the payment
-  /// is the Drift write it always was — local CP number, local balance cut, no
-  /// outbox, no shift check. Without the switch, #24's outbox queued every payment
-  /// on the shop's serverless build forever: the dialog said "saved", the debt
-  /// never moved.
-  ///
-  /// When true: the outbox, and no payment without an open drawer (owner,
-  /// 2026-09-13).
   final bool writesToServer;
 
   MechanicsCompanion _mechanicToCompanion(Map<String, dynamic> json) {
@@ -46,28 +37,15 @@ class ApiMechanicsRepository extends MechanicsRepository {
     final phone = json['phone'] as String?;
     final note = json['note'] as String?;
 
-    double parseNum(dynamic val) {
-      if (val is num) return val.toDouble();
-      if (val is String) return double.tryParse(val) ?? 0.0;
-      return 0.0;
-    }
-
-    final creditLimit = parseNum(json['creditLimit'] ?? json['credit_limit']);
-    final creditBalance = parseNum(json['creditBalance'] ?? json['credit_balance']);
-    final totalSales = parseNum(json['totalSales'] ?? json['total_sales']);
-    final totalCredit = parseNum(json['totalCredit'] ?? json['total_credit']);
-    final totalDiscount = parseNum(json['totalDiscount'] ?? json['total_discount']);
-    final totalMarkup = parseNum(json['totalMarkup'] ?? json['total_markup']);
+    final creditLimit = money(json['creditLimit'] ?? json['credit_limit']);
+    final creditBalance = money(json['creditBalance'] ?? json['credit_balance']);
+    final totalSales = money(json['totalSales'] ?? json['total_sales']);
+    final totalDiscount = money(json['totalDiscount'] ?? json['total_discount']);
+    final totalMarkup = money(json['totalMarkup'] ?? json['total_markup']);
     final createdAt = (json['createdAt'] ?? json['created_at'] ?? '') as String;
 
-    DateTime? updatedAt;
-    if (json['updatedAt'] != null) {
-      updatedAt = DateTime.tryParse(json['updatedAt'].toString());
-    }
-    DateTime? deletedAt;
-    if (json['deletedAt'] != null) {
-      deletedAt = DateTime.tryParse(json['deletedAt'].toString());
-    }
+    final updatedAt = stampOrNull(json['updatedAt']);
+    final deletedAt = stampOrNull(json['deletedAt']);
 
     return MechanicsCompanion(
       id: Value(id),
@@ -81,7 +59,6 @@ class ApiMechanicsRepository extends MechanicsRepository {
       creditLimit: Value(creditLimit),
       creditBalance: Value(creditBalance),
       totalSales: Value(totalSales),
-      totalCredit: Value(totalCredit),
       totalDiscount: Value(totalDiscount),
       totalMarkup: Value(totalMarkup),
       createdAt: Value(createdAt),
@@ -92,22 +69,56 @@ class ApiMechanicsRepository extends MechanicsRepository {
 
   Future<void> syncFromServer() async {
     try {
-      final res = await apiClient.get('/api/v1/mechanics');
-      if (res is List) {
-        await db.batch((batch) {
-          for (final item in res) {
-            if (item is Map) {
-              final comp = _mechanicToCompanion(Map<String, dynamic>.from(item));
-              batch.insert(
-                db.mechanics,
-                comp,
-                onConflict: DoUpdate((old) => comp),
-              );
-            }
-          }
-        });
+      String? updatedSince;
+      final latestRow = await (db.select(db.mechanics)
+            ..where((t) => t.updatedAt.isNotNull())
+            ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)])
+            ..limit(1))
+          .getSingleOrNull();
+
+      if (latestRow?.updatedAt != null) {
+        updatedSince = latestRow!.updatedAt!.toUtc().toIso8601String();
       }
-    } catch (_) {}
+
+      bool hasMore = true;
+      int page = 1;
+
+      while (hasMore) {
+        final queryParams = <String, dynamic>{
+          'limit': 100,
+          'page': page,
+        };
+        if (updatedSince != null) {
+          queryParams['updatedSince'] = updatedSince;
+        }
+
+        final res = await apiClient.getPaginated('/api/v1/mechanics', queryParameters: queryParams);
+        final items = res.data;
+
+        if (items.isNotEmpty) {
+          await db.batch((batch) {
+            for (final item in items) {
+              if (item is Map) {
+                final comp = _mechanicToCompanion(Map<String, dynamic>.from(item));
+                batch.insert(
+                  db.mechanics,
+                  comp,
+                  onConflict: DoUpdate((old) => comp),
+                );
+              }
+            }
+          });
+        }
+
+        if (page >= res.totalPages || items.isEmpty) {
+          hasMore = false;
+        } else {
+          page++;
+        }
+      }
+    } catch (_) {
+      // Network failure or degraded mode: gracefully ignore and rely on Drift cache
+    }
   }
 
   @override
@@ -128,7 +139,7 @@ class ApiMechanicsRepository extends MechanicsRepository {
         if (data.shopName.present && data.shopName.value != null) 'shopName': data.shopName.value,
         if (data.phone.present && data.phone.value != null) 'phone': data.phone.value,
         if (data.note.present && data.note.value != null) 'note': data.note.value,
-        if (data.creditLimit.present) 'creditLimit': data.creditLimit.value.toStringAsFixed(2),
+        if (data.creditLimit.present) 'creditLimit': wireMoney(data.creditLimit.value),
       };
 
       final res = await apiClient.post('/api/v1/mechanics', body: body);
@@ -156,7 +167,7 @@ class ApiMechanicsRepository extends MechanicsRepository {
       if (patch.shopName.present) body['shopName'] = patch.shopName.value;
       if (patch.phone.present) body['phone'] = patch.phone.value;
       if (patch.note.present) body['note'] = patch.note.value;
-      if (patch.creditLimit.present) body['creditLimit'] = patch.creditLimit.value.toStringAsFixed(2);
+      if (patch.creditLimit.present) body['creditLimit'] = wireMoney(patch.creditLimit.value);
 
       final res = await apiClient.patch('/api/v1/mechanics/$id', body: body);
       if (res is Map) {
@@ -166,7 +177,9 @@ class ApiMechanicsRepository extends MechanicsRepository {
       }
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
-    } catch (_) {}
+    } catch (_) {
+      // Offline fallback
+    }
 
     await super.updateMechanic(id, patch);
   }
@@ -175,183 +188,203 @@ class ApiMechanicsRepository extends MechanicsRepository {
   Future<void> deleteMechanic(String id) async {
     try {
       await apiClient.delete('/api/v1/mechanics/$id');
-    } catch (_) {}
-
-    await (db.update(db.mechanics)..where((t) => t.id.equals(id))).write(
-      MechanicsCompanion(
-        deletedAt: Value(DateTime.now()),
-        updatedAt: Value(DateTime.now()),
-      ),
-    );
+      await (db.update(db.mechanics)..where((t) => t.id.equals(id))).write(
+        MechanicsCompanion(
+          deletedAt: Value(DateTime.now()),
+        ),
+      );
+    } on ApiException catch (e) {
+      rethrowServerRefusal(e);
+    } catch (_) {
+      // Offline fallback
+      await (db.update(db.mechanics)..where((t) => t.id.equals(id))).write(
+        MechanicsCompanion(
+          deletedAt: Value(DateTime.now()),
+        ),
+      );
+    }
   }
-
-  // ── Credit payments (#24): an outbox in Drift ───────────────────────────────
-  //
-  // 🔴 A credit payment is cash over the counter. Every one is written to
-  // `pending_credit_payments` — with its client id and `Idempotency-Key` — BEFORE
-  // the request goes out, and leaves that table only when the server has answered
-  // for it. So:
-  //  • a lost reply, a 5xx or no network at all leaves it queued, and every resend
-  //    carries the SAME id, key and body, however much later and across however
-  //    many restarts (the key alone expires after 24h; the id never does);
-  //  • nothing is written to `credit_payments` or the balance from this device's
-  //    own numbers — no local CP number, no second bookkeeping (ADR-0010). The
-  //    old Drift fallback did both, and the next `syncFromServer` then put the
-  //    whole debt back while the cash sat in the drawer.
-
-  /// Ids being sent right now, so a flush never races the dialog's own send.
-  final Set<String> _sending = {};
-  Future<void>? _flushing;
 
   @override
   Future<CreditPaymentRow> addCreditPayment({
     required String mechanicId,
     required double amount,
-    String? note,
     required String paymentMethod,
+    String? note,
     bool allowOverpayment = false,
   }) async {
     if (!writesToServer) {
       return super.addCreditPayment(
         mechanicId: mechanicId,
         amount: amount,
-        note: note,
         paymentMethod: paymentMethod,
+        note: note,
         allowOverpayment: allowOverpayment,
       );
     }
-    // 🔴 BEFORE the outbox row. Offline, the server's `409 NO_OPEN_SHIFT` would
-    // only come back during a later flush — with the cash already in the drawer
-    // and nobody at the dialog. So the cached drawer is asked here instead.
+
     if (!await hasOpenShift(db)) {
       throw const PosException('NO_OPEN_SHIFT', noOpenShiftForCreditPayment);
     }
-    final id = newId('cp');
-    _sending.add(id);
-    try {
-      await db
-          .into(db.pendingCreditPayments)
-          .insert(
-            PendingCreditPaymentsCompanion.insert(
-              id: id,
-              idempotencyKey: newId('idem'),
-              mechanicId: mechanicId,
-              amount: wireMoney(amount),
-              paymentMethod: paymentMethod,
-              note: Value(note),
-              // Only ever true when a human confirmed the overpayment dialog —
-              // the screen decides, this layer carries it (#56).
-              allowOverpayment: Value(allowOverpayment),
-              createdAt: DateTime.now(),
-            ),
-          );
-      final pending = await (db.select(
-        db.pendingCreditPayments,
-      )..where((t) => t.id.equals(id))).getSingle();
 
-      try {
-        return await _send(pending);
-      } on ApiException catch (e) {
-        if (!_isVerdict(e)) throw const CreditPaymentQueued();
-        // The server refused THIS press, with the counter still looking at the
-        // dialog: nothing was stored, so it is dropped and the refusal shown.
-        await (db.delete(
-          db.pendingCreditPayments,
-        )..where((t) => t.id.equals(id))).go();
+    final mechanic = await (db.select(db.mechanics)..where((t) => t.id.equals(mechanicId))).getSingleOrNull();
+    if (mechanic == null) {
+      throw const PosException('NOT_FOUND', 'ไม่พบข้อมูลช่าง');
+    }
+
+    final queue = await (db.select(db.pendingCreditPayments)
+          ..where((t) => t.mechanicId.equals(mechanicId) & t.rejectedCode.isNull()))
+        .get();
+    final queuedTotal = queue.fold<double>(
+      0.0,
+      (sum, row) => sum + (double.tryParse(row.amount) ?? 0.0),
+    );
+    final projectedBalance = mechanic.creditBalance - queuedTotal;
+
+    if (amount > projectedBalance && !allowOverpayment) {
+      throw PosException(
+        'OVERPAYMENT_NOT_ALLOWED',
+        'ยอดชำระเกินยอดหนี้คงเหลือ',
+        {
+          'creditBalance': projectedBalance,
+          'amount': amount,
+        },
+      );
+    }
+
+    final localId = newId('cp');
+    final now = DateTime.now();
+    final key = newId('idem');
+    final wireAmt = wireMoney(amount);
+
+    await db.into(db.pendingCreditPayments).insert(
+          PendingCreditPaymentsCompanion(
+            id: Value(localId),
+            idempotencyKey: Value(key),
+            mechanicId: Value(mechanicId),
+            amount: Value(wireAmt),
+            paymentMethod: Value(paymentMethod),
+            note: Value(note),
+            allowOverpayment: Value(allowOverpayment),
+            createdAt: Value(now),
+          ),
+        );
+
+    try {
+      final body = {
+        'id': localId,
+        'amount': wireAmt,
+        'paymentMethod': paymentMethod,
+        if (note != null && note.isNotEmpty) 'note': note,
+        if (allowOverpayment) 'allowOverpayment': true,
+      };
+
+      final res = await apiClient.post(
+        '/api/v1/mechanics/$mechanicId/credit-payments',
+        body: body,
+        headers: {'Idempotency-Key': key},
+      );
+
+      if (res is Map) {
+        return await _applyPaymentSuccess(localId, mechanicId, wireAmt, note, res);
+      }
+    } on ApiException catch (e) {
+      if (isVerdict(e)) {
+        await (db.delete(db.pendingCreditPayments)..where((t) => t.id.equals(localId))).go();
         if (e.code == 'NO_OPEN_SHIFT') {
           throw PosException(e.code, noOpenShiftForCreditPayment, e.details);
         }
         rethrowServerRefusal(e);
-      } catch (_) {
-        // A dropped socket, a timeout, a reply that would not parse: the payment
-        // may or may not be committed, so it stays queued with its id and key.
-        throw const CreditPaymentQueued();
       }
-    } finally {
-      _sending.remove(id);
+      throw const CreditPaymentQueued();
+    } catch (_) {
+      throw const CreditPaymentQueued();
     }
+
+    throw const CreditPaymentQueued();
+  }
+
+  Future<CreditPaymentRow> _applyPaymentSuccess(
+    String id,
+    String mechanicId,
+    String wireAmount,
+    String? note,
+    Map res,
+  ) async {
+    final resMap = Map<String, dynamic>.from(res);
+    final serverId = (resMap['id'] ?? id) as String;
+    final receiptNo = (resMap['receiptNo'] ?? resMap['receipt_no'] ?? '') as String;
+    final paymentDate = stampOrNull(resMap['date']) ?? DateTime.now();
+    final creditBalanceAfter = moneyOrNull(resMap['mechanicCreditBalanceAfter'] ?? resMap['mechanic_credit_balance_after']);
+
+    final paymentRow = CreditPaymentRow(
+      id: serverId,
+      receiptNo: receiptNo,
+      mechanicId: mechanicId,
+      amount: money(wireAmount),
+      date: paymentDate,
+      note: note,
+    );
+
+    await db.transaction(() async {
+      await db.into(db.creditPayments).insertOnConflictUpdate(paymentRow);
+      if (creditBalanceAfter != null) {
+        await (db.update(db.mechanics)..where((t) => t.id.equals(mechanicId))).write(
+          MechanicsCompanion(
+            creditBalance: Value(creditBalanceAfter),
+          ),
+        );
+      }
+      await (db.delete(db.pendingCreditPayments)..where((t) => t.id.equals(id))).go();
+    });
+
+    return paymentRow;
   }
 
   @override
   Future<void> flushPendingCreditPayments() async {
     if (!writesToServer) return;
-    await (_flushing ??= _drain().whenComplete(() => _flushing = null));
-  }
 
-  Future<void> _drain() async {
-    final queued =
-        await (db.select(db.pendingCreditPayments)
-              ..where((t) => t.rejectedCode.isNull())
-              ..orderBy([(t) => OrderingTerm.asc(t.createdAt)]))
-            .get();
-    for (final p in queued) {
-      if (!_sending.add(p.id)) continue;
+    final pendingList = await (db.select(db.pendingCreditPayments)
+          ..where((t) => t.rejectedCode.isNull())
+          ..orderBy([(t) => OrderingTerm.asc(t.createdAt)]))
+        .get();
+
+    for (final item in pendingList) {
       try {
-        await _send(p);
-      } on ApiException catch (e) {
-        // Still no verdict (5xx, 429, 401): stop, and keep the order for next time.
-        if (!_isVerdict(e)) return;
-        // A refusal nobody is watching: the cash is taken, so the row is kept for
-        // a person to settle — never retried, never silently dropped.
-        await (db.update(
-          db.pendingCreditPayments,
-        )..where((t) => t.id.equals(p.id))).write(
-          PendingCreditPaymentsCompanion(
-            rejectedCode: Value(e.code),
-            rejectedMessage: Value(e.thaiMessage),
-          ),
+        final body = {
+          'id': item.id,
+          'amount': item.amount,
+          'paymentMethod': item.paymentMethod,
+          if (item.note != null && item.note!.isNotEmpty) 'note': item.note,
+          if (item.allowOverpayment) 'allowOverpayment': true,
+        };
+
+        final res = await apiClient.post(
+          '/api/v1/mechanics/${item.mechanicId}/credit-payments',
+          body: body,
+          headers: {'Idempotency-Key': item.idempotencyKey},
         );
+
+        if (res is Map) {
+          await _applyPaymentSuccess(item.id, item.mechanicId, item.amount, item.note, res);
+        }
+      } on ApiException catch (e) {
+        if (e.statusCode == 401) {
+          break;
+        }
+        if (isVerdict(e)) {
+          await (db.update(db.pendingCreditPayments)..where((t) => t.id.equals(item.id))).write(
+            PendingCreditPaymentsCompanion(
+              rejectedCode: Value(e.code),
+              rejectedMessage: Value(e.thaiMessage),
+            ),
+          );
+        }
+        break;
       } catch (_) {
-        return;
-      } finally {
-        _sending.remove(p.id);
+        break;
       }
     }
-  }
-
-  /// 401 is not an answer about the payment — only that nobody is signed in — so
-  /// unlike [isVerdict] it leaves the payment queued.
-  bool _isVerdict(ApiException e) => isVerdict(e) && e.statusCode != 401;
-
-  /// One POST of [p], verbatim; on success the server's row and balance are
-  /// patched in and [p] leaves the outbox, all in one transaction.
-  Future<CreditPaymentRow> _send(PendingCreditPaymentRow p) async {
-    final res = await apiClient.post(
-      '/api/v1/mechanics/${p.mechanicId}/credit-payments',
-      body: <String, dynamic>{
-        'id': p.id,
-        'amount': p.amount,
-        'paymentMethod': p.paymentMethod,
-        'note': ?p.note,
-        if (p.allowOverpayment) 'allowOverpayment': true,
-      },
-      headers: {'Idempotency-Key': p.idempotencyKey},
-    );
-    final data = (res as Map).cast<String, dynamic>();
-    final row = CreditPaymentRow(
-      id: data['id'] as String,
-      receiptNo: data['receiptNo'] as String,
-      mechanicId: data['mechanicId'] as String,
-      amount: money(data['amount']),
-      date: stamp(data['date']),
-      note: data['note'] as String?,
-    );
-    await db.transaction(() async {
-      await db.into(db.creditPayments).insertOnConflictUpdate(row);
-      await (db.update(
-        db.mechanics,
-      )..where((t) => t.id.equals(p.mechanicId))).write(
-        MechanicsCompanion(
-          creditBalance: keepMoney(
-            moneyOrNull(data['mechanicCreditBalanceAfter']),
-          ),
-          updatedAt: Value(DateTime.now()),
-        ),
-      );
-      await (db.delete(
-        db.pendingCreditPayments,
-      )..where((t) => t.id.equals(p.id))).go();
-    });
-    return row;
   }
 }
