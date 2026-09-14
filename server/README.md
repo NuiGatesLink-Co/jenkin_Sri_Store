@@ -695,8 +695,11 @@ ledger's row count across the whole lifecycle.
 - **Quotes: any role, both device roles; convert is `pos` only.** Every write takes an
   `Idempotency-Key`. A QT number comes from `DocNumberService` in the token's device series, so a
   session with no device token is `403 DEVICE_ROLE_FORBIDDEN`.
-- **`validUntil = now + (validDays ?? 30) × 24h`.** This is the Dart data layer's literal; the
-  server never reads `settings.quote_valid_days`, and the caller passes that value, as Checkout does.
+- **`validUntil = now + (validDays ?? 30) × 24h`.** This is the Dart data layer's literal. The
+  server never reads `settings.quote_valid_days`, and neither does the Flutter client:
+  `_handleSaveQuote` (`checkout_screen.dart:515`) passes no `validDays`, so every quote gets 30
+  days whatever the setting says. The JS screen used to pass `quoteValidDays`; that is a
+  pre-existing JS→Flutter gap, not something this server closes.
 - **`isExpired` is `valid_until < now()`, evaluated at read time on every quote whatever its
   status. `isConverted` is `status = 'converted'`** — `QuoteRowStatus`. The stored status is never
   rewritten to `'expired'`. `?status=open|expired|converted` is `quotes_screen.dart`'s
@@ -708,6 +711,8 @@ ledger's row count across the whole lifecycle.
   `409 QUOTE_ALREADY_CONVERTED`. The screen's old convert, `updateQuote(status: 'converted')` followed
   by `POST /sales`, is the half-finished state `02_API_SCREENS.md §3.8` calls out, so it is not
   reachable here. `DELETE` works on any quote, as the screen allows.
+- **Convert is offered on `!converted && !expired`** (`quotes_screen.dart:559`), not on
+  `status = 'open'`, so an imported row stored as e.g. `'cancelled'` but still valid converts.
 - **Convert body = `POST /sales` minus lines and money** (`id`, `paymentMethod`, customer,
   mechanic, `mechanicDelta`, `overrideCreditLimit`). The lines, prices, discount and total are
   the saved quote's. Sending any of them is a 400: an edited cart is a different bill, and a
@@ -722,11 +727,22 @@ ledger's row count across the whole lifecycle.
   - Any other `id` gets `409 QUOTE_ALREADY_CONVERTED`, with `details.convertedSaleId`.
   - The replay check runs before the expiry check, so a quote converted on its last day still
     replays the next morning.
+  - 🔴 **A convert retry must reuse its `Idempotency-Key`.** A retry with a fresh key on a quote
+    that has since been deleted (DELETE works on converted quotes, as in Dart) or purged answers
+    `404 QUOTE_NOT_FOUND`, and a client that reads every 4xx as a verdict would ring the bill
+    up again. The key replay does not read the quote, so it still answers the original.
+  - A replay through the bill `id` re-reads the quote, so `quote.isExpired` is recomputed at
+    read time: a replay the next day can differ from the original in that one field. A key
+    replay returns the stored body unchanged.
   - An open quote whose bill `id` is already taken is `409 SALE_ID_REUSED`. Otherwise
     `existingSale` would replay an unrelated bill, and the quote would be marked converted into it.
+- 🔴 **Divergence from Dart, open for the owner (02 §3.8):** Checkout drops short or
+  non-catalogue lines from a loaded quote and lets staff edit the cart. Convert here is
+  all-or-nothing. A quote that cannot convert is therefore rung up with `POST /sales`, stays
+  `open`, and can later be converted into a second bill.
 - **Parked sales: `pos` only, reads included** (ADR-0004). The body is `{ payload: {...} }`, stored
-  verbatim as JSONB. The list is tenant-wide, newest first, and not filtered by device. Whether a till may see another device's cart is
-  an open question for the owner. **`DELETE` returns the deleted row, so the delete is the
+  verbatim as JSONB. The list is tenant-wide, newest first, and not filtered by device.
+  Whether a till may see another device's cart is an open question for the owner. **`DELETE` returns the deleted row, so the delete is the
   recall.** When two tills recall the same bill, one `DELETE … RETURNING` finds it and the other
   gets `404 PARKED_SALE_NOT_FOUND`.
 
