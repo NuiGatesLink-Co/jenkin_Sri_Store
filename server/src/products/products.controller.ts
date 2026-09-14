@@ -11,12 +11,12 @@ import {
   Req,
   Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Paginated, pageParams } from '../common/paginated.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { isoDate } from '../people/people.dto.js';
 import {
   parseProductCreate,
@@ -38,6 +38,7 @@ export class ProductsController {
   constructor(
     private readonly products: ProductsService,
     private readonly suppliers: SuppliersService,
+    private readonly idempotency: IdempotencyService,
   ) {}
 
   @Get()
@@ -102,48 +103,72 @@ export class ProductsController {
   }
 
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
   create(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Product> {
-    requireManager(req);
-    return this.products.create(parseProductCreate(body));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        requireManager(req);
+        return this.products.create(parseProductCreate(body));
+      },
+    );
   }
 
   @Patch(':id')
-  @UseInterceptors(IdempotencyInterceptor)
   update(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Product> {
-    requireManager(req);
-    return this.products.update(id, parseProductPatch(body));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.products.update(id, parseProductPatch(body));
+      },
+    );
   }
 
   @Delete(':id')
-  @UseInterceptors(IdempotencyInterceptor)
   delete(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ id: string; deleted: true }> {
-    requireManager(req);
-    return this.products.delete(id);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.products.delete(id);
+      },
+    );
   }
 
   /** Both device roles (02_API_SCREENS.md §4): stock, unlike the drawer, is not `pos`-only. */
   @Post(':id/adjust-stock')
-  @UseInterceptors(IdempotencyInterceptor)
   adjustStock(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<StockAdjustmentResult> {
-    requireManager(req);
-    return this.products.adjustStock(id, parseStockAdjustment(body), {
-      userId: req.user.userId,
-      deviceId: req.user.deviceId,
-    });
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        requireManager(req);
+        return this.products.adjustStock(id, parseStockAdjustment(body), {
+          userId: req.user.userId,
+          deviceId: req.user.deviceId,
+        });
+      },
+    );
   }
 }

@@ -10,12 +10,12 @@ import {
   Req,
   Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
 import { Paginated, pageParams } from '../common/paginated.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { isoDate } from '../people/people.dto.js';
 import type { MovementOut } from '../sales/sales.service.js';
 import {
@@ -32,7 +32,10 @@ import { SuppliersService, type Supplier } from './suppliers.service.js';
 @Controller('categories')
 @UseGuards(TenantGuard)
 export class CategoriesController {
-  constructor(private readonly categories: CategoriesService) {}
+  constructor(
+    private readonly categories: CategoriesService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   @Get()
   async list(@Res({ passthrough: true }) res: Response): Promise<Category[]> {
@@ -42,23 +45,35 @@ export class CategoriesController {
   }
 
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
   create(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Category> {
-    requireManager(req);
-    return this.categories.create(parseCategoryCreate(body).name);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        requireManager(req);
+        return this.categories.create(parseCategoryCreate(body).name);
+      },
+    );
   }
 
   @Delete(':name')
-  @UseInterceptors(IdempotencyInterceptor)
   delete(
     @Param('name') name: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ name: string; deleted: true }> {
-    requireManager(req);
-    return this.categories.delete(name);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.categories.delete(name);
+      },
+    );
   }
 }
 
@@ -66,37 +81,58 @@ export class CategoriesController {
 @Controller('suppliers')
 @UseGuards(TenantGuard)
 export class SuppliersController {
-  constructor(private readonly suppliers: SuppliersService) {}
+  constructor(
+    private readonly suppliers: SuppliersService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   @Post()
-  @UseInterceptors(IdempotencyInterceptor)
   create(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Supplier> {
-    requireManager(req);
-    return this.suppliers.create(parseSupplierCreate(body));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 201),
+      res,
+      () => {
+        requireManager(req);
+        return this.suppliers.create(parseSupplierCreate(body));
+      },
+    );
   }
 
   @Patch(':id')
-  @UseInterceptors(IdempotencyInterceptor)
   update(
     @Param('id') id: string,
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Supplier> {
-    requireManager(req);
-    return this.suppliers.update(id, parseSupplierPatch(body));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.suppliers.update(id, parseSupplierPatch(body));
+      },
+    );
   }
 
   @Delete(':id')
-  @UseInterceptors(IdempotencyInterceptor)
   delete(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<{ id: string; deleted: true }> {
-    requireManager(req);
-    return this.suppliers.delete(id);
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.suppliers.delete(id);
+      },
+    );
   }
 }
 

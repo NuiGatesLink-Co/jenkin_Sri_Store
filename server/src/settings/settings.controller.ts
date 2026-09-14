@@ -7,11 +7,11 @@ import {
   Req,
   Res,
   UseGuards,
-  UseInterceptors,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
-import { IdempotencyInterceptor } from '../idempotency/idempotency.interceptor.js';
+import { idempotencyParamsOf } from '../idempotency/idempotency.runner.js';
+import { IdempotencyService } from '../idempotency/idempotency.service.js';
 import { parseSettingsPatch, type Settings } from './settings.dto.js';
 import { SettingsService } from './settings.service.js';
 
@@ -22,7 +22,10 @@ interface AuthenticatedRequest extends Request {
 @Controller('settings')
 @UseGuards(TenantGuard)
 export class SettingsController {
-  constructor(private readonly settingsService: SettingsService) {}
+  constructor(
+    private readonly settingsService: SettingsService,
+    private readonly idempotency: IdempotencyService,
+  ) {}
 
   @Get()
   async getSettings(@Res({ passthrough: true }) res: Response): Promise<Settings> {
@@ -32,13 +35,19 @@ export class SettingsController {
   }
 
   @Patch()
-  @UseInterceptors(IdempotencyInterceptor)
   updateSettings(
     @Body() body: unknown,
     @Req() req: AuthenticatedRequest,
+    @Res({ passthrough: true }) res: Response,
   ): Promise<Settings> {
-    requireManager(req);
-    return this.settingsService.updateSettings(parseSettingsPatch(body));
+    return this.idempotency.runIdempotent(
+      idempotencyParamsOf(req, 200),
+      res,
+      () => {
+        requireManager(req);
+        return this.settingsService.updateSettings(parseSettingsPatch(body));
+      },
+    );
   }
 }
 
