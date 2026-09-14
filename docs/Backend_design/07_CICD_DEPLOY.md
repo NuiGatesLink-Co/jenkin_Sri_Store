@@ -10,6 +10,12 @@
 ticket ใต้ #10: #61 `ci.4` · #62 `ci.5` · #63 `ops.1` · #64 `ops.2` · #65 `cd.1` (รอ #61 #62) · #66 `ops.3` (รอ #64) ·
 #67 `cd.2` (รอ #65) · #39 และ #44 ได้ comment ปรับขอบเขต
 
+สถานะ 2026-09-14 (ปิดรอบ): 🔴 **`.github/workflows/deploy.yml` ยังไม่มีจริง** — #67 ถูกปิดไป 2026-09-13 โดยไม่เคยมี
+workflow ใน git history (branch `feat/67-auto-deploy` ก็ไม่มี) จึงเปิด #67 ใหม่แล้ว · ลูกศร "merge → deploy.yml"
+ใน §2 และ §6.1 จึงเป็น**แบบ** ไม่ใช่ของที่ทำงานอยู่ — ตอนนี้ deploy คือรัน `ansible-playbook` ด้วยมือ ·
+ตั้งแต่ #147 ขั้น POS ใน `deploy.yml` (playbook) ใช้ `pos_compose_files` ไม่มี `monitoring.yml` ส่วน overlay อยู่ใน
+`block`/`rescue` ทั้งหมด · ยังไม่เคยรันบน VM จริง
+
 สถานะ 2026-09-14 (**#39** `ci.2`): §2 กติกา 4 ข้อและ §4 ทำจริงแล้วใน
 `.github/workflows/flutter.yml` / `server.yml` — job `changes` (`dorny/paths-filter@v4`,
 ทำงานเฉพาะ `pull_request`, มี `permissions: pull-requests: read` เพราะเรียก PR-files API) กรอง

@@ -618,9 +618,14 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   `true`, which trusts the client-written leftmost entry), and `common/client-ip.ts` `clientIp()` takes the
   rightmost `X-Forwarded-For` entry. Put a CDN or a second reverse proxy in front and every client shares one
   login bucket again (#134) — use nginx `real_ip`, not a hop-count bump.
-- 🔴 **Login throttles before it spends a connection.** The IP lockout runs before `qr.connect()`; an invalid or
-  retired device token counts against the IP bucket; the username bucket is `auth:user:<tenant>:<username>`
-  (tokenless backoffice logins share `-`). Older weaknesses are **#138**, not fixed.
+- 🔴 **Login throttles before it spends a connection, and counts before it knows the outcome** (#136, #138 → PR
+  #146). The IP lockout runs before `qr.connect()`. `consumeAttempt` is one Lua `INCR` (expiry set in the same
+  script), so concurrent attempts cannot all pass a check-then-increment. Every refusal counts — bad/retired
+  device token (IP only), unknown/ambiguous/inactive user, suspended tenant, wrong password. A success
+  `refundAttempt`s only its own IP attempt (never clears the IP bucket — that was username spraying) and clears
+  the username bucket `auth:user:<tenant>:<username>` (tokenless backoffice logins share `-`). Keys are
+  `rl:<sha256>:<window>` — the old character-replacing sanitiser made equal-length Thai usernames collide.
+  `AuthController` uses `clientIp(req)`. **Still check-then-increment:** the void manager-PIN path.
 - 🔴 **The stampede lock is on `GET /products` only**, released in `finally`. `TenantGuard` and `byId` were
   measured at 0.008 / 0.026 ms and deliberately left without one — at 1–7 ms the list lock saves duplicate
   Postgres work, not latency.
@@ -632,7 +637,15 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   (strong random values, not `.env.example`'s), then re-run `provision.yml`. A missing `ETCD_ROOT_PASSWORD` fails
   the next Ansible deploy at compose interpolation; a missing Grafana password only leaves monitoring down.
   CI is unaffected.
-- **Still open:** #138; branch protection on `main` (owner runs 07 §4); no `.github/workflows/deploy.yml` yet.
+- 🔴 **#67 was closed without its workflow.** `.github/workflows/deploy.yml` has never existed in git history
+  (not on `feat/67-auto-deploy` either); #67 is reopened. Deploys are `ansible-playbook` by hand until it lands,
+  so 07 §2's "merge → deploy.yml" arrow is design, not fact. An agent building it was stopped by the Claude Code
+  permission classifier ("Production Deploy") — it needs the owner's explicit go-ahead.
+- **Still open (2026-09-14 close-out, `docs/handoff_log/ops-closeout-138-deploy-tickets.md`):** #67; #140
+  Redis `commandTimeout`; #141 e2e runners sharing a DB; #142 ADR-0003 `tx.*` slices; #143 Flutter login
+  screen + redirect; #144 `src/devices` + `closeForRetirement` caller; #145 Thai wording for
+  `SALE_NOT_IN_OPEN_SHIFT` (owner); #148 monitoring recovery gaps; branch protection on `main` (owner runs
+  07 §4). The repo's only branches are `main` and `POC_sample_offline_first`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
