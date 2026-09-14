@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { Redis } from 'ioredis';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TenantGuard } from '../common/guards/tenant.guard.js';
-import { runInRequestContext } from '../common/request-context.js';
+import { runInTenantScope } from '../common/request-context.js';
 import { loadConfig } from '../config/config.js';
 import { createRedisClient } from './redis.module.js';
 import { TenantCache } from './tenant-cache.service.js';
@@ -221,10 +221,10 @@ describe('Redis commandTimeout (#140)', () => {
       }),
     };
     const reflector = { getAllAndOverride: vi.fn().mockReturnValue(undefined) };
-    const manager = {
+    const ds = {
       query: vi.fn(async (sql: string) => (sql.includes('FROM tenants') ? [{ status: 'active' }] : [])),
     };
-    const guard = new TenantGuard(jwtVerifier as any, reflector as any, client);
+    const guard = new TenantGuard(jwtVerifier as any, reflector as any, client, ds as any);
     const request = { headers: { authorization: 'Bearer token' } };
     const ctx = {
       switchToHttp: () => ({ getRequest: () => request }),
@@ -233,12 +233,12 @@ describe('Redis commandTimeout (#140)', () => {
     } as any;
 
     const result = await timed(() =>
-      runInRequestContext({ manager: manager as any }, () => guard.canActivate(ctx)),
+      runInTenantScope(() => guard.canActivate(ctx)),
     );
 
     expect(result.value).toBe(true);
     // The status read and the write-back each time out once; nothing waits longer.
     expect(result.ms).toBeLessThan(BOUND_MS);
-    expect(manager.query).toHaveBeenCalledWith(`SELECT status FROM tenants WHERE id = $1`, [TID]);
+    expect(ds.query).toHaveBeenCalledWith(`SELECT status FROM tenants WHERE id = $1`, [TID]);
   });
 });

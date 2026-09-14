@@ -92,8 +92,8 @@ passes only `success`/`skipped` and fails on anything else. `flutter.yml` has th
   table has `tenant_id` in its primary key, composite FKs, and indexes that start with `tenant_id`.
 - **RLS is enabled and forced** on all 25 tenant-scoped tables with one fail-closed policy:
   `tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid`. With the GUC unset
-  `pos_app` reads zero rows (no error) and cannot insert. `SET LOCAL app.tenant_id` inside the
-  request transaction is the only way in (TenantGuard, #4). `pos_app` cannot `SET row_security = off`.
+  `pos_app` reads zero rows (no error) and cannot insert. `set_config('app.tenant_id', …, true)` inside a
+  `TenantService.runTx` transaction, under the tenant `TenantGuard` named, is the only way in (#4, tx.4 #153). `pos_app` cannot `SET row_security = off`.
 - Grants: `pos_app` has `SELECT/INSERT/UPDATE/DELETE` on every table except `movements`
   (`SELECT/INSERT` — it is a ledger) and nothing on `migrations`.
 - Product search is `pg_trgm` + `ILIKE '%…%'` over `lower(part_no||' '||name||' '||name_th||' '||compat)`
@@ -233,8 +233,12 @@ voidSale(@Param('id') id: string, @Body() body: unknown, @Req() req: Authenticat
   a refused write rolls the claim back with it (the `409 CREDIT_LIMIT_EXCEEDED` → same key +
   `overrideCreditLimit` counter path depends on that), and a service that calls another write
   path (`QuotesService.convert → SalesService.create`) never claims twice — only controllers call
-  `runIdempotent`. Until `tx.4` its `runTx` joins the middleware's transaction; after it, it is
-  the transaction. `test/idempotency-money.e2e-spec.ts` pins both shapes against the tables.
+  `runIdempotent`. Since `tx.4` (#153) its `runTx` **is** the transaction — claim, work,
+  complete and commit all happen there, and the response goes out after the commit.
+  `test/idempotency-money.e2e-spec.ts` pins that against the tables, over HTTP and called
+  directly. A replay, `409 IDEMPOTENCY_KEY_REUSED` or `503 IDEMPOTENCY_KEY_IN_FLIGHT` opens a
+  transaction just for the claim; a retry waiting on a live key holds a connection for up to
+  `lock_timeout` (5 s).
 - A replay sets the stored status on `res` (hence `@Res({ passthrough: true })` — a plain
   `@Res()` would leave the response unsent and hang the request) and returns the stored body;
   the global `EnvelopeInterceptor` wraps it exactly like the original. The stored
@@ -257,7 +261,8 @@ voidSale(@Param('id') id: string, @Body() body: unknown, @Req() req: Authenticat
   "argon2 outside the transaction" cannot be two short nested `runTx` calls — they would join.
   The PIN check has to move ahead of `runIdempotent` in `SalesController.voidSale`, which changes
   one behaviour: a wrong PIN on a replayed key then gets 403 (and a denial audit row) instead of
-  the replay. tx.4's "longest void transaction" measurement still includes argon2.
+  the replay. tx.4's "longest void transaction" measurement still includes argon2 (measured on
+  #153: ~110 ms before and after; one argon2 verify alone measures ~75–90 ms on the same machine).
 
 - **Postgres is the authority.** `idempotency_keys`'s primary key `(tenant_id, key)` is
   the whole concurrency mechanism: a second request carrying a live key blocks on the
@@ -294,84 +299,68 @@ Three decisions the design docs do not cover, made here and recorded in
 
 `src/common/request-context.ts` holds the request's `{ tenantId, manager }`, and ADR-0003
 makes `TenantGuard` the one component that decides which tenant a request acts as, after
-checking `tenants.status`. This section describes two shapes: the **target** the ADR-0003
-addendum *"ใครตัดสิน กับ ใครลงมือ"* (2026-09-10) chose, and the **split that is in force
-today**. The addendum is **Proposed** and takes effect only when slice `tx.4` (#153) lands.
-Until then the split below is the correct, shipped mechanism, not a deprecated one. The
-migration is sequenced in `docs/Backend_design/adr/0003-handler-scoped-migration-plan.md`
-and tracked as #149 → #150 → #151 → #152 → #153 → #154 (`tx.0`–`tx.5`, parent #142).
+checking `tenants.status`. Since `tx.4` (#153, 2026-09-14) the ADR-0003 addendum
+*"ใครตัดสิน กับ ใครลงมือ"* is **Accepted and in force**: the transaction lives in the
+handler, not around the request. The migration that got here is recorded in
+`docs/Backend_design/adr/0003-handler-scoped-migration-plan.md` (#149 → #154, parent #142);
+`tx.5` (#154, the manager PIN outside the void transaction) is still to come.
 
-#### Target: the transaction lives in the handler (from `tx.4`)
-
-The addendum separates **who decides** the tenant from **who executes** `set_config`:
-
-| | in force today | target |
-|---|---|---|
-| decides the tenant + checks `tenants.status` | `TenantGuard` | `TenantGuard` (unchanged) |
-| where the decision is kept | `app.tenant_id` on the middleware's transaction **and** `setRequestTenant()` | request scope (`AsyncLocalStorage`) via `setRequestTenant()` |
-| runs `set_config('app.tenant_id', …, true)` | `TenantGuard` | `TenantService.runTx(fn)`, reading the tenant from that scope |
-| opens and commits the transaction | middleware opens, interceptor commits | `TenantService.runTx(fn)`, inside the handler |
+| stage | does |
+|---|---|
+| `TenantScopeMiddleware` (global, `forRoutes('*')`) | opens an empty scope — no tenant, no transaction — with `runInTenantScope()`. **Touches no database.** |
+| `TenantGuard` | checks `tenants.status` (Redis `t:{tid}:status` first; on a miss a plain pool read — `tenants` has no RLS), then `setRequestTenant()`. It runs no `set_config`. |
+| `TenantService.runTx(fn)` | reads the tenant from the scope, opens a transaction, `set_config('app.tenant_id', …, true)`, runs `fn` with the manager published, commits or rolls back, releases, then runs the `onTransactionCommit` hooks |
+| `EnvelopeInterceptor` | the only global interceptor: wraps whatever the handler returned, which is already committed |
 
 - 🔴 **`runTx(fn)` never takes a `tid`.** It reads the tenant the guard put in scope and
   throws if there is none. A `runTx(tid, fn)` shape lets any call site name another shop's
   uuid and get its rows back with no error, which is the one thing ADR-0003 exists to
-  prevent. Since `tx.1` (#150) `src/common/database/tenant.service.ts` has only `runTx(fn)`
-  (the old `run(tid, fn)` / `runTx(tid, fn)` had no caller and are gone). Since `tx.2`
-  (#151) every service and controller that reads `currentRequestContext()` wraps each
-  public method in it ("public wrapper + private `*In`"); until `tx.4` each of those calls
-  joins the middleware's transaction, and `test/runtx-join.e2e-spec.ts` pins that a void
-  or a device retirement holds one `pos_app` connection, not two. A new public method that
-  reads `currentRequestContext()` needs the same wrapper, or it 500s once `tx.4` lands —
-  `src/common/tenant-wrapper.spec.ts` fails on one that lacks it (its allowlist is empty since
-  `tx.3` #152 deleted `IdempotencyInterceptor`). For `tx.4`: the
-  owner-role checks in `BackupController.exportTenantData` / `getJobStatus` and
-  `QuotesController.purgeQuotes` now run *inside* `runTx`, after `authorisedTenantId()`, and
-  those handlers touch no table (BullMQ only) — so after `tx.4` a 403 opens a transaction,
-  and `test/backup.spec.ts`'s pass-through stub tests an order production no longer has.
-  They are candidates for reading `authorisedTenantId()` directly instead of `runTx`.
-- **`runTx` joins, it does not nest.** A `runTx` inside an open transaction (the
-  middleware's, until `tx.4`, or an outer `runTx`) reuses its manager. That is what lets
-  `tx.1`–`tx.3` land with no behaviour change, and it is what stops
-  `closeForRetirement → close()` or `VoidService → SaleReadsService.byId()` from asking
-  for a second connection.
-- **A suspended tenant is still never named.** The guard refuses before
-  `setRequestTenant()`, so `runTx` has no tenant to `set_config` and RLS shows nothing.
-  There is still no separate `TenantInterceptor`.
-- **The footgun that becomes easier to reach for is an injected `DataSource`** (it exists
-  today too: `AuthService` and `VoidService`'s audit hold their own, on purpose). Forgetting `runTx` and calling
-  `currentRequestContext()` still throws (a loud 500). Querying through a bare
-  `DataSource` answers **200 with zero rows**, and an `UPDATE` reports success having
-  changed nothing. `tx.1` adds `src/common/tenant-door.spec.ts`: a source scan that fails
-  when a file outside an allowlist injects `DataSource`, with a reason on each allowlist
-  line. The allowlist is built from today's tree, not from the plan's 12-file count.
-- `tx.4` deletes `RequestContextMiddleware`, `TransactionInterceptor`,
-  `OWNED_BY_INTERCEPTOR`, the `res.on('close')` backstop and `TENANT_ROUTES`, and **adds**
-  `TenantScopeMiddleware` (global, `forRoutes('*')`, touches no DB) so every request still
-  has a scope — without it `setRequestTenant()` throws, `onTransactionCommit` runs its hook
-  immediately instead of after commit, and `invalidateAfterCommit` throws. The guard's
-  status probe moves to a plain pool read (`tenants` has no RLS, and it is then the
-  request's first connection, not a second). Two users of today's request transaction that
-  the 2026-09-10 plan does not name must be carried across by then:
-  `onTransactionCommit` / `TenantCache.invalidateAfterCommit` (post-commit hooks that
-  `TransactionInterceptor` runs today) and `RateLimitService.readPlan` (reads on the request
-  transaction inside a savepoint, #162). 🔴 Also, once no request transaction exists,
-  `Promise.all([runTx(a), runTx(b)])` takes **two** connections at once (siblings do not
-  join each other) — the #162 pool-deadlock shape under a burst. Today both join the
-  middleware's transaction, so any such call site must be folded into one `runTx` by `tx.4`.
-  And a joined `runTx` never rolls back on its own: catching its error does not undo its
-  writes (a Postgres error leaves the owner aborted, 25P02).
-
-#### In force until `tx.4`: middleware → guard → interceptor
-
-`canActivate` returns before the handler runs, so a guard can neither hold a transaction
-open across the handler nor commit afterwards. #75 therefore shipped a split, and ADR-0003
-holds because only the guard names the tenant:
-
-| stage | does |
-|---|---|
-| `RequestContextMiddleware` | opens the transaction and the scope: `runInRequestContext({ manager }, next)` |
-| `TenantGuard` | checks `tenants.status` (Redis `t:{tid}:status` first; on a miss, read on that manager), then `set_config('app.tenant_id', …, true)` and `setRequestTenant()` |
-| `TransactionInterceptor` (global, after `EnvelopeInterceptor`) | commits on success, rolls back on error, before the response is sent; then runs `onTransactionCommit` hooks |
+  prevent. Since `tx.1` (#150) `src/common/database/tenant.service.ts` has only `runTx(fn)`.
+- **Every public method that reads `currentRequestContext()` wraps itself in `runTx`**
+  ("public wrapper + private `*In`", `tx.2` #151), and every idempotent write route claims
+  through `IdempotencyService.runIdempotent`, which opens the `runTx` the handler's services
+  join (`tx.3` #152). A method that skips the wrapper 500s — there is no request transaction
+  to fall back on — and `src/common/tenant-wrapper.spec.ts` fails on it before it ships.
+- **A new controller needs no config entry.** There is no `TENANT_ROUTES` list any more: the
+  scope is global and the transaction is the handler's. `test/tenant-scope.e2e-spec.ts` mounts
+  a guarded controller from a test module and proves it answers under its tenant.
+- **`runTx` joins, it does not nest.** A `runTx` inside an outer `runTx` reuses its manager,
+  which stops `closeForRetirement → close()` or `VoidService → SaleReadsService.byId()` from
+  asking for a second connection (`test/runtx-join.e2e-spec.ts`). A joined `runTx` never rolls
+  back on its own: catching its error does not undo its writes (a Postgres error leaves the
+  owner aborted, 25P02). 🔴 Siblings do **not** join each other:
+  `Promise.all([runTx(a), runTx(b)])` takes two connections at once — the #162 deadlock shape
+  under a burst. No call site does this today (`Promise.all` in `src/` is only the health probe
+  and Redis/BullMQ shutdown); fold any future one into a single `runTx`.
+- **A suspended tenant is never named.** The guard refuses before `setRequestTenant()`, so
+  `runTx` has no tenant to `set_config` and cannot open a transaction for that shop. There is
+  still no separate `TenantInterceptor`.
+- **`onTransactionCommit` needs an open transaction.** Outside any scope, or in a request scope
+  outside `runTx`, it throws — there is no commit to wait for, and running the hook at once (the
+  old outside-a-request behaviour) or parking it on a scope nothing ends would be silently wrong.
+  `TenantCache.invalidateAfterCommit` checks the same thing with its own message.
+- **A guard-refused request opens no transaction.** A 401 (no or bad token) takes no
+  connection at all. A 403 on a cold cache takes at most two short pool reads (the rate
+  limiter's `SELECT plan`, the guard's `SELECT status`), each returned at once, and never a
+  `runTx` or a `set_config` (`test/tenant-scope.e2e-spec.ts` counts them exactly).
+  `/health/live` takes no connection and `/health/ready` one (`SELECT 1`).
+- **The footgun that is easier to reach for is an injected `DataSource`.** Forgetting `runTx`
+  and calling `currentRequestContext()` throws (a loud 500). Querying through a bare
+  `DataSource` answers **200 with zero rows**, and an `UPDATE` reports success having changed
+  nothing. `src/common/tenant-door.spec.ts` is a source scan that fails when a file outside an
+  allowlist reaches for a pool, with a reason on each allowlist line (the guard is on it for
+  its status read), and it polices who may call `setRequestTenant` (the guard),
+  `runInTransaction` (`runTx`) and `runInRequestContext` (no production code — a unit-test seam).
+- Known leftovers, noted rather than changed in `tx.4`: the owner-role checks in
+  `BackupController.exportTenantData` / `getJobStatus` and `QuotesController.purgeQuotes` run
+  inside `runTx` although those handlers touch no table (BullMQ only), so a 403 there opens and
+  rolls back a transaction; and `purgeQuotes` enqueues its job inside the transaction, so a
+  rollback after the enqueue (a failed idempotency `complete`) still leaves the job queued —
+  harmless because the job id is deterministic and the purge is idempotent, whereas moving it to
+  `onTransactionCommit` would make a lost enqueue after a committed 202 silent. And the cached
+  reads (`ProductsService.list`, `CategoriesService.listCached`, `SettingsService.getSettingsCached`)
+  open their `runTx` before checking Redis, so a hit still costs a transaction and a
+  `singleFlight` waiter idles in one — #173.
 
 **How the tenant is named: `SELECT set_config('app.tenant_id', $1, true)`, never
 `SET LOCAL app.tenant_id = $1`.** `SET` is a utility statement — Postgres does not plan
@@ -385,36 +374,24 @@ which `set_config(..., true)` is; `src/common/tenant-scope.spec.ts` scans `src/`
 literal form cannot come back.
 
 `currentRequestContext()` throws rather than defaulting, so a route without the guard
-fails closed instead of reading someone's data. It fails closed twice: outside the scope,
-and inside it before the guard has named a tenant. `RequestContextMiddleware` opens the
-transaction only for the routes covered by `TENANT_ROUTES` (`src/app.module.ts`), not
-globally: a transaction per liveness probe is a pool slot spent on nothing. `/auth/*` stays
-out except `GET /auth/me`, because ADR-0009 requires a failed login's audit row to survive
-the rollback (and `/auth/token` would otherwise hold an idle-in-transaction connection
-across its argon2 verify). **Until `tx.4`, a new `TenantGuard` route must be covered by
-`TENANT_ROUTES`**, or the guard finds no request transaction and answers 500. The middleware
-matches by path, not by class: `PurchasingController` is not listed but works, because it
-shares `purchase-orders` with `PurchaseOrdersController`.
-
-A guard that throws never reaches an interceptor, so the response's own `close` event is
-the backstop that rolls back and returns the connection to the pool. `TransactionInterceptor`
-claims the transaction (`qr.data[OWNED_BY_INTERCEPTOR]`) as soon as it runs, and the backstop then stands aside:
-Nest does not cancel a handler when the client disconnects, so on a mid-sale abort an
-unclaimed backstop would roll back and release **underneath statements still in flight**,
-handing a live query queue to whichever request took that connection next.
+fails closed instead of reading someone's data. It fails closed three times: outside the
+scope, before the guard has named a tenant, and outside `runTx`. `/auth/*` carries no
+`TenantGuard` except `GET /auth/me`, because ADR-0009 requires a failed login's audit row to
+survive a rollback (and `/auth/token` must not hold a transaction across its argon2 verify):
+`AuthService` sets `app.tenant_id` on its own runners.
 
 🔴 **Two rules for anything that runs inside a request:**
 
-1. **Never take a second connection from the request pool — there is no exception.** The
-   request already holds one. Under load every in-flight request holding one and waiting
-   for another is a pool deadlock — they all sit there until `connectionTimeoutMillis`
-   fires and all return 500, and the 500s are *other people's requests*, not the one that
-   misbehaved. Read through `currentRequestContext().manager`. (`tenants` and
-   `platform_admins` are the two tables with no RLS, so until `tx.4` even a status probe
-   goes through it; in the target the probe is a plain pool read, because it is then the
-   request's first connection.)
+1. **Never take a second connection from the request pool while holding one.** Under load
+   every in-flight request holding one and waiting for another is a pool deadlock — they all
+   sit there until `connectionTimeoutMillis` fires and all return 500, and the 500s are
+   *other people's requests*, not the one that misbehaved. Inside `runTx`, read through its
+   manager (`currentRequestContext().manager`). Before a handler's `runTx` — in a guard — a
+   plain pool read is the request's first connection and is returned before `runTx` asks for
+   one, which is why `TenantGuard` (status) and `RateLimitService.readPlan` (plan) read on the
+   pool. Never call either from inside a `runTx`.
 
-   Work that genuinely cannot run in the request transaction — today that is exactly one
+   Work that genuinely cannot run in the handler's transaction — today that is exactly one
    call site, `VoidService`'s refusal audit, which must survive the rollback the 403
    causes — takes its connection from **`AUDIT_DATA_SOURCE`** (`src/infra/db.module.ts`):
    a separate pool of 2, same `pos_app` role, so RLS still applies and the write still has
@@ -437,21 +414,16 @@ handing a live query queue to whichever request took that connection next.
    denial path to be written follows that shape: its own pool, its own `set_config`, and
    a `catch` that keeps a failed audit from turning a 403 into a 500.
 
-   🔴 **Guards count as "inside a request" (#162).** The global `TenantRateLimitGuard` runs
-   after the middleware has taken the request's connection, and `RateLimitService` looked
-   up `tenants.plan` on a cold `t:{tid}:plan` cache with `DataSource.query` — a second
-   pool connection. Since #75 that read as a "local machine limit" of the request-wide
-   transaction: `sales.e2e-spec.ts` › *200 concurrent bills* and `shifts.e2e-spec.ts` ›
-   *ten simultaneous opens* failed on dev machines and passed in CI. It was this deadlock.
-   Its signature is that **successes equal `DB_POOL_SIZE` exactly** (8→8, 20→20, 50→50 was
-   measured and misread as starvation) after a full `connectionTimeoutMillis`: `DB_POOL_SIZE`
-   requests each hold one connection and wait for a second, the rest time out in the
-   middleware, and the holders fail open to `'basic'` and finish. Starvation would drain —
-   each bill holds a connection for milliseconds. Whether it trips depends on every
-   middleware connecting before any guard runs, which slow connection setup on Windows
-   guarantees and a Linux runner usually dodged. Production's plan cache goes cold every
-   five minutes, so any burst of `DB_POOL_SIZE` requests at that moment stalled an
-   instance for ten seconds.
+   🔴 **Guards count as "inside a request" (#162).** Before `tx.4` the global
+   `TenantRateLimitGuard` ran after the request-wide middleware had taken the request's
+   connection, and `RateLimitService` looked up `tenants.plan` on a cold `t:{tid}:plan` cache
+   with `DataSource.query` — a second pool connection. Since #75 that read as a "local machine
+   limit" of the request-wide transaction: `sales.e2e-spec.ts` › *200 concurrent bills* and
+   `shifts.e2e-spec.ts` › *ten simultaneous opens* failed on dev machines and passed in CI. It
+   was this deadlock. Its signature is that **successes equal `DB_POOL_SIZE` exactly** (8→8,
+   20→20, 50→50 was measured and misread as starvation) after a full
+   `connectionTimeoutMillis`. Production's plan cache goes cold every five minutes, so any
+   burst of `DB_POOL_SIZE` requests at that moment stalled an instance for ten seconds.
 
    | clean `main`, cache reset | before | after |
    |---|---|---|
@@ -459,13 +431,13 @@ handing a live query queue to whichever request took that connection next.
    | 200 concurrent bills, pool 8 | 8 bills in 10.5 s | 50 bills, test body ~1.8 s |
    | 6 opens + 6 reads, pool 2 | `200,200,500×10` in 5065 ms | all `200` |
 
-   The plan is now read on the request's own transaction, inside a savepoint so a failed
-   lookup still fails open without aborting the transaction; `test/rate-limit-pool.e2e-spec.ts`
-   forces the burst at pool 2 with a cold cache. Neither case is a pool-size limit, and the
-   `tx.*` slices (#149–#154) were never needed to make them pass.
+   #162 fixed it by reading on the request transaction inside a savepoint. `tx.4` removed that
+   transaction, so the plan is a plain pool read again — safe now for the reason in rule 1.
+   `test/rate-limit-pool.e2e-spec.ts` forces the burst at pool 2 with a cold cache and is the
+   gate for both shapes.
 2. **An async Express middleware must never reject.** Express does not await it, so a
-   rejection is an unhandled rejection, which Node answers by killing the worker. Both
-   `RequestContextMiddleware` failure paths write a response instead.
+   rejection is an unhandled rejection, which Node answers by killing the worker.
+   `TenantScopeMiddleware` does no I/O at all; keep it that way.
 
 ## Document numbers (#19)
 
@@ -512,7 +484,7 @@ a busy Saturday.
 ## The sale transaction (#20)
 
 `POST /api/v1/sales` — `pos` device only, `Idempotency-Key` mandatory. Everything runs
-inside the request transaction, in this order, and the order is the design:
+inside one transaction (the route's `runIdempotent` → `runTx`), in this order, and the order is the design:
 
 1. the idempotency claim (interceptor, before the handler), then the client-`id` replay
    (`existingSale`), then **the device's open drawer, read `FOR SHARE`** — none open is
@@ -727,7 +699,7 @@ Not audited: the PIN is already proven, like the other business-rule refusals.
 
 Refusals are audited too (`sale.void.denied`, with the reason). This is a four-digit PIN
 with no per-user rate limit until #44; brute-forcing it must not be invisible. That row is
-written on its own connection because the 403 rolls the request transaction back — an
+written on its own connection because the 403 rolls `runIdempotent`'s transaction back — an
 audit row written on it would vanish along with the attempt it was recording. The
 connection comes from `AUDIT_DATA_SOURCE`, a two-connection pool of its own; taking it
 from the request pool made a denial a request queuing for a second connection, which
@@ -1131,12 +1103,13 @@ scanned. The old keys become unreachable at once and expire on their own TTL. `K
 - Request-scoped writes call `TenantCache.invalidateAfterCommit(tid, ns)`. It goes through
   `onTransactionCommit`, the same hook the BullMQ enqueues use, so "after the transaction" is
   defined in one place.
-- `TransactionInterceptor` runs the hooks after `COMMIT` and before the response is sent, so a
-  read right after a `201` is already fresh.
+- `TenantService.runTx` runs the hooks after `COMMIT` and release, before the handler returns
+  (so before the response is sent), so a read right after a `201` is already fresh.
 - A rollback (a thrown error, or a 409) drops the hooks. Each call is also placed after every
   refusal check.
-- 🔴 `invalidateAfterCommit` **throws outside a request context.** There, `onTransactionCommit`
-  would run the hook immediately, which is before the caller's own commit.
+- 🔴 `invalidateAfterCommit` **throws with no open transaction** — outside a request, or in a
+  request outside `runTx` (tx.4 #153). So does `onTransactionCommit` itself: there is no commit
+  to wait for, and running the hook at once would run it before the caller's own commit.
 - The platform import runs its own `ADMIN_DATA_SOURCE` transaction. It calls `invalidate()` for all
   four namespaces after `await adminDs.transaction(…)` resolves.
 - A failed invalidation `SET` is logged as `cache invalidation failed`. A failed post-commit hook of

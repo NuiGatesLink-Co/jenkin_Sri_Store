@@ -41,22 +41,22 @@ WHERE id = tenant_id AND status='active')` จะกลายเป็น **subq
 
 ### ใครตัดสิน กับ ใครลงมือ — เพิ่ม 2026-09-10 หลังวัดต้นทุน connection
 
-> **สถานะ: เสนอ (Proposed) — ยังไม่มีผลบังคับ** จะมีผลเมื่อสไลซ์ **`tx.4`** ของ
+> **สถานะ: Accepted — มีผลบังคับตั้งแต่ 2026-09-14** เมื่อสไลซ์ **`tx.4`** ของ
 > [`0003-handler-scoped-migration-plan.md`](0003-handler-scoped-migration-plan.md) ลงจริง
-> (แผนนั้นเขียนไว้เองว่า "ยังไม่ลงมือ")
+> (landed in #153)
 >
-> จนถึงวันนั้น **กลไกที่บังคับใช้อยู่คือรูป middleware → guard → interceptor ที่ PR #75 ส่งมอบ**
+> ก่อนวันนั้นกลไกที่บังคับใช้คือรูป middleware → guard → interceptor ที่ PR #75 ส่งมอบ
 > (`RequestContextMiddleware` เปิดทรานแซกชัน → `TenantGuard` เช็ค `tenants.status` แล้วตั้ง
-> `app.tenant_id` → `TransactionInterceptor` commit) ตามข้อ 2 และข้อ 3 ข้างบน — ของชุดนั้น
-> **ไม่ผิดและยังเป็นของที่ถูกต้องวันนี้**
+> `app.tenant_id` → `TransactionInterceptor` commit) — `tx.4` ถอดของชุดนั้นออกครบตามรายการใน
+> **"สิ่งที่ตายไปพร้อมกัน"** และเพิ่ม `TenantScopeMiddleware` (global, ไม่แตะ DB) แทน
+> `runTx(tid, fn)` ถูกลบไปตั้งแต่ `tx.1` (#150)
 >
-> ดังนั้นอ่านหัวข้อนี้แบบนี้: รายชื่อใน **"สิ่งที่ตายไปพร้อมกัน"** (`RequestContextMiddleware`,
-> `TransactionInterceptor`, `OWNED_BY_INTERCEPTOR`, backstop บน `res.on('close')`,
-> `TENANT_ROUTES`) คือ **รายการที่จะถูกถอนออกตอน `tx.4`** ไม่ใช่ข้อห้ามที่มีผลตั้งแต่วันนี้
-> และคำว่า **"ห้ามใช้"** ที่ผูกกับ `runTx(tid, fn)` คือ **ห้ามสร้าง call site ใหม่ตามลายเซ็นนั้น**
-> — ตัวลายเซ็นยังอยู่ในโค้ดจนกว่า `tx.1` จะเปลี่ยนให้เป็น `runTx(fn)`
+> ตัวเลข 112 → 18–28 ms ด้านล่างวัดจาก prototype ที่ย้าย argon2 ออกนอกทรานแซกชันไปด้วย
+> วัดซ้ำบน `main` ตอน `tx.4` (#153, `server/test/tx-hold-measure.e2e-spec.ts`): void ยังค้าง
+> ~110 ms ทั้งก่อนและหลัง เพราะ argon2 ของ PIN ยังอยู่ในทรานแซกชันของ `runIdempotent`
+> จนกว่า `tx.5` (#154) จะย้ายการเช็ค PIN ออกไปก่อน — `POST /sales` ลดจาก ~19 เหลือ ~16.5 ms
 >
-> บรรทัดนี้เพิ่ม **วันที่มีผล** อย่างเดียว เหตุผลและตัวเลขทั้งหมดด้านล่างยังยืนตามเดิมทุกข้อ
+> เหตุผลทั้งหมดด้านล่างยังยืนตามเดิมทุกข้อ
 
 **ปัญหาที่พบ:** ข้อ 2 ของ ADR นี้เขียนรวบ *"guard เช็คสถานะ → `SET LOCAL app.tenant_id`"*
 ไว้เป็นก้อนเดียว แล้วข้อ 3 (เพิ่ม 2026-09-04) ก็ตอกย้ำว่า **"ต้องอยู่ใน component เดียวกัน"**

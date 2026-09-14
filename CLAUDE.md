@@ -287,30 +287,34 @@ stale too. Rebuild before believing it. ~~The `200 concurrent bills` case is the
 limit~~ — **falsified by #162:** those 500s (and *ten simultaneous opens*') were a pool
 **deadlock**, not a limit. `RateLimitService` (a global guard) read `tenants.plan` on a cold cache
 with a second pool connection while the middleware held the first; successes equalled
-`DB_POOL_SIZE` exactly. It now reads on the request transaction (savepoint), both cases pass
+`DB_POOL_SIZE` exactly. #162 read it on the request transaction (savepoint); since tx.4 (#153) there is none and it is a plain pool read again. Both cases pass
 locally at pool 8, and `test/rate-limit-pool.e2e-spec.ts` pins it — see `server/README.md` rule 1.
 Read `docs/handoff_log/p6.3-shifts-drawer.md` before #30 or a device slice.
 
-🔴 **ADR-0003 was amended 2026-09-10 — the transaction is to move into the handler (not yet done).** The
-addendum's status is **Proposed** and takes effect only when slice `tx.4` lands; until then the
-middleware → guard → interceptor split that #75 shipped is the in-force mechanism (the 2026-09-11
-review found the first draft banned the very code the PR added).
-The old split (middleware opens the transaction, the guard names the tenant on it, an interceptor
-commits) was never chosen: it was forced by reading ADR-0003's "status check and `SET LOCAL` in one
-component" as also binding *where the transaction lives*. Separating **who decides the tenant**
-(the guard, unchanged) from **who executes `set_config`** (`TenantService.runTx`) keeps every ADR-0003
-guarantee and deletes the middleware, `TENANT_ROUTES`, the `res.on('close')` backstop and the global
-interceptor — and cuts the open-transaction hold from **112 ms to 18–28 ms** (measured, 4 concurrent
-voids at `DB_POOL_SIZE=2`). The migration is **not done**: it is planned as six slices `tx.0`–`tx.5`
-in `docs/Backend_design/adr/0003-handler-scoped-migration-plan.md`, and `tx.3` (idempotency) is the
-one that fails silently and as money. 🔴 **`runTx` must never take a `tid` argument** — the amendment
-is only safe because `runTx(fn)` cannot name a tenant the guard did not authorise; the
-`TenantService` used to have the `runTx(tid, fn)` signature (removed by `tx.1` #150), and bringing it back would
-silently restore exactly what ADR-0003 banned, failing as a cross-tenant read that raises nothing.
-The proving prototype is commit `0feaf94` on `worktree-agent-a1756ff02f223b4eb` (never merge it).
-The slices are tracked as issues #149 → #150 → #151 → #152 → #153 → #154 (parent #142).
-`server/README.md` *The request-context seam* describes both the target shape and the split in force
-until `tx.4` (#153); until then a new `TenantGuard` route must be covered by `TENANT_ROUTES` (the middleware matches by path).
+🔴 **ADR-0003 was amended 2026-09-10 and the amendment is in force since `tx.4` (#153, 2026-09-14) — the
+transaction lives in the handler.** The addendum's status is **Accepted**. The old split (middleware
+opens the transaction, the guard names the tenant on it, an interceptor commits) was never chosen: it
+was forced by reading ADR-0003's "status check and `SET LOCAL` in one component" as also binding
+*where the transaction lives*. Separating **who decides the tenant** (`TenantGuard`: status check,
+then `setRequestTenant()` on the scope `TenantScopeMiddleware` opens for every route) from **who
+executes `set_config`** (`TenantService.runTx`, inside the handler) keeps every ADR-0003 guarantee;
+`RequestContextMiddleware`, `TransactionInterceptor`, `OWNED_BY_INTERCEPTOR`, `TENANT_ROUTES` and
+the `res.on('close')` backstop are deleted, so **a new `TenantGuard` controller needs no config
+entry**. The prototype measured the open-transaction hold of 4 concurrent voids at `DB_POOL_SIZE=2`
+dropping from 112 ms to 18–28 ms, but that prototype also had argon2 outside the transaction: on
+`main` after `tx.4` the void still holds ~110 ms because the manager-PIN argon2 runs inside
+`runIdempotent`'s transaction until `tx.5` (#154) moves the PIN check ahead of it; `POST /sales`
+went ~19 → ~16.5 ms (`server/test/tx-hold-measure.e2e-spec.ts`, `MEASURE_TX_HOLD=1`).
+`onTransactionCommit` now **throws** with no open transaction (outside `runTx`), and the guard and
+`RateLimitService.readPlan` read `tenants` on the pool — the request's first connection, never a
+second. 🔴 **`runTx` must never take a `tid` argument** — the amendment is only safe because
+`runTx(fn)` cannot name a tenant the guard did not authorise; the `TenantService` used to have the
+`runTx(tid, fn)` signature (removed by `tx.1` #150), and bringing it back would silently restore
+exactly what ADR-0003 banned, failing as a cross-tenant read that raises nothing. 🔴 Sibling
+`Promise.all([runTx(a), runTx(b)])` takes two connections at once (the #162 deadlock shape) — fold
+them into one `runTx`. The proving prototype is commit `0feaf94` on
+`worktree-agent-a1756ff02f223b4eb` (never merge it). The slices are #149 → #154 (parent #142); only
+`tx.5` is left. `server/README.md` *The request-context seam* describes the in-force mechanism.
 
 🔴 **The e2e suite cannot tolerate a second concurrent runner on the same database** —
 `test/schema.e2e-spec.ts` tears the schema down and re-applies it. CI is safe (one Postgres per job),
@@ -662,14 +666,15 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   `docs/handoff_log/orchestrated-round-2026-09-14.md`.
   🔴 **Guards count as "inside a request" (#162):** a global guard that takes a second pool connection while the
   middleware holds the first deadlocks the pool at `DB_POOL_SIZE` concurrent requests (10 s stall, then 500s).
-  `RateLimitService.getTenantPlan` does that on a cold plan cache (every 5 min in production); it now reads on the
-  request transaction inside a savepoint. That — not a machine limit — was `200 concurrent bills`.
+  `RateLimitService.getTenantPlan` did that on a cold plan cache (every 5 min in production); #162 read it on the
+  request transaction inside a savepoint, and since tx.4 (#153) removed that transaction it is a plain pool read taken
+  before any `runTx` — nothing may take a connection before the guards. That — not a machine limit — was `200 concurrent bills`.
   🔴 **Node 24.15.0 on Windows crashes e2e workers (#160)** — `0xC0000409` in libuv's `uv__tcp_try_connect`
   (libuv#5107). Use Node **≥ 24.16.0** on Windows dev machines; e2e setup warns. CI (Linux) is unaffected.
   🔴 **Never edit files under `node_modules` for debugging** — pnpm hard-links them from one store, so the edit
   leaks into every worktree and the main checkout (it did, during #160).
-- **Still open:** #67 (needs the owner's go-ahead); #142 → slices #149–#154 (tx.0–tx.5, only #149 unblocked;
-  #151/#152 scope needs a decision — plan predates ~20 request-context users); #145 Thai wording for
+- **Still open:** #67 (needs the owner's go-ahead); #154 (tx.5, the manager PIN outside the void
+  transaction — the last #142 slice; tx.0–tx.4 = #149–#153 have landed); #145 Thai wording for
   `SALE_NOT_IN_OPEN_SHIFT` (owner); #163 device-management decisions (owner); branch protection on `main`
   (owner runs 07 §4); `ApiClient` has no request timeout (unticketed). The repo's only long-lived branches are
   `main` and `POC_sample_offline_first`.

@@ -172,10 +172,10 @@ export const MECHANIC_CREDIT = 'เครดิตช่าง';
 /**
  * The sale transaction — the heart of the system.
  *
- * Everything below runs inside the request's transaction (`RequestContextMiddleware`
- * opened it, `TransactionInterceptor` commits it), in the order #20 fixes:
+ * Everything below runs inside one transaction (the route's `runIdempotent` opens it with
+ * `TenantService.runTx`, and this service's own `runTx` joins it), in the order #20 fixes:
  *
- *   1. the idempotency claim (the interceptor, before this method is called)
+ *   1. the idempotency claim (`runIdempotent`, before this method is called)
  *      — then the client-`id` replay, then the device's open drawer `FOR SHARE`,
  *      `409 NO_OPEN_SHIFT` when there is none (owner's decision, 2026-09-13)
  *   2. lock the mechanic's row, if the bill names one, and for a credit sale check

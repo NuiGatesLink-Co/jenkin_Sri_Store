@@ -10,8 +10,9 @@ import {
   type TenantFixture,
 } from './support/fixture.js';
 
-// The seam itself: which routes get a request transaction, and what happens on the
-// paths that never reach the interceptor that commits it.
+// The seam itself: the guard names the tenant on the request scope, the handler's
+// `TenantService.runTx` opens and ends the transaction (tx.4 #153), and the paths the guard
+// refuses never take a connection at all.
 const TENANT = '22222222-8888-4888-8888-222222222222';
 
 describe('the request-context seam (e2e)', () => {
@@ -56,8 +57,8 @@ describe('the request-context seam (e2e)', () => {
   });
 
   it('serves GET /auth/me, which is the one auth route that carries the guard', async () => {
-    // The middleware is registered for this path by name, not by controller — a
-    // mistyped path would leave the guard with no transaction and 500 every call.
+    // It used to need its own `TENANT_ROUTES` entry by path; since tx.4 every route gets the
+    // scope, and the handler's `runTx` gets the transaction.
     const res = await request(app.getHttpServer())
       .get('/api/v1/auth/me')
       .set('Authorization', `Bearer ${token}`);
@@ -128,23 +129,22 @@ describe('the request-context seam (e2e)', () => {
     const before = await openConnections();
 
     for (let i = 0; i < 12; i++) {
-      // A guard that throws returns before any interceptor runs, so nothing in the
-      // interceptor chain ends the transaction the middleware opened. If the
-      // response-close backstop did not, this loop would drain the pool.
+      // A guard that throws: before tx.4 the middleware had already opened a transaction
+      // here and only a response-close backstop ended it. Now no connection is taken.
       await request(app.getHttpServer()).get('/api/v1/sales').expect(401);
       await request(app.getHttpServer())
         .get('/api/v1/sales')
         .set('Authorization', 'Bearer not-a-token')
         .expect(401);
-      // And the ordinary path, which the interceptor does end.
+      // And the ordinary path, whose `runTx` ends its own transaction.
       await request(app.getHttpServer())
         .get('/api/v1/sales')
         .set('Authorization', `Bearer ${token}`)
         .expect(200);
     }
 
-    // Give the backstop's async rollback a moment to land — it runs off the response's
-    // own `close` event, after the response has been written.
+    // A short grace period before counting (kept from when a response-close backstop
+    // released connections after the response was written).
     await new Promise((resolve) => setTimeout(resolve, 250));
     // The pool keeps idle connections, so this is not "back to zero"; what matters is
     // that 36 requests did not each strand one.

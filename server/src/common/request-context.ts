@@ -4,25 +4,20 @@ import type { EntityManager } from 'typeorm';
 /**
  * The per-request tenant and transaction that every tenant-scoped module reads.
  *
- * ADR-0003 makes `TenantGuard` the ONE component that checks `tenants.status`
- * and does `SET LOCAL app.tenant_id` — a separate tenant interceptor was considered
- * and rejected, because a route that forgot the guard would still get the GUC set
- * and read a suspended tenant's rows. Nothing else may set `app.tenant_id`.
+ * ADR-0003 (addendum *"ใครตัดสิน กับ ใครลงมือ"*, in force since tx.4 #153) separates who
+ * DECIDES the tenant from who EXECUTES it:
  *
- * A guard cannot be the whole story, though: `canActivate` returns before the
- * handler runs, so it can neither hold this scope open across the handler nor commit
- * afterwards. The wiring is therefore a split, and ADR-0003 is untouched by it
- * because only the guard still touches the tenant:
+ *   TenantScopeMiddleware  opens this scope for every request — no tenant, no transaction;
+ *                          it never touches the database
+ *   TenantGuard            checks `tenants.status`, then names the tenant on the scope
+ *                          (`setRequestTenant`) — the ONE component allowed to; a shop that
+ *                          is not `active` is never named
+ *   TenantService.runTx    opens a transaction inside the handler, `set_config`s the scope's
+ *                          tenant on it, publishes the manager, commits and releases
  *
- *   RequestContextMiddleware  opens the transaction and this scope for the whole request
- *   TenantGuard               checks `tenants.status` and `SET LOCAL app.tenant_id` on
- *                             that manager — the one component allowed to, per ADR-0003
- *   TransactionInterceptor    commits on success, rolls back on error, before the
- *                             response is sent
- *
- * `currentRequestContext()` fails closed twice over: outside the scope, and inside it
- * before the guard has named a tenant. A route that forgot the guard therefore cannot
- * reach tenant data — it gets an exception, not someone else's rows.
+ * `currentRequestContext()` fails closed three times over: outside the scope, before the
+ * guard has named a tenant, and outside `runTx`. A route that forgot the guard or the
+ * `runTx` therefore cannot reach tenant data — it gets an exception, not someone else's rows.
  */
 export interface RequestContext {
   /**
@@ -32,17 +27,16 @@ export interface RequestContext {
    */
   tenantId: string;
   /**
-   * The request's transactional EntityManager. Every tenant-scoped read and write
-   * goes through it, or it lands outside the transaction the middleware opened — and
-   * outside `SET LOCAL`, which is transaction-scoped, RLS sees no tenant at all.
+   * The transactional EntityManager `TenantService.runTx` opened. Every tenant-scoped read
+   * and write goes through it, or it lands outside that transaction — and outside the
+   * transaction-local `app.tenant_id`, RLS sees no tenant at all.
    */
   manager: EntityManager;
 }
 
 /**
- * What a scope holds before it is complete. The middleware opens a transaction with no
- * tenant named on it yet; `runInTenantScope()` (the shape `tx.4` switches to) opens a
- * scope with neither, and `TenantService.runTx` publishes the manager later.
+ * What a scope holds before it is complete. `runInTenantScope()` opens a scope with
+ * neither; the guard names the tenant and `TenantService.runTx` publishes the manager.
  */
 interface MutableRequestContext {
   tenantId: string | null;
@@ -53,8 +47,10 @@ interface MutableRequestContext {
 const storage = new AsyncLocalStorage<MutableRequestContext>();
 
 /**
- * Runs `fn` with a fresh request scope carrying `manager`'s transaction.
- * `RequestContextMiddleware` calls this; the tenant is named later, by the guard.
+ * Runs `fn` with a scope that already carries `manager` (and optionally a tenant). No
+ * production code calls it since tx.4 (#153) deleted the request-wide transaction: it is
+ * the unit-test seam for publishing a stand-in manager. Production scopes come from
+ * `runInTenantScope()` and `TenantService.runTx`.
  */
 export function runInRequestContext<T>(
   ctx: { tenantId?: string; manager: EntityManager },
@@ -68,10 +64,10 @@ export function runInRequestContext<T>(
 
 /**
  * Opens a request scope with no tenant and no transaction (ADR-0003 addendum *"ใครตัดสิน
- * กับ ใครลงมือ"*). The guard names the tenant later and `TenantService.runTx` publishes
- * the manager later still. Nothing calls it until `tx.4` replaces the middleware.
+ * กับ ใครลงมือ"*). `TenantScopeMiddleware` calls it for every request; the guard names the
+ * tenant later and `TenantService.runTx` publishes the manager later still.
  */
-export function runInTenantScope<T>(fn: () => Promise<T>): Promise<T> {
+export function runInTenantScope<T>(fn: () => T): T {
   return storage.run({ tenantId: null, manager: null }, fn);
 }
 
@@ -126,32 +122,18 @@ export function authorisedTenantId(): string {
 /**
  * The transaction already open in this scope, or null. `TenantService.runTx` only: it
  * joins this rather than take a second pooled connection while the first is still held.
- * The guard, the interceptor and `RateLimitService` use `currentRequestTransaction()`.
  */
 export function currentTransaction(): EntityManager | null {
   return storage.getStore()?.manager ?? null;
 }
 
 /**
- * The request's transaction before a tenant is known — for the two components that
- * run either side of the guard: the guard itself (which needs the manager to do
- * `SET LOCAL`) and the interceptor that commits it. Nothing else may use it except
- * `RateLimitService` below and `TenantService.runTx`, which reads the same store through
- * `currentTransaction()` — because a query through it before the guard runs sees no
- * tenant at all under RLS.
- *
- * The rate-limit exception, for the same reason the guard reads `tenants.status` here:
- * `RateLimitService` reads `tenants.plan` (no RLS) on it, because any global guard that
- * reaches for a second pool connection while the request holds this one deadlocks the
- * pool under a burst (#162).
+ * Whether this scope has a transaction open — so `onTransactionCommit` has a commit to
+ * wait for. False outside any scope, and (since tx.4 #153) false in a request scope outside
+ * `TenantService.runTx`.
  */
-export function currentRequestTransaction(): EntityManager | undefined {
-  return storage.getStore()?.manager ?? undefined;
-}
-
-/** Whether a request scope exists — so `onTransactionCommit` would actually wait for a commit. */
-export function hasRequestContext(): boolean {
-  return storage.getStore() !== undefined;
+export function hasOpenTransaction(): boolean {
+  return (storage.getStore()?.manager ?? null) !== null;
 }
 
 /** Names the tenant on the current request. `TenantGuard` only (ADR-0003). */
@@ -163,24 +145,29 @@ function requireScope(): MutableRequestContext {
   const ctx = storage.getStore();
   if (!ctx) {
     throw new Error(
-      'No request context. Tenant-scoped work must run inside runInRequestContext() ' +
-        '(RequestContextMiddleware) or runInTenantScope(); this route ran without either.',
+      'No request context. Tenant-scoped work must run inside runInTenantScope() ' +
+        '(TenantScopeMiddleware); this code ran without it.',
     );
   }
   return ctx;
 }
 
 /**
- * Registers an action to run strictly AFTER the current request transaction has
- * successfully committed (e.g. enqueuing post-processing jobs to BullMQ).
- * If the transaction rolls back or fails, these hooks are discarded.
- * If called outside an active request context, runs immediately.
+ * Registers an action to run strictly AFTER the open transaction has committed (e.g.
+ * enqueuing post-processing jobs to BullMQ). A rollback discards it.
+ *
+ * 🔴 Throws when no transaction is open — outside any scope, or in a request scope outside
+ * `TenantService.runTx`. There is no commit to wait for there: running the hook at once
+ * could run it before the caller's own commit, and parking it on a scope no transaction
+ * owns would drop it silently (since tx.4 #153 nothing ends a request-wide transaction).
  */
 export function onTransactionCommit(hook: () => Promise<void> | void): void {
   const store = storage.getStore();
-  if (!store) {
-    void hook();
-    return;
+  if (!store || store.manager === null) {
+    throw new Error(
+      'onTransactionCommit needs an open transaction. Register it inside TenantService.runTx, ' +
+        'or await your own commit and run the action directly.',
+    );
   }
   if (!store.postCommitHooks) {
     store.postCommitHooks = [];
@@ -202,7 +189,7 @@ export function takePostCommitHooks(): Array<() => Promise<void> | void> {
 
 /**
  * Executes post-commit hooks safely — the current scope's, or `hooks` if given. Called
- * ONLY by `TransactionInterceptor` and `TenantService.runTx`, after their commit.
+ * ONLY by `TenantService.runTx`, after its commit.
  */
 export async function executePostCommitHooks(
   onError?: (err: unknown) => void,

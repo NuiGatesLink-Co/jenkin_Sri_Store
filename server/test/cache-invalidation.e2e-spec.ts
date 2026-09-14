@@ -6,14 +6,12 @@ import {
   Post,
   UseGuards,
   type INestApplication,
-  type MiddlewareConsumer,
-  type NestModule,
 } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 import request, { type Response } from 'supertest';
 import type { DataSource, EntityManager } from 'typeorm';
+import { TenantService } from '../src/common/database/tenant.service.js';
 import { TenantGuard } from '../src/common/guards/tenant.guard.js';
-import { RequestContextMiddleware } from '../src/common/request-context.middleware.js';
 import {
   currentRequestContext,
   runInRequestContext,
@@ -45,31 +43,32 @@ import {
 @Controller('test-cache-rollback')
 @UseGuards(TenantGuard)
 class RollbackProbeController {
-  constructor(private readonly cache: TenantCache) {}
+  constructor(
+    private readonly cache: TenantCache,
+    private readonly tenants: TenantService,
+  ) {}
 
   @Post()
-  async write(): Promise<never> {
-    const { tenantId, manager } = currentRequestContext();
-    await manager.query(
-      `UPDATE products SET stock = 0 WHERE tenant_id = $1::uuid AND id = 'p1'`,
-      [tenantId],
-    );
-    for (const ns of ['products', 'settings', 'customers', 'mechanics'] as const) {
-      this.cache.invalidateAfterCommit(tenantId, ns);
-    }
-    throw new HttpException({ code: 'PROBE', message: 'rolled back' }, HttpStatus.CONFLICT);
+  write(): Promise<never> {
+    // Its own runTx, as every production handler has since tx.4 (#153).
+    return this.tenants.runTx(async () => {
+      const { tenantId, manager } = currentRequestContext();
+      await manager.query(
+        `UPDATE products SET stock = 0 WHERE tenant_id = $1::uuid AND id = 'p1'`,
+        [tenantId],
+      );
+      for (const ns of ['products', 'settings', 'customers', 'mechanics'] as const) {
+        this.cache.invalidateAfterCommit(tenantId, ns);
+      }
+      throw new HttpException({ code: 'PROBE', message: 'rolled back' }, HttpStatus.CONFLICT);
+    });
   }
 }
 
 @Module({
   controllers: [RollbackProbeController],
-  providers: [RequestContextMiddleware],
 })
-class RollbackProbeModule implements NestModule {
-  configure(consumer: MiddlewareConsumer): void {
-    consumer.apply(RequestContextMiddleware).forRoutes(RollbackProbeController);
-  }
-}
+class RollbackProbeModule {}
 
 /**
  * #32 — invalidate-after-commit. One case per row of the write-path → cache-keys table

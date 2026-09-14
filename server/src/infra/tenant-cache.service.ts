@@ -3,7 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 import type { Logger } from 'pino';
 import {
-  hasRequestContext,
+  hasOpenTransaction,
   onTransactionCommit,
 } from '../common/request-context.js';
 import { LOGGER } from './logger.provider.js';
@@ -190,18 +190,19 @@ export class TenantCache {
   }
 
   /**
-   * Invalidates `ns` for this tenant strictly after the request transaction commits,
-   * through the same hook the BullMQ enqueues use. A rollback — a thrown error, a 409 —
-   * discards the hook, so a refused write neither invalidates nor exposes anything.
+   * Invalidates `ns` for this tenant strictly after the open `TenantService.runTx`
+   * transaction commits, through the same hook the BullMQ enqueues use. A rollback — a
+   * thrown error, a 409 — discards the hook, so a refused write neither invalidates nor
+   * exposes anything.
    *
-   * 🔴 Throws outside a request context. There `onTransactionCommit` runs the hook at
-   * once, so a worker or admin-data-source write would invalidate BEFORE its own
-   * commit, and a reader in between would cache the old rows under the new generation.
+   * 🔴 Throws with no open transaction (outside a request, or in one outside `runTx`). A
+   * worker or admin-data-source write that invalidated before its own commit would let a
+   * reader in between cache the old rows under the new generation.
    */
   invalidateAfterCommit(tenantId: string, ns: CacheNamespace): void {
-    if (!hasRequestContext()) {
+    if (!hasOpenTransaction()) {
       throw new Error(
-        'TenantCache.invalidateAfterCommit needs a request transaction. Outside a request, ' +
+        'TenantCache.invalidateAfterCommit needs an open transaction (TenantService.runTx). Outside one, ' +
           'await your own transaction and then call TenantCache.invalidate().',
       );
     }

@@ -2,7 +2,6 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import { DataSource } from 'typeorm';
-import { currentRequestTransaction } from '../common/request-context.js';
 import { REDIS_CACHE } from '../infra/redis.module.js';
 
 export interface RateLimitCheckResult {
@@ -278,36 +277,23 @@ export class RateLimitService {
   }
 
   /**
-   * 🔴 **Never a second pool connection while a request holds one (#162).** This guard runs
-   * after `RequestContextMiddleware` has already taken the request's connection, so
-   * `this.ds.query` here was a nested acquisition: with the plan cache cold (a reset tenant,
-   * or every `PLAN_CACHE_TTL_SEC`), `DB_POOL_SIZE` simultaneous requests each held one
-   * connection and waited for another, the pool had none to give, and every one of them sat
-   * out `connectionTimeoutMillis` (10 s) — the requests queued behind them for a FIRST
-   * connection 500'd in the middleware, and this lookup silently failed open to `'basic'`.
-   * Measured on `ten simultaneous opens` at `DB_POOL_SIZE=8`: eight plan lookups all failing
-   * after 10 000 ms, two 500s. A bigger pool only raises the burst size that triggers it.
+   * 🔴 **Never a second pool connection while a request holds one (#162).** Before tx.4
+   * (#153) this guard ran after `RequestContextMiddleware` had already taken the request's
+   * connection, so a pool read here was a nested acquisition: with the plan cache cold,
+   * `DB_POOL_SIZE` simultaneous requests each held one connection and waited for another, and
+   * the pool deadlocked for `connectionTimeoutMillis`. #162 read on the request transaction
+   * instead, inside a savepoint.
    *
-   * So inside a request the plan is read on the request's own transaction — the fix
-   * `TenantGuard` already applies to `tenants.status`, and safe for the same reason: `tenants`
-   * has no RLS, so the read is well defined before `app.tenant_id` is set. It runs inside a
-   * savepoint so a failed lookup can still fail open without leaving the request transaction
-   * aborted. Outside a request scope (no connection held) the pool is fine.
+   * Since tx.4 nothing holds a connection before the handler: the guards run first and the
+   * handler's `TenantService.runTx` takes the request's only connection afterwards. So a plain
+   * pool read is this request's first connection, returned before the next is asked for —
+   * the same reasoning `TenantGuard` uses for `tenants.status` (`tenants` has no RLS). Keep it
+   * that way: calling this from inside a `runTx` would bring the deadlock back.
+   * `test/rate-limit-pool.e2e-spec.ts` is the gate.
    */
   private async readPlan(tenantId: string): Promise<{ plan: string }[]> {
-    const sql = `SELECT plan FROM tenants WHERE id = $1`;
-    const manager = currentRequestTransaction();
-    if (!manager) {
-      return (await this.ds.query(sql, [tenantId])) as { plan: string }[];
-    }
-    await manager.query('SAVEPOINT rate_limit_plan');
-    try {
-      const rows = (await manager.query(sql, [tenantId])) as { plan: string }[];
-      await manager.query('RELEASE SAVEPOINT rate_limit_plan');
-      return rows;
-    } catch (err) {
-      await manager.query('ROLLBACK TO SAVEPOINT rate_limit_plan');
-      throw err;
-    }
+    return (await this.ds.query(`SELECT plan FROM tenants WHERE id = $1`, [
+      tenantId,
+    ])) as { plan: string }[];
   }
 }
