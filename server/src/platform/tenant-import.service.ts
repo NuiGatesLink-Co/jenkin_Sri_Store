@@ -556,14 +556,6 @@ export class TenantImportService {
           [tenantId, shopName, shopNameEn, taxRate, quoteValidDays, address, phone, cashierName, taxId, branchNo],
         );
       }
-
-      // In the import's own transaction: written after commit, an admin id with no row
-      // (an admin deleted while the token lives) committed the import and then answered
-      // 500 on `audit_log_platform_admin_id_fkey`. Now the import rolls back with it.
-      await this.auditService.log(
-        { tenantId, platformAdminId: adminId, action: 'platform.tenant.import', ip },
-        manager,
-      );
     });
 
     // #32: the transaction above has committed (it is the admin data source's own, not
@@ -574,6 +566,12 @@ export class TenantImportService {
       await this.cache.invalidate(tenantId, ns);
     }
 
+    await this.auditService.log({
+      tenantId,
+      platformAdminId: adminId,
+      action: 'platform.tenant.import',
+      ip,
+    });
 
     return { status: 'success', tenantId };
   }

@@ -334,32 +334,6 @@ describe('cache invalidation after commit (e2e, #32)', () => {
       expect(row(await miss('/mechanics'), 'imp-m')).toBeDefined();
       expect((await miss('/settings')).body.data.shopName).toBe('ร้านนำเข้า');
     });
-
-    it('an import whose audit row fails rolls back whole and invalidates nothing', async () => {
-      await admin.query(`DELETE FROM shifts WHERE tenant_id = $1::uuid`, [TENANT]);
-      await prime();
-      const before = await generation();
-      const err = await app
-        .get(TenantImportService)
-        .importSnapshot(
-          TENANT,
-          {
-            __meta: { version: 2 },
-            sa_products: [{ id: 'imp-ghost', partNo: 'IMP-G', name: 'Ghost', stock: 1 }],
-          },
-          // No such platform admin: the audit row's foreign key refuses it.
-          '32323232-6666-4666-8666-666666666666',
-        )
-        .catch((e: unknown) => e);
-      expect(err).toBeInstanceOf(Error);
-      const [n] = await admin.query(
-        `SELECT count(*)::int AS n FROM products WHERE tenant_id = $1::uuid AND id = 'imp-ghost'`,
-        [TENANT],
-      );
-      expect(n.n).toBe(0);
-      expect(await generation()).toBe(before);
-      expect((await get('/products')).headers['x-cache']).toBe('HIT');
-    });
   });
 
   describe('settings, customers and mechanics: read → write → the next read is fresh', () => {

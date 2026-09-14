@@ -954,10 +954,14 @@ Negatives, all in the same spec:
 - 🔴 **For #55:** the import writes rows with the snapshot's own `updated_at`, often in the past.
   A device whose `?updatedSince=` cursor is already later never sees them. The cache is
   invalidated, but a cache cannot fix the sync cursor.
-- **Fixed here (was pre-existing on `main`):** the import wrote its `audit_log` row after its
-  transaction committed, so a platform-admin id with no row committed the import and then answered
-  500. The row is now written on the import's own transaction (`AuditService.log(input, manager)`),
-  so that import rolls back whole and invalidates nothing — pinned by an e2e.
+- **Separate ticket, pre-existing on `main`:** platform writes log `audit_log` **after** their own
+  write commits, through `AuditService.log()` on `ADMIN_DATA_SOURCE`. A platform-admin id with no row
+  (for example, an admin deleted while their token is still valid) commits the write and then answers
+  500 on `audit_log_platform_admin_id_fkey`. Every call site needs the same fix:
+  - `src/platform/tenant-import.service.ts` — `importSnapshot` (after the import transaction and
+    after the cache invalidation)
+  - `src/platform/platform-tenants.service.ts` — `createTenant` (~line 113), `updateStatus`
+    (~line 152), `listTenants` (~line 168)
 
 ## Conventions these slices set
 
