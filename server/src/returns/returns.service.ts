@@ -7,6 +7,7 @@ import { fromSatang, satangOf } from '../common/money.js';
 import { currentRequestContext, onTransactionCommit } from '../common/request-context.js';
 import { returning } from '../common/sql.js';
 import { DocNumberService } from '../documents/doc-number.service.js';
+import { TenantCache } from '../infra/tenant-cache.service.js';
 import { ShiftsService } from '../shifts/shifts.service.js';
 import { JOB_RETURN_CREATED, QUEUE_SALE_POST } from '../queue/queue.constants.js';
 import { saleNotFound } from '../sales/sale-reads.service.js';
@@ -187,6 +188,7 @@ export class ReturnsService {
   constructor(
     private readonly docNumbers: DocNumberService,
     private readonly shifts: ShiftsService,
+    private readonly cache: TenantCache,
     @Optional() @InjectQueue(QUEUE_SALE_POST) private readonly salePostQueue?: Queue,
   ) {}
 
@@ -295,6 +297,9 @@ export class ReturnsService {
     const mechanicCreditBalanceAfter = mechanicAfter?.creditBalance ?? null;
 
     const saleVoided = await this.autoVoid(manager, tenantId, dto.saleId, sold);
+
+    // #32: the credit note put stock back — drop the cached product pages after commit.
+    this.cache.invalidateAfterCommit(tenantId, 'products');
 
     if (this.salePostQueue) {
       const queue = this.salePostQueue;
