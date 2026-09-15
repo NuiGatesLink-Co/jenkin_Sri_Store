@@ -41,9 +41,9 @@ GitHub ยังไม่ได้ตั้ง** — คำสั่งจริ
 | Package / Storage | Docker + **GHCR** (public) | job build image ทั้งสอง workflow → `ghcr.io/nuimanlp/srisurart-pos-server`, `…-web` | server: PR #70 (#61, tarball artefact ถูกยกเลิก) · web: PR #69 (#62) |
 | Config & Deploy (CD) | **Ansible** ผ่าน SSH | `deploy/ansible/`, `.github/workflows/deploy.yml` | ยังไม่มี |
 | KV Storage | **etcd** | service ใน compose + `RuntimeConfigService` ฝั่ง NestJS | ✅ service etcd + auth (#64) · `RuntimeConfigService` merge มาก่อนแล้ว (#66, PR #109; watch แก้ใน #120, PR #129) |
-| Monitoring & Operate | Node Exporter + Prometheus + Grafana | `deploy/compose/monitoring.yml`, `deploy/prometheus/`, `deploy/grafana/` | overlay #63 `ops.1` · ต่อเข้า `deploy/ansible/deploy.yml` แล้วใน #121 `ops.5` (ยังไม่ได้รันจริงบน VM) |
+| Monitoring & Operate | **Node Exporter + Prometheus + Grafana (Monitoring)** | `deploy/compose/monitoring.yml`, `deploy/prometheus/`, `deploy/grafana/` | overlay #63 `ops.1` · ต่อเข้า `deploy/ansible/deploy.yml` แล้วใน #121 `ops.5` (ยังไม่ได้รันจริงบน VM) · ปฏิเสธ Wazuh/ELK เพราะกิน RAM 4–5 GB เกินงบ 6 GB |
 
-**สิ่งที่ตั้งใจไม่ทำ:** Jenkins (มีเครื่องยนต์อยู่แล้ว), Kubernetes (VM เดียว), Alertmanager,
+**สิ่งที่ตั้งใจไม่ทำ:** Jenkins (มีเครื่องยนต์อยู่แล้ว), Kubernetes (VM เดียว), Wazuh / ELK (กิน RAM 4–5 GB ชนเพดาน VM 6 GB), Alertmanager,
 exporter ของ Postgres/Redis, image signing, WAF, DB backup อัตโนมัติ (ADR-0005 มี export job),
 เลือก production host (ครบกำหนดก่อน `q4`)
 
@@ -161,6 +161,7 @@ GitHub Environment `demo` ถือ secret ทั้งหมด (ไม่ม�
 **งบ RAM บน VM** (mem_limit ปัจจุบันรวม 3,392 MB — รวม etcd 256m แล้ว, #64): เพิ่ม Prometheus 512m
 (`--storage.tsdb.retention.time=7d --storage.tsdb.retention.size=2GB`) · Grafana 256m ·
 node-exporter 64m → **≈ 4.2 GB จาก 6 GB** — ทุกตัวต้องมี `mem_limit` ห้ามปล่อยว่าง
+🔴 **พิจารณาแล้วไม่ใช้ Wazuh / ELK:** Wazuh Server/Indexer (OpenSearch) ต้องการ RAM ขั้นต่ำ 4–5 GB ซึ่งหากนำมารันบน VM 6 GB จะเกิด Out-Of-Memory (OOM) ชนกับ POS stack (~3.4 GB) ทันที ดังนั้นสถาปัตยกรรมจึงเลือกชุดประหยัดทรัพยากรคือ **Node Exporter + Prometheus + Grafana** (~832 MB) ที่พอดีกับงบและทำงานได้อย่างปลอดภัย
 
 **TLS:** self-signed จาก service `certgen` ต่อไป (ไม่มี DNS name; Let's Encrypt ไม่ออก cert ให้ IP)
 
@@ -324,7 +325,15 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
 
 ---
 
-## 10. Monitoring (#63 `ops.1` — shipped as a compose overlay)
+## 10. Monitoring: Node Exporter + Prometheus + Grafana (#63 `ops.1` — shipped as a compose overlay)
+
+สแต็ก Monitoring กำหนดบทบาทชัดเจนคือ **Node Exporter (Host Metrics) + Prometheus (Metric Collector & TSDB) + Grafana (Dashboard)** เพื่อควบคุมการใช้งานทรัพยากรให้อยู่ในงบ RAM:
+
+| ส่วนประกอบ | บทบาทหน้าที่ | เครื่องมือ | แหล่งข้อมูล / กลไก |
+|---|---|---|---|
+| **Host Metrics** | วัด CPU, RAM, Disk I/O, Network ของ VM | **Node Exporter** | Scrape host `/proc`, `/sys`, `/rootfs` (พอร์ต 9100 เข้าถึงเฉพาะใน compose network) |
+| **Metrics Collector** | Scrape time-series metrics และเก็บใน TSDB | **Prometheus** | Scrape Node Exporter และ NestJS application metrics (`/metrics` เช่น RPS, latency p95, error rate) |
+| **Unified Visualization** | แดชบอร์ดแสดงผลรวมศูนย์หน้าเดียว ปลอดภัยผ่าน SSH Loopback | **Grafana** | แสดงแดชบอร์ด host resources + business SLIs (พอร์ต 3000 ผูก 127.0.0.1) |
 
 `docker compose -f server/docker-compose.yml -f deploy/compose/monitoring.yml up -d` (บน VM
 เพิ่ม `-f deploy/compose/vm.override.yml` — ลำดับ `-f` ต้องขึ้นต้นด้วย `docker-compose.yml`
@@ -377,6 +386,13 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
   project directory ซึ่งจาก repo คือ `server/` แต่บน VM คือ `/opt/pos/` แบนราบ (`../deploy/…` จะเป็น
   `/opt/deploy/…` และ Docker สร้างโฟลเดอร์ว่างให้เงียบ ๆ) — playbook ตั้ง `MONITORING_CONFIG_DIR=./deploy`
   ให้ ถ้ารัน compose **ด้วยมือบน VM** ต้องตั้งตัวแปรนี้เองด้วย
+
+### 10.2 การประเมินและปฏิเสธ Wazuh / SIEM หนัก (Architectural Evaluation on Memory Footprint)
+
+ในการออกแบบเบื้องต้น มีการพิจารณาการใช้ Wazuh สำหรับ Security Monitoring และ Log Ingestion แต่จากการประเมิน (Scrutinize) เชิงลึก พบว่า:
+1. **กิน RAM สูงเกินงบ (Excessive Footprint):** Wazuh Server ประกอบด้วย Wazuh Manager, Indexer (OpenSearch), และ Dashboard ซึ่งต้องการ RAM รวมอย่างน้อย 4–5 GB (เฉพาะ JVM Heap ของ OpenSearch ต้องการ 2–4 GB)
+2. **ความเสี่ยงต่อระบบหลัก (OOM Risk):** VM คณะ (`demo`) มี RAM เพียง 6 GB และระบบ POS ทั้งหมด (Postgres, Redis ×2, API ×3, Worker, Bull-Board, etcd) ใช้ RAM ไปแล้ว ~3.4 GB หากรัน Wazuh ร่วมด้วยจะทำให้ RAM เกิน 6 GB ทันที ส่งผลให้ Linux OOM Killer ยิง Database หรือ API Container ดับ
+3. **ข้อสรุปทางสถาปัตยกรรม:** จึงปฏิเสธการติดตั้ง Wazuh และเลือกใช้ **Node Exporter + Prometheus + Grafana** ซึ่งกิน RAM รวมเพียง ~832 MB อยู่ในงบรวม ~4.2 GB / 6 GB อย่างปลอดภัย ส่วนความปลอดภัยด้านช่องโหว่ (CVE) มอบหมายให้ Trivy สแกนใน CI Pipeline ล่วงหน้าแทน
 
 ---
 

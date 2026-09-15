@@ -332,7 +332,7 @@ keeps running this Drift build while the server is developed against a demo tena
 2026-09-04 this work happens on `main`** (see *Branch strategy* above): the server, the
 client's API layer and the CI/CD pipelines all land in this repo.
 
-**CI/CD — levels 1–3 are done (level 3 = both release images on GHCR since 2026-09-10, #69/#70). CD to the faculty VM (Ansible), etcd and Prometheus/Grafana are designed in `docs/Backend_design/07_CICD_DEPLOY.md` + ADR-0013 (spec #60) and ticketed #63–#67 under #10 for the teammates — read those before touching `.github/`, `deploy/`, `server/Dockerfile`, `server/docker-compose.yml` or `server/docker/nginx/`.** `.github/workflows/flutter.yml` is the
+**CI/CD — levels 1–3 are done (level 3 = both release images on GHCR since 2026-09-10, #69/#70). CD to the faculty VM (Ansible), etcd and Monitoring (Node Exporter + Prometheus + Grafana) are designed in `docs/Backend_design/07_CICD_DEPLOY.md` + ADR-0013 (spec #60) and ticketed #63–#67 under #10 for the teammates — read those before touching `.github/`, `deploy/`, `server/Dockerfile`, `server/docker-compose.yml` or `server/docker/nginx/`.** `.github/workflows/flutter.yml` is the
 client gate (`dart analyze`, `flutter test`, `build_runner` no-diff, `flutter build web` + the
 web-asset assertion), committed 2026-09-04. Status per level:
 1. ✅ **Flutter CI** — done. Runners are ASCII paths, so `build_runner` verification runs in CI —
