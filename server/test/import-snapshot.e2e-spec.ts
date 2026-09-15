@@ -102,10 +102,10 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
     const snapshot: Json = REAL_FILE
       ? JSON.parse(readFileSync(REAL_FILE, 'utf8'))
       : generateSyntheticSnapshot({ scale: 'full', profile: profile as 'clean' | 'realistic' });
-    const report = (extra: Json) =>
-      REPORT && writeFileSync(REAL_FILE ? REPORT : REPORT.replace(/(\.json)?$/, `.${profile}.json`), JSON.stringify(Object.assign(evidence, extra), null, 2));
     const bytes = Buffer.byteLength(JSON.stringify(snapshot));
     const evidence: Json = { snapshot: label, bytes };
+    const report = (extra: Json) =>
+      REPORT && writeFileSync(REAL_FILE ? REPORT : REPORT.replace(/(\.json)?$/, `.${profile}.json`), JSON.stringify(Object.assign(evidence, extra), null, 2));
 
     // §9 step 2: pre-flight on the JSON alone. A violation stops the run — §9 says stop and
     // decide, never import and hope. (The console output may name documents; the report does not.)
@@ -113,7 +113,11 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
     console.info(`snapshot ${label}: ${(bytes / 1024).toFixed(0)} KiB`, preflight);
     report({ preflight: { violations: preflight.violations.length, orphans: preflight.orphans, tombstones: preflight.tombstones } });
     expect(preflight.violations).toEqual([]);
-    if (profile === 'realistic') expect(preflight.tombstones.products + preflight.tombstones.customers + preflight.tombstones.mechanics).toBeGreaterThan(0);
+    if (profile === 'realistic') {
+      expect(preflight.tombstones.products + preflight.tombstones.customers + preflight.tombstones.mechanics).toBeGreaterThan(0);
+      // #252: a supplier row for a product neither live nor tombstoned — dropped, not refused.
+      expect(preflight.tombstones.droppedSuppliers).toBeGreaterThan(0);
+    }
 
     const tenantId = await provision();
     const started = Date.now();
@@ -122,14 +126,15 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
     console.info(`import answered ${res.status} in ${importMs} ms`, res.status >= 400 ? res.body : '');
     report({ importStatus: res.status, importMs, tenantId: KEEP ? tenantId : undefined });
     expect(res.status).toBe(201);
-    const { products, customers, mechanics } = preflight.tombstones;
+    const { products, customers, mechanics, droppedSuppliers } = preflight.tombstones;
     expect(res.body.data.tombstones).toEqual({ products, customers, mechanics });
+    expect(res.body.data.droppedSuppliers).toBe(droppedSuppliers);
     // Audited inside the import transaction, with the count per table.
     const [audit] = await admin.query(
       `SELECT after FROM audit_log WHERE tenant_id = $1 AND action = 'platform.tenant.import'`,
       [tenantId],
     );
-    expect(audit.after).toEqual({ tombstones: { products, customers, mechanics } });
+    expect(audit.after).toEqual({ tombstones: { products, customers, mechanics }, droppedSuppliers });
 
     // §9 step 5.
     const rows = await reconcileImport(admin, tenantId, snapshot);

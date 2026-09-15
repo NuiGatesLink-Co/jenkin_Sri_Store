@@ -212,6 +212,28 @@ export function generateSyntheticSnapshot(options: SyntheticOptions = {}): Json 
     }
   }
 
+  // A product can be added with a supplier price and hard-deleted before it is ever stocked
+  // or sold — no movement, no sale/return/quote line, nothing else in history names it. Only
+  // a supplier row is left pointing at a product id the file no longer has. The `realistic`
+  // profile carries one, so the import's "drop the orphaned supplier row" path (#252, owner
+  // 2026-09-15) is exercised the way a real shop's file can trigger it.
+  if (profile === 'realistic') {
+    const category = pick(CATEGORIES);
+    const [nameTH, name, lo, hi] = pick(TEMPLATES[category]);
+    const [brand, code] = pick(BRANDS);
+    let partNo: string;
+    do partNo = `${code}-${int(10000, 99999)}-ORP`;
+    while (partNos.has(partNo.toLowerCase()));
+    partNos.add(partNo.toLowerCase());
+    const price = Math.round(int(lo, hi) / 5) * 5;
+    const orphan: Product = {
+      id: newId('p'), partNo, name: `${name} ${brand} (ไม่เคยลงสต็อก)`, nameTH: `${nameTH} (ไม่เคยลงสต็อก)`,
+      category, brand, price, cost: round2(price * 0.65), stock: 0, minStock: 0, updatedAt: lastMs, deleted: true,
+    };
+    products.push(orphan);
+    suppliers.push({ id: newId('sp'), productId: orphan.id, name: pick(SUPPLIERS), unitCost: round2(orphan.cost * 0.95), freight: 0 });
+  }
+
   const customers: Customer[] = Array.from({ length: scale.customers }, (_, i) => ({
     id: newId('c'), code: `CUS${pad(i + 1, 3)}`, name: `Test Customer ${pad(i + 1, 3)}`,
     nameTH: `ลูกค้าทดสอบ ${pick(THAI_FIRST)} ${pad(i + 1, 3)}`,
