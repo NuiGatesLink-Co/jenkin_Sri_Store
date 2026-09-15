@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Job } from 'bullmq';
 import { describe, expect, it, vi } from 'vitest';
@@ -115,7 +115,7 @@ describe('TenantJobRunner (#213)', () => {
     walk(src);
     const users = files
       .filter((f) => readFileSync(f, 'utf8').includes('exemptFromCommitCeiling: true'))
-      .map((f) => relative(src, f));
+      .map((f) => relative(src, f).split(sep).join('/'));
     expect(users).toEqual(['queue/processors/backup.processor.ts']);
   });
 });

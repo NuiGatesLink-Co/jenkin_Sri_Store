@@ -493,7 +493,7 @@ gantt
 **เกณฑ์ปิดเฟส 1 (definition of done):**
 - [x] `docker compose up` ครั้งเดียวได้ครบ Nginx + NestJS×3 + Postgres + Redis + worker + Bull-Board — **#14 `p1` 2026-09-06**
 - [ ] k6 ผ่านเกณฑ์ใน [`02_API_SCREENS.md §9`](02_API_SCREENS.md#9-เป้าหมาย-load-test-k6--ผูกกับเกณฑ์ในคอร์ส)
-- [ ] ยิง `POST /sales` พร้อมกัน 200 ครั้งบนสินค้าที่มี 50 ชิ้น → ขายได้ 50 บิลพอดี **สต็อกเหลือ 0 ไม่ติดลบ**
+- [x] ยิง `POST /sales` พร้อมกัน 200 ครั้งบนสินค้าที่มี 50 ชิ้น → ขายได้ 50 บิลพอดี **สต็อกเหลือ 0 ไม่ติดลบ** — **#184 `close.3` 2026-09-15 บน demo VM** (201×50 / 409×150 / 5xx 0, `k6:verify` ผ่าน — [handoff §4.2](../handoff_log/close3-demo-deploy-2026-09-15.md)); ข้อ k6 §9 ด้านบนยังเปิด: latency วัดผ่าน nginx จากเครื่องเดียวไม่ได้ (§4.1)
 - [ ] Integration test "อ่านข้ามร้าน" ได้ 0 แถวทุกเคส
 - [x] `/health/live` ไม่แตะ DB, `/health/ready` แตะ DB+Redis (แยกกันจริง) — **#14 `p1` 2026-09-06** (ดับ Postgres/Redis แล้ว ready = 503, live = 200, ไม่มี container restart)
 - [ ] import snapshot ของร้านจริงเข้ามาแล้ว **ผ่าน checklist 6 ข้อ** ใน `01_DATABASE.md §9` ทุกข้อ

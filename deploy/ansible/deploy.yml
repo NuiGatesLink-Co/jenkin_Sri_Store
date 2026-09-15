@@ -59,14 +59,18 @@
       ansible.builtin.set_fact:
         current_sha: "{{ (current_sha_file.content | b64decode | trim) if (current_sha_file is succeeded and current_sha_file.content is defined) else '' }}"
 
+    # `-e force_redeploy=true` redeploys the SHA .current_sha already names (#67): the automatic
+    # rollback needs it, because .current_sha is written only after readiness passes and so still
+    # names the previous release after a failed deploy. Never delete .current_sha to force instead:
+    # if that redeploy fails too, the VM has lost its only record of what it runs.
     - name: Notify if release is already deployed
       ansible.builtin.debug:
         msg: "Release '{{ image_tag }}' is already active on {{ inventory_hostname }}. Skipping duplicate deployment."
-      when: current_sha == image_tag
+      when: current_sha == image_tag and not (force_redeploy | default(false) | bool)
 
     - name: Early exit on duplicate release deployment
       ansible.builtin.meta: end_play
-      when: current_sha == image_tag
+      when: current_sha == image_tag and not (force_redeploy | default(false) | bool)
 
     # docker-compose.yml's network gained ip_range (#148). Compose cannot change the IPAM of a network
     # that has containers attached: measured with compose v5.0.2, `run --rm` swaps the network under
@@ -218,8 +222,9 @@
 
     # Checked from a fresh container with no credentials, independent of etcd-init.sh itself: the
     # original bug made that script exit 0 without running, so its own assertion never fired.
-    # 200 means etcd served an anonymous read, i.e. auth is off; curl failing (rc != 0) means the
-    # check could not run, which is not proof either.
+    # Only 400 passes: etcd v3.6.12 answers an anonymous read with 400 "user name is empty" once auth
+    # is on (measured). 200 means auth is off; any other code or a curl failure (rc != 0) means the
+    # check did not prove anything.
     - name: Assert etcd refuses an unauthenticated read
       ansible.builtin.command: >-
         docker compose {{ pos_compose_files }} run --rm --no-deps --entrypoint curl etcd-init
@@ -230,7 +235,7 @@
         chdir: "{{ app_dir }}"
       register: etcd_anonymous_read
       changed_when: false
-      failed_when: etcd_anonymous_read.rc != 0 or etcd_anonymous_read.stdout | trim == '200'
+      failed_when: etcd_anonymous_read.rc != 0 or (etcd_anonymous_read.stdout | trim) != '400'
 
     # Rolling restart: api-1
     - name: Restart instance api-1
