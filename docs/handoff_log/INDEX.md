@@ -2,6 +2,12 @@
 
 1 บรรทัดต่อ handoff · เรียงใหม่ → เก่า · รูปแบบตาม [`handoff-prompt-template.md`](handoff-prompt-template.md)
 
+- 2026-09-15 (ค่ำ) — [รอบ orchestrator ปิดงาน phase 1](orchestrated-closeout-round-2026-09-15.md) — merge 12 PR (#235 #236 #237 #244 #246 #247 #250 #252 #253 #255 #256 #257)
+  - เจ้าของเคาะ: #67 self-hosted runner · #185 ใช้ข้อมูลสังเคราะห์ก่อน · #238 tombstone + ทิ้งแถวซัพพลายเออร์กำพร้า · #251 k6 หลายเครื่อง → Prometheus · #239 import เป็น background job
+  - 🔴 etcd auth ไม่เคยเปิดบน demo VM (#250) · watch ถือ token หมดอายุค้าง เพราะ watch ตอบ 200 ไม่ใช่ 401 (#255) · ลิ้นชักที่ import มาค้างเปิดถาวร (#244)
+  - ⚠️ subagent รัน `docker compose down -v` บนเครื่อง dev → volume Postgres/Redis ของเครื่องนี้หาย
+  - ค้าง: #239 (กำลังทำ) · #67 ต้องติดตั้ง runner และรันจริง · deploy รอบหน้าต้องเช็ก etcd auth · #251/#184 วัดจริงด้วย 3 เครื่อง · #185 รอไฟล์จริง
+
 - 2026-09-15 — [#185 `close.4`: ลอง checklist §9 ด้วย snapshot สังเคราะห์](close4-synthetic-snapshot-2026-09-15.md) — เจ้าของโปรเจกต์สั่งให้ใช้ข้อมูลสังเคราะห์ก่อน เพราะยังไม่ได้ไฟล์จริงจากร้าน
   - สร้าง generator แบบ deterministic ที่จำลองการขายของร้านทีละวันตามกฎของ Drift repository (สินค้า 320 · บิล 2,043 · 4 เดือน · 2 MiB) · commit เฉพาะ sample เล็ก 142 KiB
   - Flutter: `importLegacyBackup()` ผ่าน 4/4
