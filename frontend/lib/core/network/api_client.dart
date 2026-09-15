@@ -25,21 +25,24 @@ class ApiClient {
   final http.Client _client;
   final TokenStorage? tokenStorage;
 
-  /// How long a `GET` waits for its response before failing (#183).
+  /// How long a `GET` — and `/auth/refresh` — waits for its response before
+  /// failing (#183).
   ///
   /// Reads are safe to repeat and nothing in the API takes longer than a few
-  /// hundred milliseconds to read, so the counter is told sooner.
+  /// hundred milliseconds to read, so the counter is told sooner. A refresh is
+  /// safe to repeat too (ADR-0009: no denylist, no reuse detection).
   static const Duration defaultReadTimeout = Duration(seconds: 15);
 
-  /// How long every other method — the money/stock writes, and
-  /// `/auth/refresh` — waits before failing (#183).
+  /// How long every other method — the money/stock writes — waits before
+  /// failing (#183).
   ///
-  /// Just above nginx's `proxy_read_timeout 30s` + `proxy_connect_timeout 2s`
-  /// (`server/docker/nginx/nginx.conf`): when the API itself is slow, the
-  /// proxy's own 504 ends the wait first, so this only fires when the link to
-  /// nginx is what hung. Waiting that long for a write is deliberate — a
-  /// real answer is worth more to the counter than an early "fate unknown".
-  static const Duration defaultWriteTimeout = Duration(seconds: 35);
+  /// Above nginx's own worst case (`server/docker/nginx/nginx.conf`):
+  /// `proxy_next_upstream error timeout` retries a failed 2 s connect, so a
+  /// slow API answers through nginx after about 2 + 2 + 30 s. At 40 s the
+  /// proxy's own 504 normally ends the wait first, and this only fires when the
+  /// link to nginx is what hung. Waiting that long for a write is deliberate —
+  /// a real answer is worth more to the counter than an early "fate unknown".
+  static const Duration defaultWriteTimeout = Duration(seconds: 40);
 
   final Duration readTimeout;
   final Duration writeTimeout;
@@ -220,8 +223,9 @@ class ApiClient {
     required Duration timeout,
   }) async {
     // Every send — the first and the one retry after a 401 — gets its own
-    // [timeout]; with the refresh in between, one call waits at most three
-    // timeouts. A timeout is never retried here: it throws out of this method.
+    // [timeout], and the refresh in between gets [readTimeout]; so one call
+    // waits at most 2 × timeout + readTimeout. A timeout is never retried
+    // here: it throws out of this method.
     Future<http.Response> execute() => _withTimeout(rawExecute(), timeout, path);
 
     final sentWith = await tokenStorage?.getAccessToken();
@@ -261,8 +265,9 @@ class ApiClient {
     return _handleResponse(response);
   }
 
-  /// Fails [send] with an [http.ClientException] — the class a dropped socket
-  /// raises — once [timeout] has passed with no response (#183).
+  /// Fails [send] with an [ApiTimeoutException] — an [http.ClientException],
+  /// the class a dropped socket raises — once [timeout] has passed with no
+  /// response (#183).
   ///
   /// 🔴 A timeout is NOT a verdict. The request may have reached the server and
   /// committed; only the reply is missing. So it must never surface as an
@@ -281,10 +286,7 @@ class ApiClient {
   ) {
     return send.timeout(
       timeout,
-      onTimeout: () => throw http.ClientException(
-        'No response within ${timeout.inMilliseconds} ms',
-        _buildUri(path),
-      ),
+      onTimeout: () => throw ApiTimeoutException(timeout, _buildUri(path)),
     );
   }
 
@@ -347,7 +349,7 @@ class ApiClient {
         headers: await _buildHeaders(skipAuth: true),
         body: jsonEncode({'refreshToken': currentRefreshToken}),
       ),
-      writeTimeout,
+      readTimeout,
       refreshPath,
     );
     final status = response.statusCode;
@@ -486,6 +488,19 @@ class ApiClient {
       retryAfterSeconds: retryAfterSeconds,
     );
   }
+}
+
+/// A request that got no response within its timeout (#183).
+///
+/// An [http.ClientException], so every path that reads a dropped socket as
+/// "fate unknown" reads a timeout the same way. Its own type exists for one
+/// reason: #55's offline fallbacks (`data/repositories/api_*.dart`) must NOT
+/// re-run a write on Drift after it. A hung request has almost certainly
+/// reached the server and may have committed, so a local re-run is a second
+/// write — a second weighted-average cost out of `receivePO`, a second customer.
+class ApiTimeoutException extends http.ClientException {
+  ApiTimeoutException(Duration timeout, Uri uri)
+      : super('No response within ${timeout.inMilliseconds} ms', uri);
 }
 
 /// Paginated API response containing items list and pagination metadata.

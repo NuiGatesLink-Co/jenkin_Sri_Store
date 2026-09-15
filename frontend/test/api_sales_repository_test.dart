@@ -648,11 +648,11 @@ void main() {
           201,
           headers: {'content-type': 'application/json'},
         ));
-      }, writeTimeout: const Duration(milliseconds: 20));
+      }, writeTimeout: const Duration(milliseconds: 200));
 
       await expectLater(
         () => repo.saveSale(input()),
-        throwsA(allOf(isA<http.ClientException>(), isNot(isA<ApiException>()), isNot(isA<PosException>()))),
+        throwsA(allOf(isA<ApiTimeoutException>(), isNot(isA<ApiException>()), isNot(isA<PosException>()))),
       );
       final sale = await repo.saveSale(input());
 
@@ -702,9 +702,9 @@ void main() {
 
     test('a 504 from the proxy is NOT a verdict — the retry replays the bill', () async {
       // The likeliest real shape of a lost reply. `ApiClient`'s write timeout
-      // sits just above nginx's, so what usually fires first is nginx's own `proxy_read_timeout`, and
-      // that arrives as an ordinary `ApiException` — not the `SocketException`
-      // the test above uses. Treating every `ApiException` as a verdict is how
+      // sits above nginx's, so what usually fires first is nginx's own
+      // `proxy_read_timeout`, and that arrives as an ordinary `ApiException` —
+      // not the `SocketException` the test above uses. Treating every `ApiException` as a verdict is how
       // a committed bill gets rung up a second time.
       var attempt = 0;
       final repo = repoWith((req) async {
