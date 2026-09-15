@@ -78,9 +78,21 @@ interface Preflight {
   droppedSuppliers: number;
 }
 
+/**
+ * Only ever reached on a value pre-flight (`planClampViolations`'s `finite`/`nonNegMoney`/
+ * `positiveMoney` checks) has already accepted — `null`/`undefined` still default to 0 (the
+ * same "absent" semantics pre-flight itself uses), but a *present* value that does not parse
+ * now throws instead of silently becoming 0 (#239 review). This is defence in depth: getting
+ * here on bad data means pre-flight's money coverage missed a field, and #22's lesson is that
+ * a clamp on unvalidated input is exactly how that kind of gap stays invisible.
+ */
 function round2(v: unknown): number {
-  const num = typeof v === 'number' ? v : parseFloat(String(v ?? '0'));
-  return isNaN(num) ? 0 : Math.round(num * 100) / 100;
+  if (v == null) return 0;
+  const num = typeof v === 'number' ? v : parseFloat(String(v));
+  if (isNaN(num)) {
+    throw new Error(`round2: unparseable money value ${JSON.stringify(v)} reached the write path — pre-flight should have refused it`);
+  }
+  return Math.round(num * 100) / 100;
 }
 
 /** Only reached once pre-flight has already refused an unparseable value — never a fallback. */
@@ -96,6 +108,21 @@ function isUniqueViolationOn(err: unknown, constraint: string): boolean {
   const e = err as { code?: string; constraint?: string } | null;
   return e?.code === '23505' && e?.constraint === constraint;
 }
+
+/**
+ * #239 review: a worker crash or a BullMQ-detected stall can leave `import_jobs.status`
+ * stuck at `'queued'`/`'running'` forever — nothing ever transitions it, and
+ * `uq_import_jobs_active` then refuses every future import for that tenant. `createJob`
+ * treats an in-flight row older than this as abandoned before it tries to insert a new one.
+ *
+ * 30 minutes against a measured worst case of well under two: 6.4 s/2 MiB locally, so a
+ * 10 MiB file (`IMPORT_BODY_LIMIT`) is ≈32 s; `DEFAULT_JOB_OPTIONS` retries up to 3 times
+ * with exponential-jitter backoff (≤ 1 + 2 + 4 s between attempts), so a job that is
+ * genuinely still working — including through two retries — finishes in ≈100 s. 30 minutes
+ * is deliberately far past that: it should only ever fire for a worker that is truly gone,
+ * never for one that is merely slow.
+ */
+const STALE_JOB_CEILING_MINUTES = 30;
 
 @Injectable()
 export class TenantImportService {
@@ -174,8 +201,10 @@ export class TenantImportService {
     }
 
     // #239 item 3 (the #22 lesson applied to import): a negative balance/points/`minStock`,
-    // or a sale/return/PO/quote line's `qty` of zero, negative, non-integer or missing, used
-    // to clamp to 0 or 1 with no error. Refuse before the importer's own clamp ever runs.
+    // a sale/return/PO/quote line's `qty` of zero, negative, non-integer or missing, or a
+    // money field (`round2()` used to turn a NaN one into 0 for every price/cost/total in
+    // the file — review round after the first cut of this fix) — all used to clamp or
+    // silently default with no error. Refuse before the importer's own clamp/round ever runs.
     const clampViolations = planClampViolations(snapshot);
     if (clampViolations.length > 0) {
       throw new BadRequestException(`Pre-flight failed: values needing a clamp are refused instead — ${clampViolations.map(describeClamp).join('; ')}`);
@@ -204,17 +233,28 @@ export class TenantImportService {
   }
 
   // ── §9 steps 3-4: the single-transaction import ──────────────────────────────────────
+  /**
+   * `jobId`, when given, is `processJob`'s — the row's `status = 'succeeded'` (+ `result`,
+   * cleared `payload`) is written as the transaction's own last statement (#239 review),
+   * atomically with the business data, via `manager` (never `this.adminDs`). A crash between
+   * this `COMMIT` and some separate follow-up write can therefore never happen — there is no
+   * separate write: either both commit or neither does. `importSnapshot()` (the synchronous,
+   * no-job convenience wrapper) calls this with no `jobId` and skips the update entirely —
+   * there is no `import_jobs` row for it to touch.
+   */
   private async writeSnapshot(
     tenantId: string,
     snapshot: SnapshotPayload,
     adminId: string,
     ip: string | undefined,
     plan: Preflight,
+    jobId?: string,
   ): Promise<ImportJobResult> {
     const { tombstones, tombstoneCounts, droppedSuppliers } = plan;
     const droppedSupplierIds = new Set(tombstones.droppedSuppliers);
     const products = snapshot.sa_products || [];
     const categories = snapshot.sa_categories || [];
+    const result: ImportJobResult = { tombstones: tombstoneCounts, droppedSuppliers };
 
     await this.adminDs.transaction(async (manager) => {
       // 3.1 Categories
@@ -735,6 +775,20 @@ export class TenantImportService {
       for (const table of ['products', 'customers', 'mechanics'] as const) {
         await manager.query(`UPDATE ${table} SET updated_at = clock_timestamp() WHERE tenant_id = $1`, [tenantId]);
       }
+
+      // #239 review (issue 2): the job's own success record, atomic with everything above —
+      // see this method's doc comment. `status <> 'succeeded'` is a no-op guard, not a real
+      // race: nothing else can reach this row while it is `queued`/`running`
+      // (`uq_import_jobs_active`), so this only ever protects against calling `writeSnapshot`
+      // twice for the same job, which `processJob` already avoids by returning early.
+      if (jobId) {
+        await manager.query(
+          `UPDATE import_jobs
+              SET status = 'succeeded', result = $2::jsonb, payload = NULL, error = NULL, finished_at = clock_timestamp()
+            WHERE id = $1 AND status <> 'succeeded'`,
+          [jobId, JSON.stringify(result)],
+        );
+      }
     });
 
     // #32: the transaction above has committed (it is the admin data source's own, not
@@ -745,7 +799,7 @@ export class TenantImportService {
       await this.cache.invalidate(tenantId, ns);
     }
 
-    return { tombstones: tombstoneCounts, droppedSuppliers };
+    return result;
   }
 
   /**
@@ -779,11 +833,29 @@ export class TenantImportService {
 
     const jobId = newId('imp_');
     try {
-      await this.adminDs.query(
-        `INSERT INTO import_jobs (tenant_id, id, status, payload, requested_by, ip)
-         VALUES ($1, $2, 'queued', $3::jsonb, $4, $5)`,
-        [tenantId, jobId, JSON.stringify(snapshot), adminId || null, ip ?? null],
-      );
+      await this.adminDs.transaction(async (manager) => {
+        // #239 review (issue 1): a worker that crashed or stalled leaves its row 'queued' or
+        // 'running' forever — nothing else ever transitions it — and `uq_import_jobs_active`
+        // then refuses every later import for this tenant. Reclaim only a row this stale
+        // (`STALE_JOB_CEILING_MINUTES`'s doc comment has the worst-case-time math); a genuinely
+        // in-flight job's timestamp is recent and survives this UPDATE untouched, so a real
+        // concurrent attempt still hits the unique index below and gets 409, same as today.
+        // `COALESCE(started_at, created_at)`: a `queued` job that a worker never even picked
+        // up has no `started_at` yet.
+        await manager.query(
+          `UPDATE import_jobs
+              SET status = 'failed', error = 'stale: worker lost', payload = NULL, finished_at = clock_timestamp()
+            WHERE tenant_id = $1
+              AND status IN ('queued', 'running')
+              AND COALESCE(started_at, created_at) < now() - ($2 || ' minutes')::interval`,
+          [tenantId, STALE_JOB_CEILING_MINUTES],
+        );
+        await manager.query(
+          `INSERT INTO import_jobs (tenant_id, id, status, payload, requested_by, ip)
+           VALUES ($1, $2, 'queued', $3::jsonb, $4, $5)`,
+          [tenantId, jobId, JSON.stringify(snapshot), adminId || null, ip ?? null],
+        );
+      });
     } catch (err) {
       if (isUniqueViolationOn(err, 'uq_import_jobs_active')) {
         throw new ConflictException('An import is already queued or running for this tenant');
@@ -834,29 +906,43 @@ export class TenantImportService {
     }
   }
 
-  async markSucceeded(jobId: string, result: ImportJobResult): Promise<void> {
-    await this.adminDs.query(
-      `UPDATE import_jobs SET status = 'succeeded', result = $2::jsonb, payload = NULL, error = NULL, finished_at = clock_timestamp() WHERE id = $1`,
-      [jobId, JSON.stringify(result)],
-    );
-  }
-
-  /** The worker's entry point: load, validate again (defence in depth), write, report. */
+  /**
+   * The worker's entry point: load, validate again (defence in depth), write, report.
+   * `writeSnapshot` (given `jobId`) writes `status = 'succeeded'` itself, atomically with the
+   * business data (#239 review, issue 2) — there is no separate `markSucceeded` step, and so
+   * no gap between "the import committed" and "the row says so" for a crash to land in.
+   */
   async processJob(jobId: string): Promise<ImportJobResult> {
     const rows = await this.adminDs.query(
-      `SELECT tenant_id, payload, requested_by, ip FROM import_jobs WHERE id = $1`,
+      `SELECT tenant_id, payload, requested_by, ip, status, result FROM import_jobs WHERE id = $1`,
       [jobId],
     );
     if (rows.length === 0) {
       throw new Error(`import job '${jobId}' not found`);
     }
-    const row = rows[0] as { tenant_id: string; payload: SnapshotPayload | null; requested_by: string | null; ip: string | null };
+    const row = rows[0] as {
+      tenant_id: string;
+      payload: SnapshotPayload | null;
+      requested_by: string | null;
+      ip: string | null;
+      status: ImportJobState;
+      result: ImportJobResult | null;
+    };
+    if (row.status === 'succeeded') {
+      // A retry landing here means the import itself already committed (§ above) and only
+      // the *acknowledgement* — this call returning, the BullMQ job completing — was lost, so
+      // re-running would import everything a second time against data that is already there.
+      // The transaction that wrote the data already recorded success in the same commit; this
+      // is that recorded result, not a re-derivation.
+      return row.result as ImportJobResult;
+    }
     if (!row.payload) {
-      // A retry after the payload was already cleared means a prior attempt marked this
-      // job's *final* failure/success — nothing left to (re)do.
+      // Not succeeded, and no payload left: a prior attempt's *final* failure already ran
+      // (`markFailed` clears payload only when `final`), so retrying would preflight/write
+      // against nothing.
       throw new Error(`import job '${jobId}' has no payload left to process (already finished)`);
     }
     const plan = await this.preflight(row.tenant_id, row.payload);
-    return this.writeSnapshot(row.tenant_id, row.payload, row.requested_by ?? '', row.ip ?? undefined, plan);
+    return this.writeSnapshot(row.tenant_id, row.payload, row.requested_by ?? '', row.ip ?? undefined, plan, jobId);
   }
 }

@@ -7,6 +7,7 @@ import type { Redis } from 'ioredis';
 import { signJwt } from '../src/common/jwt.js';
 import { hashPassword } from '../src/common/password.js';
 import { APP_CONFIG, type AppConfig } from '../src/config/config.js';
+import { TenantImportService } from '../src/platform/tenant-import.service.js';
 import { QueueProcessorsModule } from '../src/queue/queue.module.js';
 import { generateSyntheticSnapshot } from './fixtures/synthetic-snapshot.js';
 import { accessToken, clearTenantCache, createTestApp, TENANT_TABLES_DEPTH_FIRST } from './support/fixture.js';
@@ -257,12 +258,15 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185, #
   it.skipIf(Boolean(REAL_FILE))('fails the job and rolls the whole shop back when one row is refused (§9 step 4)', async () => {
     const snapshot = generateSyntheticSnapshot({ scale: 'small', profile: 'clean' }) as Json;
     // One of the last rows the import writes (after every sale, return, PO and movement):
-    // a drawer entry Postgres refuses (CHECK amount > 0). Pre-flight does not catch this one
-    // (it is not one of #239's clamp rules — a zero drawer entry is neither a balance, a
-    // point total, a stock quantity nor a line qty), so it still reaches the transaction and
-    // rolls back exactly as before, only now as a `failed` job instead of a 4xx response.
+    // a drawer entry with a `type` Postgres refuses (CHECK type IN ('in','out')). Pre-flight
+    // does not catch this one — it validates the entry's *amount* (#239 item 3) but not its
+    // `type`, which the importer writes as whatever string the file supplies — so it still
+    // reaches the transaction and rolls back exactly as before, only now as a `failed` job
+    // instead of a 4xx response. (A zero/negative `amount` here, the original poison, is now
+    // refused in pre-flight itself — that path is `import-snapshot.e2e-spec.ts`'s
+    // `positiveMoney` coverage, proved directly in `snapshot-preflight.spec.ts`.)
     const history = snapshot.sa_shift_history as Json[];
-    history[history.length - 1].entries.push({ id: 'de-poison', type: 'out', amount: 0, note: 'poison', createdAt: '2026-05-01T03:00:00.000Z' });
+    history[history.length - 1].entries.push({ id: 'de-poison', type: 'sideways', amount: 100, note: 'poison', createdAt: '2026-05-01T03:00:00.000Z' });
 
     const tenantId = await provision();
     const res = await importFile(tenantId, snapshot);
@@ -273,6 +277,13 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185, #
     for (const table of ['products', 'sales', 'customers', 'mechanics', 'shifts', 'drawer_entries', 'movements']) {
       expect({ table, n: await count(tenantId, table) }).toEqual({ table, n: 0 });
     }
+    // #239 review issue 2: the job's `succeeded` write lives inside the same transaction as
+    // the business data (`writeSnapshot`'s last statement) — a rollback here must roll that
+    // back too, so the row is never left `succeeded` with no data behind it, and it never
+    // even reaches `result` (`markFailed`'s own UPDATE only ever sets `status`/`error`).
+    const [row] = await admin.query(`SELECT status, result FROM import_jobs WHERE tenant_id = $1 AND id = $2`, [tenantId, res.body.data.jobId]);
+    expect(row.status).toBe('failed');
+    expect(row.result).toBeNull();
   }, 30000);
 
   it.skipIf(Boolean(REAL_FILE))('refuses a second import into a tenant that already has bills, synchronously', async () => {
@@ -297,5 +308,76 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185, #
     const second = await importFile(tenantId, snapshot);
     expect(second.status).toBe(409);
     await waitForImportJob(tenantId, first.body.data.jobId);
+  }, 30000);
+
+  // #239 review issue 1(a): a worker crash or a BullMQ stall detection can leave a row
+  // `queued`/`running` forever — nothing else ever transitions it — and `uq_import_jobs_active`
+  // then refuses every later import for that tenant. `createJob` reclaims a row this stale
+  // (`STALE_JOB_CEILING_MINUTES` = 30 minutes) before it tries to insert a new one, but a
+  // genuinely fresh in-flight row must still win the 409, same as today.
+  it.skipIf(Boolean(REAL_FILE))('reclaims a stale queued/running import job instead of refusing forever (#239 issue 1a)', async () => {
+    const tenantId = await provision();
+    const staleJobId = `imp_stale_${randomUUID()}`;
+    await admin.query(
+      `INSERT INTO import_jobs (tenant_id, id, status, payload, started_at, created_at)
+       VALUES ($1, $2, 'running', '{}'::jsonb, now() - interval '31 minutes', now() - interval '31 minutes')`,
+      [tenantId, staleJobId],
+    );
+
+    const snapshot = generateSyntheticSnapshot({ scale: 'small', profile: 'clean' });
+    const res = await importFile(tenantId, snapshot);
+    expect(res.status).toBe(202);
+    expect(res.body.data.jobId).not.toBe(staleJobId);
+
+    const [stale] = await admin.query(
+      `SELECT status, error, payload FROM import_jobs WHERE tenant_id = $1 AND id = $2`,
+      [tenantId, staleJobId],
+    );
+    expect(stale.status).toBe('failed');
+    expect(stale.error).toBe('stale: worker lost');
+    expect(stale.payload).toBeNull();
+
+    const job = await waitForImportJob(tenantId, res.body.data.jobId);
+    expect(job.status).toBe('succeeded');
+  }, 30000);
+
+  it.skipIf(Boolean(REAL_FILE))('never reclaims a running row that is still within the staleness ceiling — 409, same as today', async () => {
+    const tenantId = await provision();
+    const freshJobId = `imp_fresh_${randomUUID()}`;
+    await admin.query(
+      `INSERT INTO import_jobs (tenant_id, id, status, payload, started_at, created_at)
+       VALUES ($1, $2, 'running', '{}'::jsonb, now() - interval '5 minutes', now() - interval '5 minutes')`,
+      [tenantId, freshJobId],
+    );
+
+    const snapshot = generateSyntheticSnapshot({ scale: 'small', profile: 'clean' });
+    const res = await importFile(tenantId, snapshot);
+    expect(res.status).toBe(409);
+
+    const [fresh] = await admin.query(`SELECT status FROM import_jobs WHERE tenant_id = $1 AND id = $2`, [tenantId, freshJobId]);
+    expect(fresh.status).toBe('running'); // untouched — the reclaim never fired on it
+  }, 15000);
+
+  // #239 review issue 2: `writeSnapshot` writes `status = 'succeeded'` in the same transaction
+  // as the business data, so a `processJob` retry that lands after the commit (the worker's
+  // own acknowledgement lost, not the import) must answer the recorded result instead of
+  // re-running the write — the tenant already has bills by then, so re-running would 409
+  // in pre-flight if the short-circuit were missing.
+  it.skipIf(Boolean(REAL_FILE))('processJob is idempotent once the job is already succeeded (#239 issue 2)', async () => {
+    const snapshot = generateSyntheticSnapshot({ scale: 'small', profile: 'clean' });
+    const tenantId = await provision();
+    const first = await importFile(tenantId, snapshot);
+    expect(first.status).toBe(202);
+    const jobId = first.body.data.jobId as string;
+    const job = await waitForImportJob(tenantId, jobId);
+    expect(job.status).toBe('succeeded');
+    const before = await count(tenantId, 'products');
+
+    const importService = app.get(TenantImportService);
+    const replay = await importService.processJob(jobId);
+    expect(replay).toEqual({ tombstones: job.tombstones, droppedSuppliers: job.droppedSuppliers });
+
+    // Not re-imported: same product count as right after the first (real) run.
+    expect(await count(tenantId, 'products')).toBe(before);
   }, 30000);
 });

@@ -1,5 +1,5 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
-import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
+import { InjectQueue, OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { type Job, Queue } from 'bullmq';
 import type { Logger } from 'pino';
 import { LOGGER } from '../../infra/logger.provider.js';
@@ -10,8 +10,9 @@ import { JOB_TENANT_IMPORT, QUEUE_DLQ, QUEUE_TENANT_IMPORT, type TenantImportJob
  * #239: the worker side of the tenant import. `TenantImportService` does all the database
  * work on `ADMIN_DATA_SOURCE` (platform plane, ADR-0002/0005 — see that file's own
  * `tenant-door.spec.ts` allowlist entry); this processor owns only the BullMQ shape: mark
- * running, run it, mark succeeded/failed, and — on the last attempt only — route to the DLQ,
- * the same rule `TenantJobRunner.routeToDlq` follows for every other job. It does not use
+ * running, run it (success is recorded by the import's own transaction, not here), mark
+ * failed, and — on the last attempt only — route to the DLQ, the same rule
+ * `TenantJobRunner.routeToDlq` follows for every other job. It does not use
  * `TenantJobRunner` itself: that helper opens a `pos_app`/RLS transaction scoped to one
  * tenant (`SET LOCAL app.tenant_id`), and the import's whole point is writing historical rows
  * as the owner role, exactly as the synchronous endpoint always has.
@@ -33,8 +34,9 @@ export class TenantImportProcessor extends WorkerHost {
   async process(job: Job<TenantImportJobPayload>): Promise<unknown> {
     const { name, data } = job;
     if (name !== JOB_TENANT_IMPORT) {
-      // `BackupProcessor` shares this queue and handles its own job name; anything else here
-      // is a bug, not this processor's job to skip silently.
+      // This queue has exactly one producer (`TenantImportService.createJob`) and exactly
+      // one job name — reaching here is a bug, not something to skip silently, but the
+      // defensive shape matches every other processor in this codebase.
       return undefined;
     }
 
@@ -45,8 +47,9 @@ export class TenantImportProcessor extends WorkerHost {
 
     await this.importService.markRunning(data.importJobId);
     try {
+      // `processJob` writes `status = 'succeeded'` itself, atomically with the import
+      // transaction (#239 review, issue 2) — there is nothing left to mark here.
       const result = await this.importService.processJob(data.importJobId);
-      await this.importService.markSucceeded(data.importJobId, result);
       this.logger.info({ importJobId: data.importJobId, tenantId: data.tenantId, result }, 'Tenant import completed successfully');
       return result;
     } catch (err) {
@@ -58,6 +61,34 @@ export class TenantImportProcessor extends WorkerHost {
         await this.routeToDlq(job, err);
       }
       throw err;
+    }
+  }
+
+  /**
+   * #239 review, issue 1(b): a worker crash or a BullMQ-detected stall can end a job's *last*
+   * attempt without `process()`'s own `catch` block above ever running — the process that was
+   * running it is gone, so nothing there ever calls `markFailed`. BullMQ still fires this
+   * event, on whichever worker is left (or the same one, restarted), once it gives up on the
+   * job for good. `STALE_JOB_CEILING_MINUTES` (`tenant-import.service.ts`) is the eventual
+   * fallback if even this never runs (e.g. no worker survives to receive it); this handler is
+   * the fast path that avoids waiting on that ceiling at all.
+   *
+   * Ordinary attempt-exhaustion (the `catch` above ran and this fires anyway, since BullMQ
+   * marks the job failed either way) calls `markFailed` a second time — idempotent, and
+   * cheaper to allow than to gate on a status read here.
+   */
+  @OnWorkerEvent('failed')
+  async onFailed(job: Job<TenantImportJobPayload> | undefined, error: Error): Promise<void> {
+    if (!job || job.name !== JOB_TENANT_IMPORT) return;
+    const maxAttempts = job.opts.attempts ?? 1;
+    if (job.attemptsMade < maxAttempts) return; // more attempts remain — not final yet
+    try {
+      await this.importService.markFailed(job.data.importJobId, error?.message ?? 'worker stalled', true);
+    } catch (markErr) {
+      this.logger.error(
+        { jobId: job.id, importJobId: job.data.importJobId, err: markErr },
+        'failed to record a stalled tenant import job as failed',
+      );
     }
   }
 

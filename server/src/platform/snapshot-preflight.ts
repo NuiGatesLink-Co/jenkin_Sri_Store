@@ -173,27 +173,118 @@ export function planClampViolations(snapshot: Row): ClampViolation[] {
       out.push({ table, id, field, value: v ?? null, rule: 'must be a positive whole number' });
     }
   };
+  // #239 review (money fields `round2()` turns NaN into 0 for, with no pre-flight check at
+  // all): `finite` covers every one of them — a value the file supplies that is not a number
+  // silently became 0 with no error, corrupting a price, a total or a balance. `nonNegMoney`/
+  // `positiveMoney` add the stricter rule where Postgres has a real `CHECK` on the column
+  // (`1788652800000-InitialSchema.ts`): `products.price/cost >= 0`, `po_items.cost >= 0`,
+  // `credit_payments.amount > 0`, `drawer_entries.amount > 0`. Everywhere else (supplier
+  // costs, sale/return totals, `mechanicDelta`, mechanic running totals, shift cash) has no
+  // `CHECK`, so only non-finite is refused — `mechanicDelta` in particular is negative by
+  // design (a discount given), and refusing that would reject ordinary bills.
+  const finite = (table: string, id: string, field: string, v: unknown) => {
+    if (v == null) return;
+    if (!Number.isFinite(asNumber(v))) out.push({ table, id, field, value: v, rule: 'must be a finite number' });
+  };
+  const nonNegMoney = (table: string, id: string, field: string, v: unknown) => {
+    if (v == null) return;
+    const n = asNumber(v);
+    if (!Number.isFinite(n)) out.push({ table, id, field, value: v, rule: 'must be a finite number' });
+    else if (n < 0) out.push({ table, id, field, value: v, rule: 'must be ≥ 0' });
+  };
+  const positiveMoney = (table: string, id: string, field: string, v: unknown) => {
+    if (v == null) return;
+    const n = asNumber(v);
+    if (!Number.isFinite(n)) out.push({ table, id, field, value: v, rule: 'must be a finite number' });
+    else if (n <= 0) out.push({ table, id, field, value: v, rule: 'must be > 0' });
+  };
 
-  for (const p of rows(snapshot.sa_products)) nonNegative('products', String(p.id), 'minStock', p.minStock ?? p.min_stock);
-  for (const c of rows(snapshot.sa_customers)) nonNegative('customers', String(c.id), 'points', c.points);
-  for (const m of rows(snapshot.sa_mechanics)) nonNegative('mechanics', String(m.id), 'creditBalance', m.creditBalance ?? m.credit_balance);
+  for (const p of rows(snapshot.sa_products)) {
+    const id = String(p.id);
+    nonNegative('products', id, 'minStock', p.minStock ?? p.min_stock);
+    nonNegMoney('products', id, 'price', p.price);
+    nonNegMoney('products', id, 'cost', p.cost);
+  }
+  for (const sup of rows(snapshot.sa_suppliers)) {
+    const id = String(sup.id);
+    finite('suppliers', id, 'unitCost', sup.unitCost ?? sup.unit_cost);
+    finite('suppliers', id, 'freight', sup.freight);
+  }
+  for (const c of rows(snapshot.sa_customers)) {
+    const id = String(c.id);
+    nonNegative('customers', id, 'points', c.points);
+    finite('customers', id, 'totalSpend', c.totalSpend ?? c.total_spend);
+  }
+  for (const m of rows(snapshot.sa_mechanics)) {
+    const id = String(m.id);
+    nonNegative('mechanics', id, 'creditBalance', m.creditBalance ?? m.credit_balance);
+    finite('mechanics', id, 'creditLimit', m.creditLimit ?? m.credit_limit);
+    finite('mechanics', id, 'totalSales', m.totalSales ?? m.total_sales);
+    finite('mechanics', id, 'totalCredit', m.totalCredit ?? m.total_credit);
+    finite('mechanics', id, 'totalDiscount', m.totalDiscount ?? m.total_discount);
+    finite('mechanics', id, 'totalMarkup', m.totalMarkup ?? m.total_markup);
+  }
 
   for (const s of rows(snapshot.sa_sales)) {
     const id = String(s.id);
     nonNegative('sales', id, 'pointsGranted', s.pointsGranted ?? s.points_granted);
-    rows(s.items).forEach((item, i) => positiveInteger('saleItems', `${id}:${i + 1}`, 'qty', item.qty));
+    finite('sales', id, 'subtotal', s.subtotal);
+    finite('sales', id, 'discount', s.discount);
+    finite('sales', id, 'total', s.total);
+    // Negative by design: a mechanic markup/discount delta, never `CHECK`-constrained.
+    finite('sales', id, 'mechanicDelta', s.mechanicDelta ?? s.mechanic_delta);
+    rows(s.items).forEach((item, i) => {
+      const lineId = `${id}:${i + 1}`;
+      positiveInteger('saleItems', lineId, 'qty', item.qty);
+      finite('saleItems', lineId, 'price', item.price);
+      finite('saleItems', lineId, 'costAtSale', item.costAtSale ?? item.cost);
+    });
   }
   for (const r of rows(snapshot.sa_returns)) {
     const id = String(r.id);
-    rows(r.items).forEach((item, i) => positiveInteger('returnItems', `${id}:${i + 1}`, 'qty', item.qty));
+    finite('returns', id, 'refundSubtotal', r.refundSubtotal ?? r.refund_subtotal);
+    finite('returns', id, 'refundDiscount', r.refundDiscount ?? r.refund_discount);
+    finite('returns', id, 'refundTotal', r.refundTotal ?? r.refund_total);
+    rows(r.items).forEach((item, i) => {
+      const lineId = `${id}:${i + 1}`;
+      positiveInteger('returnItems', lineId, 'qty', item.qty);
+      finite('returnItems', lineId, 'price', item.price);
+    });
   }
   for (const po of rows(snapshot.sa_pos)) {
     const id = String(po.id);
-    rows(po.items).forEach((item, i) => positiveInteger('poItems', `${id}:${i + 1}`, 'qty', item.qty));
+    rows(po.items).forEach((item, i) => {
+      const lineId = `${id}:${i + 1}`;
+      positiveInteger('poItems', lineId, 'qty', item.qty);
+      nonNegMoney('poItems', lineId, 'cost', item.cost);
+    });
   }
   for (const q of rows(snapshot.sa_quotes)) {
     const id = String(q.id);
-    rows(q.items).forEach((item, i) => positiveInteger('quoteItems', `${id}:${i + 1}`, 'qty', item.qty));
+    finite('quotes', id, 'subtotal', q.subtotal);
+    finite('quotes', id, 'discount', q.discount);
+    finite('quotes', id, 'total', q.total);
+    rows(q.items).forEach((item, i) => {
+      const lineId = `${id}:${i + 1}`;
+      positiveInteger('quoteItems', lineId, 'qty', item.qty);
+      finite('quoteItems', lineId, 'price', item.price);
+    });
+  }
+  for (const cp of rows(snapshot.sa_credit_payments)) {
+    positiveMoney('creditPayments', String(cp.id), 'amount', cp.amount);
+  }
+
+  const shiftsForMoney: Array<{ sh: Row; idx: number }> = [
+    ...(snapshot.sa_cash_drawer && typeof snapshot.sa_cash_drawer === 'object' ? [{ sh: snapshot.sa_cash_drawer as Row, idx: 0 }] : []),
+    ...rows(snapshot.sa_shift_history).map((sh, i) => ({ sh, idx: i + 1 })),
+  ];
+  for (const { sh, idx } of shiftsForMoney) {
+    const label = String(sh.id ?? sh.date ?? sh.dateStr ?? sh.date_str ?? `#${idx}`);
+    finite('shifts', label, 'startingCash', sh.startingCash ?? sh.starting_cash);
+    finite('shifts', label, 'physicalCash', sh.physicalCash ?? sh.physical_cash);
+    rows(sh.entries).forEach((entry, j) => {
+      positiveMoney('drawerEntries', `${label}:${String(entry.id ?? j)}`, 'amount', entry.amount);
+    });
   }
 
   if (snapshot.sa_settings && typeof snapshot.sa_settings === 'object') {
@@ -205,6 +296,7 @@ export function planClampViolations(snapshot: Row): ClampViolation[] {
         out.push({ table: 'settings', id: '-', field: 'quoteValidDays', value: qvd, rule: 'must be a positive whole number' });
       }
     }
+    finite('settings', '-', 'taxRate', set.taxRate ?? set.tax_rate);
   }
 
   return out;

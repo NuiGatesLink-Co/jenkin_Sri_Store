@@ -588,5 +588,26 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
 
       expect(tenantCache.invalidate).not.toHaveBeenCalled();
     });
+
+    // #239 review issue 3: `round2()` used to turn a present-but-unparseable money value
+    // into a silent 0, with no pre-flight check on any of ~28 money fields. `planClampViolations`
+    // now refuses it before the write ever starts (`snapshot-preflight.spec.ts` covers the
+    // pure scan directly; this proves it is actually wired into `preflight()`/`importSnapshot`).
+    it('pre-flight scan rejects a sale total that does not parse as a number (#239 item 3)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
+      await expect(
+        importService.importSnapshot(
+          't1',
+          {
+            __meta: { version: 2 },
+            sa_sales: [{ id: 's1', total: 'corrupt', items: [] }],
+          },
+          'adm1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockAdminDs.transaction).not.toHaveBeenCalled();
+    });
   });
 });

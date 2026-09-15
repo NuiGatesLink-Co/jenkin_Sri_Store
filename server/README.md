@@ -1079,13 +1079,20 @@ now does two things in order:
    `receipt_no` — a different table), an unparseable date anywhere `parseDate()` would otherwise
    default to import time, a value that used to clamp silently (negative mechanic
    `creditBalance`/customer `points`/product `minStock`, or a sale/return/PO/quote line `qty`
-   that was zero, negative, non-integer or missing), and #238's tombstone/FK checks
-   (`missingRefs`/`unnamed`/`returnsWithoutSale`). The first four are `snapshot-preflight.ts`
+   that was zero, negative, non-integer or missing), a money field `round2()` would otherwise turn
+   into a silent 0 (every price/cost/total/balance `tenant-import.service.ts` rounds — products,
+   suppliers, customers, mechanics, sales, returns, POs, quotes, credit payments, shifts, drawer
+   entries, `settings.taxRate` — refused if it is present and does not parse as a finite number,
+   and refused as negative/non-positive on the subset Postgres itself `CHECK`s, e.g.
+   `products.price/cost >= 0`, `credit_payments.amount > 0`), and #238's tombstone/FK checks
+   (`missingRefs`/`unnamed`/`returnsWithoutSale`). The first five are `snapshot-preflight.ts`
    (pure, unit-tested on their own — `snapshot-preflight.spec.ts`); the tombstone checks are
    `snapshot-tombstones.ts` (#238/#252, unchanged). **#22's lesson applied to import: validate,
    then clamp — never the other way round.** A clamp on an unvalidated value (the old
-   `Math.max(0, …)`/`Math.max(1, …)` calls) turns a loud corruption into a quiet one; every such
-   clamp in `tenant-import.service.ts` now runs only on a value pre-flight has already accepted.
+   `Math.max(0, …)`/`Math.max(1, …)` calls, or `round2()`'s old `isNaN(num) ? 0 : …`) turns a loud
+   corruption into a quiet one; every such clamp in `tenant-import.service.ts` now runs only on a
+   value pre-flight has already accepted — `round2()` itself now throws (never returns 0) if an
+   unparseable value somehow reaches it anyway, as defence in depth, not a fallback path.
 2. **Enqueue** — a row in `import_jobs` (own migration, `1788652802200-ImportJobs.ts`) carries the
    whole snapshot as `jsonb`, and a tiny `TenantImportJobPayload` (`{tenantId, correlationId,
    importJobId}`) goes on its own queue, `QUEUE_TENANT_IMPORT` — **not** `QUEUE_BACKUP`, even
@@ -1111,6 +1118,14 @@ having a TTL). `import_jobs.payload` is `jsonb`, which Postgres TOASTs out of th
 automatically, and is cleared (`payload = NULL`) once a job reaches a terminal state — the
 outcome (`result`/`error`) stays, the shop's actual data at rest does not.
 
+🔴 **`idempotency-routes.spec.ts` needed no change for #239.** `POST .../import` and
+`GET .../import/:jobId` never call `idempotencyParamsOf`/`runIdempotent` — they are platform-admin
+routes, not one of the pinned POS `Idempotency-Key` claiming routes that spec scans for — so its
+directory walk (which does cover `src/platform/`) finds nothing to record for them and skips both
+silently, by the same `if (!claimed && !mentions) continue` rule every non-idempotent route hits.
+Their own duplicate-request defence is `uq_import_jobs_active` (below) plus the
+tenant-already-has-bills pre-flight check, not that module.
+
 **Idempotency.** `import_jobs (tenant_id) WHERE status IN ('queued','running')` is a partial
 unique index: a second `POST .../import` for a tenant with one already in flight is a `409` on
 that constraint (checked after pre-flight, so a bad file never even reaches it). A **completed**
@@ -1121,16 +1136,64 @@ row, no special-casing needed. `TenantImportProcessor` re-runs the full pre-flig
 depth — the payload cannot have changed since enqueue, but nothing besides the partial unique
 index stops a second code path from writing sales in between) before writing.
 
+**A worker that crashes or stalls no longer wedges the tenant forever (#239 review issue 1).**
+Nothing transitions a `queued`/`running` row on its own if the process running it dies (a killed
+container, an OOM, a BullMQ-detected stall with no clean `failed` event) — `uq_import_jobs_active`
+would then refuse every future import for that tenant, permanently, with no operator-visible cause
+beyond a `409`. Two independent nets:
+- `createJob` reclaims a stale row **in the same transaction** as its own insert: any row for the
+  tenant still `queued`/`running` with `COALESCE(started_at, created_at)` older than
+  `STALE_JOB_CEILING_MINUTES` (30) is marked `failed`, `error = 'stale: worker lost'`, payload
+  cleared, before the new row is inserted — a genuinely in-flight row's timestamp is recent and
+  survives untouched, so a real concurrent attempt still hits the unique index and gets `409`.
+  30 minutes is deliberately generous: locally the import runs ~6.4 s per 2 MiB, so the 10 MiB
+  body limit (`IMPORT_BODY_LIMIT`) is ≈32 s even before retries, and `DEFAULT_JOB_OPTIONS`' 3
+  attempts with exponential-jitter backoff add at most ~7 s more — a job that is merely slow, even
+  through every retry, finishes in well under two minutes.
+- `TenantImportProcessor.onFailed` (`@OnWorkerEvent('failed')`) marks the job failed the moment
+  BullMQ itself gives up on it — on whichever worker receives the event, not necessarily the one
+  that was running it — so a wedged tenant is freed within the retry backoff instead of waiting on
+  the 30-minute ceiling; the ceiling is the fallback for the case where no worker survives to
+  receive that event at all.
+
+Manual recovery, if both nets are somehow bypassed (e.g. a row hand-inserted or corrupted by
+something outside this code path): find and clear it —
+
+```sql
+SELECT tenant_id, id, status, started_at, created_at FROM import_jobs
+ WHERE status IN ('queued', 'running') AND COALESCE(started_at, created_at) < now() - interval '30 minutes';
+
+UPDATE import_jobs SET status = 'failed', error = 'stale: manual recovery', payload = NULL, finished_at = clock_timestamp()
+ WHERE tenant_id = '<tenant-id>' AND id = '<job-id>' AND status IN ('queued', 'running');
+```
+
 **Retries and the DLQ.** `QUEUE_TENANT_IMPORT` uses `DEFAULT_JOB_OPTIONS` like every other queue
 (3 attempts, BullMQ's builtin exponential-jitter backoff, #201) — a transaction failure here is
 almost always deterministic (bad data the pre-flight missed, or a row Postgres itself refuses,
-e.g. the drawer-entry `CHECK amount > 0` `test/import-snapshot.e2e-spec.ts` pins), so a retry
+e.g. the drawer-entry `CHECK type IN ('in','out')` `test/import-snapshot.e2e-spec.ts` pins — an
+`amount` outside `CHECK amount > 0` is now refused in pre-flight itself, issue 3 below), so a retry
 rarely helps, but it costs nothing more than the existing backoff delay and keeps every queue
 behaving the same way. `import_jobs.payload` is kept across a non-final failure (a retry has to
-re-read it) and cleared only once `TenantImportProcessor` knows this was the last attempt — the
-same `job.attemptsMade + 1 >= maxAttempts` rule `TenantJobRunner.routeToDlq` uses for everything
-else, duplicated locally rather than shared because `TenantJobRunner.runWithTenantContext` opens
-a `pos_app`/RLS transaction scoped to one tenant, which is not what this job does (see below).
+re-read it) and cleared only once the last attempt is known final — `process()`'s own catch uses
+`job.attemptsMade + 1 >= maxAttempts` (the same rule `TenantJobRunner.routeToDlq` uses for
+everything else); `onFailed` above uses BullMQ's own post-attempt `job.attemptsMade >= maxAttempts`
+and calls `markFailed` a second time in the ordinary case where `process()`'s catch already ran —
+idempotent, and cheaper to allow than to gate on a status read first. Neither path shares
+`TenantJobRunner.runWithTenantContext`, which opens a `pos_app`/RLS transaction scoped to one
+tenant — not what this job does (see below).
+
+**A crash between the import's `COMMIT` and recording success cannot happen (#239 review issue
+2).** `writeSnapshot` writes `import_jobs.status = 'succeeded'` (with `result`, and `payload`
+cleared) as the **last statement inside the same `adminDs.transaction`** as the business data —
+there is no separate `markSucceeded` call after the fact for a crash to land between. Either both
+commit or neither does: a rolled-back import (pre-flight passed, but a later row Postgres itself
+refuses) leaves the row exactly as it was, and `TenantImportProcessor`'s catch then marks it
+`failed` the ordinary way. `processJob` checks `status === 'succeeded'` before doing anything else,
+so a retry that lands after a successful commit — the worker's own acknowledgement lost, not the
+import — answers the transaction's own recorded result instead of importing the shop a second
+time; without that check it would re-run pre-flight against a tenant that already has bills and
+answer `409` instead, which is exactly how `test/import-snapshot.e2e-spec.ts`'s idempotent-replay
+test proves the check is wired in.
 
 **No `TenantJobRunner`.** Every other BullMQ processor runs its work through
 `runWithTenantContext`, which sets `app.tenant_id` on the `pos_app` role and enforces the #213
