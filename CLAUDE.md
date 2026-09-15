@@ -818,6 +818,10 @@ client id before any check and stops at the first non-verdict (a head op stuck 3
 shifts per day, online void = reason only (no PIN), the offline-PIN 3-day window is enforced on the till only, production =
 the department VM `mob04` deployed by the hardened self-hosted runner from PR #237 (F4′ reversed the pull-based timer; a real-shop cutover is a later phase).
 §2 records the design decisions; the only open item is the Thai-strings ticket (F10). ADR-0004/0007/0009/0010/0013 carry dated addenda.
+Merged as PR #254 (`1072f17`). 🔴 **The §16 slices are not ticketed yet**, and #189/#190/#192–#195/#211/#212/#228–#230 still carry
+pre-spec content (7 days, 5 s rewind, `offlineOk`, cashier) — do not implement from them. The owner wants **lane-independent tickets**
+(no lane waits on another); slice 8 (#228) is a hub, so the lane split (option A: one lane owns the offline path; option B: contract
+first) is still the owner's call, and `/to-tickets` is user-invoked only. Read `docs/handoff_log/phase2-wayfinder-spec-2026-09-15.md`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
