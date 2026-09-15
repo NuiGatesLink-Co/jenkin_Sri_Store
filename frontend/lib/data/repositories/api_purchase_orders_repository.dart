@@ -122,7 +122,7 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
             .toList(),
       };
 
-      final res = await apiClient.post('/api/v1/purchase-orders', body: body);
+      final res = await apiClient.post('/api/v1/purchase-orders', body: body, headers: idempotencyKey());
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
         final realId = (resMap['id'] ?? newId('po')) as String;
@@ -169,7 +169,7 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
   @override
   Future<List<String>> receivePO(String id) async {
     try {
-      final res = await apiClient.post('/api/v1/purchase-orders/$id/receive');
+      final res = await apiClient.post('/api/v1/purchase-orders/$id/receive', headers: idempotencyKey());
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
         final now = DateTime.now();
@@ -266,7 +266,7 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
   @override
   Future<void> cancelPO(String id) async {
     try {
-      await apiClient.post('/api/v1/purchase-orders/$id/cancel');
+      await apiClient.post('/api/v1/purchase-orders/$id/cancel', headers: idempotencyKey());
       await (db.update(db.purchaseOrders)..where((t) => t.id.equals(id))).write(
         PurchaseOrdersCompanion(
           status: const Value('cancelled'),
@@ -284,7 +284,7 @@ class ApiPurchaseOrdersRepository extends PurchaseOrdersRepository {
   @override
   Future<void> deletePO(String id) async {
     try {
-      await apiClient.delete('/api/v1/purchase-orders/$id');
+      await apiClient.delete('/api/v1/purchase-orders/$id', headers: idempotencyKey());
       await (db.delete(db.poItems)..where((t) => t.poId.equals(id))).go();
       await (db.delete(db.purchaseOrders)..where((t) => t.id.equals(id))).go();
       return;

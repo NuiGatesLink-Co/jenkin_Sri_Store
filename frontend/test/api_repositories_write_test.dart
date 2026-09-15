@@ -1,0 +1,266 @@
+// Unit tests for Ticket #55 write operations & Idempotency-Key headers (ADR-0010).
+
+import 'package:drift/drift.dart' hide isNull, isNotNull;
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:srisurart_pos/core/network/api_client.dart';
+import 'package:srisurart_pos/data/db/database.dart';
+import 'package:srisurart_pos/data/repositories/api_customers_repository.dart';
+import 'package:srisurart_pos/data/repositories/api_mechanics_repository.dart';
+import 'package:srisurart_pos/data/repositories/api_products_repository.dart';
+import 'package:srisurart_pos/data/repositories/api_purchase_orders_repository.dart';
+import 'package:srisurart_pos/data/repositories/api_quotes_repository.dart';
+import 'package:srisurart_pos/domain/models/aggregates.dart';
+
+void main() {
+  late AppDatabase db;
+
+  setUp(() {
+    db = AppDatabase(NativeDatabase.memory());
+  });
+
+  tearDown(() async {
+    await db.close();
+  });
+
+  test('ApiProductsRepository passes Idempotency-Key header on add, update, delete, adjustStock', () async {
+    final headersSeen = <String, String?>{};
+
+    final mockClient = MockClient((request) async {
+      final key = request.headers['idempotency-key'] ?? request.headers['Idempotency-Key'];
+      headersSeen[request.url.path] = key;
+
+      if (request.url.path == '/api/v1/products' && request.method == 'POST') {
+        return http.Response(
+          '''{
+            "status": "success",
+            "data": {
+              "id": "p_100",
+              "partNo": "PN100",
+              "name": "Spark Plug",
+              "price": "150.00",
+              "cost": "100.00",
+              "stock": 10
+            }
+          }''',
+          201,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.url.path == '/api/v1/products/p_100' && request.method == 'PATCH') {
+        return http.Response(
+          '''{
+            "status": "success",
+            "data": {
+              "id": "p_100",
+              "partNo": "PN100",
+              "name": "Spark Plug Ir",
+              "price": "180.00",
+              "cost": "100.00",
+              "stock": 10
+            }
+          }''',
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.url.path == '/api/v1/products/p_100/adjust-stock' && request.method == 'POST') {
+        return http.Response(
+          '''{
+            "status": "success",
+            "data": {
+              "productId": "p_100",
+              "stockAfter": 15,
+              "movement": {
+                "id": "mv_1",
+                "productId": "p_100",
+                "partNo": "PN100",
+                "name": "Spark Plug Ir",
+                "delta": 5,
+                "type": "adjust",
+                "stockAfter": 15,
+                "date": "2026-09-15T10:00:00.000Z"
+              }
+            }
+          }''',
+          201,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.url.path == '/api/v1/products/p_100' && request.method == 'DELETE') {
+        return http.Response('{"status":"success","data":{"id":"p_100","deleted":true}}', 200);
+      }
+      return http.Response('{"status":"error"}', 404);
+    });
+
+    final apiClient = ApiClient(httpClient: mockClient);
+    final repo = ApiProductsRepository(db, apiClient);
+
+    // 1. Add product
+    final added = await repo.add(const ProductsCompanion(
+      partNo: Value('PN100'),
+      name: Value('Spark Plug'),
+      price: Value(150.0),
+      cost: Value(100.0),
+      stock: Value(10),
+    ));
+    expect(added, isNotNull);
+    expect(headersSeen['/api/v1/products'], isNotNull);
+
+    // 2. Update product
+    await repo.update('p_100', const ProductsCompanion(name: Value('Spark Plug Ir'), price: Value(180.0)));
+    expect(headersSeen['/api/v1/products/p_100'], isNotNull);
+
+    // 3. Adjust stock
+    await repo.adjustStock('p_100', 5, 'adjust', 'Count adjustment');
+    expect(headersSeen['/api/v1/products/p_100/adjust-stock'], isNotNull);
+
+    final patchedInDrift = await (db.select(db.products)..where((t) => t.id.equals('p_100'))).getSingleOrNull();
+    expect(patchedInDrift?.stock, 15);
+
+    // 4. Delete product
+    await repo.delete('p_100');
+    expect(headersSeen['/api/v1/products/p_100'], isNotNull);
+  });
+
+  test('ApiQuotesRepository updateQuote convert routes to POST /api/v1/quotes/:id/convert with Idempotency-Key', () async {
+    var convertCalled = false;
+    String? convertIdempotencyKey;
+
+    final mockClient = MockClient((request) async {
+      if (request.url.path == '/api/v1/quotes/q_50/convert' && request.method == 'POST') {
+        convertCalled = true;
+        convertIdempotencyKey = request.headers['idempotency-key'] ?? request.headers['Idempotency-Key'];
+        return http.Response(
+          '''{
+            "status": "success",
+            "data": {
+              "id": "q_50",
+              "status": "converted",
+              "convertedAt": "2026-09-15T12:00:00.000Z"
+            }
+          }''',
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response('{"status":"error"}', 404);
+    });
+
+    final apiClient = ApiClient(httpClient: mockClient);
+    final repo = ApiQuotesRepository(db, apiClient);
+
+    // Seed quote in Drift
+    await db.into(db.quotes).insert(
+          QuoteRow(
+            id: 'q_50',
+            quoteNo: 'QT202609-0050',
+            date: DateTime.now(),
+            validUntil: DateTime.now().add(const Duration(days: 30)),
+            status: 'open',
+            subtotal: 1000.0,
+            discount: 0.0,
+            total: 1000.0,
+          ),
+        );
+
+    await repo.updateQuote('q_50', const QuotesCompanion(status: Value('converted')));
+
+    expect(convertCalled, isTrue);
+    expect(convertIdempotencyKey, isNotNull);
+
+    final updatedDrift = await (db.select(db.quotes)..where((t) => t.id.equals('q_50'))).getSingleOrNull();
+    expect(updatedDrift?.status, 'converted');
+    expect(updatedDrift?.convertedAt, isNotNull);
+  });
+
+  test('ApiPurchaseOrdersRepository passes Idempotency-Key on savePO and receivePO', () async {
+    final headersSeen = <String, String?>{};
+
+    final mockClient = MockClient((request) async {
+      final key = request.headers['idempotency-key'] ?? request.headers['Idempotency-Key'];
+      headersSeen[request.url.path] = key;
+
+      if (request.url.path == '/api/v1/purchase-orders' && request.method == 'POST') {
+        return http.Response(
+          '''{
+            "status": "success",
+            "data": {
+              "id": "po_99",
+              "poNo": "PO202609-0099",
+              "supplier": "Denso",
+              "status": "open"
+            }
+          }''',
+          201,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.url.path == '/api/v1/purchase-orders/po_99/receive' && request.method == 'POST') {
+        return http.Response(
+          '''{
+            "status": "success",
+            "data": {
+              "id": "po_99",
+              "status": "received",
+              "updated": []
+            }
+          }''',
+          200,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response('{"status":"error"}', 404);
+    });
+
+    final apiClient = ApiClient(httpClient: mockClient);
+    final repo = ApiPurchaseOrdersRepository(db, apiClient);
+
+    final po = await repo.savePO(const PoInput(
+      supplier: 'Denso',
+      items: [PoLineInput(partNo: 'PN99', name: 'Filter', qty: 10, cost: 50.0)],
+    ));
+    expect(po.id, 'po_99');
+    expect(headersSeen['/api/v1/purchase-orders'], isNotNull);
+
+    await repo.receivePO('po_99');
+    expect(headersSeen['/api/v1/purchase-orders/po_99/receive'], isNotNull);
+  });
+
+  test('ApiCustomersRepository and ApiMechanicsRepository pass Idempotency-Key headers', () async {
+    final headersSeen = <String, String?>{};
+
+    final mockClient = MockClient((request) async {
+      final key = request.headers['idempotency-key'] ?? request.headers['Idempotency-Key'];
+      headersSeen[request.url.path] = key;
+
+      if (request.url.path == '/api/v1/customers' && request.method == 'POST') {
+        return http.Response(
+          '{"status":"success","data":{"id":"cus_1","code":"CUS001","name":"Somchai"}}',
+          201,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      if (request.url.path == '/api/v1/mechanics' && request.method == 'POST') {
+        return http.Response(
+          '{"status":"success","data":{"id":"mech_1","code":"MEC001","name":"Chang Noi","creditLimit":"5000.00"}}',
+          201,
+          headers: {'content-type': 'application/json'},
+        );
+      }
+      return http.Response('{"status":"error"}', 404);
+    });
+
+    final apiClient = ApiClient(httpClient: mockClient);
+    final customersRepo = ApiCustomersRepository(db, apiClient);
+    final mechanicsRepo = ApiMechanicsRepository(db, apiClient);
+
+    await customersRepo.addCustomer(const CustomersCompanion(name: Value('Somchai')));
+    expect(headersSeen['/api/v1/customers'], isNotNull);
+
+    await mechanicsRepo.addMechanic(const MechanicsCompanion(name: Value('Chang Noi')));
+    expect(headersSeen['/api/v1/mechanics'], isNotNull);
+  });
+}

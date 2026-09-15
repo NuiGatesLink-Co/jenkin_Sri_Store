@@ -187,7 +187,7 @@ class ApiProductsRepository extends ProductsRepository {
         if (data.compat.present && data.compat.value != null) 'compat': data.compat.value,
       };
 
-      final res = await apiClient.post('/api/v1/products', body: body);
+      final res = await apiClient.post('/api/v1/products', body: body, headers: idempotencyKey());
       if (res is Map) {
         final comp = _productToCompanion(Map<String, dynamic>.from(res));
         await db.into(db.products).insertOnConflictUpdate(comp);
@@ -216,7 +216,7 @@ class ApiProductsRepository extends ProductsRepository {
       if (patch.minStock.present) body['minStock'] = patch.minStock.value;
       if (patch.compat.present) body['compat'] = patch.compat.value;
 
-      final res = await apiClient.patch('/api/v1/products/$id', body: body);
+      final res = await apiClient.patch('/api/v1/products/$id', body: body, headers: idempotencyKey());
       if (res is Map) {
         final comp = _productToCompanion(Map<String, dynamic>.from(res));
         await db.into(db.products).insertOnConflictUpdate(comp);
@@ -235,7 +235,7 @@ class ApiProductsRepository extends ProductsRepository {
   @override
   Future<void> delete(String id) async {
     try {
-      await apiClient.delete('/api/v1/products/$id');
+      await apiClient.delete('/api/v1/products/$id', headers: idempotencyKey());
       // ADR-0010: soft-delete locally by setting deletedAt WITHOUT stamping client clock on updatedAt
       await (db.update(db.products)..where((t) => t.id.equals(id))).write(
         ProductsCompanion(
@@ -274,6 +274,7 @@ class ApiProductsRepository extends ProductsRepository {
       final res = await apiClient.post(
         '/api/v1/products/$productId/adjust-stock',
         body: body,
+        headers: idempotencyKey(),
       );
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
@@ -357,7 +358,7 @@ class ApiProductsRepository extends ProductsRepository {
     if (trimmed.isEmpty) return;
 
     try {
-      await apiClient.post('/api/v1/categories', body: {'name': trimmed});
+      await apiClient.post('/api/v1/categories', body: {'name': trimmed}, headers: idempotencyKey());
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
     } catch (_) {}
@@ -368,7 +369,7 @@ class ApiProductsRepository extends ProductsRepository {
   @override
   Future<void> deleteCategory(String name) async {
     try {
-      await apiClient.delete('/api/v1/categories/$name');
+      await apiClient.delete('/api/v1/categories/$name', headers: idempotencyKey());
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
     } catch (_) {}
