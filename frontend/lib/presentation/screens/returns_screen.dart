@@ -22,6 +22,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 
+import '../../core/network/server_error_resolver.dart';
 import '../../core/theme/app_colors.dart';
 import '../../core/utils/money.dart';
 import '../../data/db/database.dart';
@@ -238,8 +239,7 @@ class _ReturnsScreenState extends State<ReturnsScreen> {
     }
   }
 
-  String _msg(Object e) =>
-      e is Exception ? e.toString().replaceFirst('Exception: ', '') : '$e';
+  String _msg(Object e) => ServerErrorResolver.resolveCounterError(e);
 
   void _toast(String msg) {
     ScaffoldMessenger.of(context)

@@ -3,8 +3,43 @@
 // Maps server error codes to verbatim Thai error strings per:
 //   docs/Backend_design/02_API_SCREENS.md §8 & §8.1
 
+import 'dart:async';
+
+import 'package:http/http.dart' as http;
+
+import 'api_exception.dart';
+
 class ServerErrorResolver {
   ServerErrorResolver._();
+
+  /// Resolves an error occurring at the counter into a cashier-facing message.
+  ///
+  /// - A server verdict ([PosException]) keeps its message verbatim.
+  /// - Transport failures ([http.ClientException], [TimeoutException]) resolve
+  ///   to the canonical Thai connection sentence (), hiding raw
+  ///   English and URLs from cashiers (#199).
+  /// - An unhandled [ApiException] resolves to its Thai mapping ([resolve(null)] for 5xx).
+  /// - Generic exceptions drop the leading `Exception: ` prefix, while defensively
+  ///   masking any leaked URLs.
+  static String resolveCounterError(Object error) {
+    if (error is PosException) {
+      return error.message;
+    }
+    if (error is ApiException) {
+      if (error.statusCode >= 500) return resolve(null);
+      return error.thaiMessage;
+    }
+    if (error is http.ClientException || error is TimeoutException) {
+      return resolve(null);
+    }
+    final s = error.toString();
+    final clean =
+        s.startsWith('Exception: ') ? s.substring('Exception: '.length) : s;
+    if (clean.contains('http://') || clean.contains('https://')) {
+      return resolve(null);
+    }
+    return clean;
+  }
 
   /// Canonical error strings mapped from 02_API_SCREENS.md §8 & §8.1.
   static const Map<String, String> _canonicalMessages = {
