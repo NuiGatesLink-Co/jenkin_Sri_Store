@@ -116,6 +116,7 @@
       loop:
         - "{{ app_dir }}"
         - "{{ app_dir }}/docker"
+        - "{{ app_dir }}/docker/etcd"
         - "{{ app_dir }}/docker/nginx"
         - "{{ app_dir }}/docker/postgres"
         - "{{ app_dir }}/docker/postgres/init"
