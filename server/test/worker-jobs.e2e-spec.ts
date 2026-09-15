@@ -207,6 +207,45 @@ describe('Worker Jobs & Queue Integration (e2e)', () => {
     });
   });
 
+  describe('#169: idem.cleanup with no tenantId sweeps every tenant under RLS', () => {
+    const OTHER_TENANT_ID = '16916916-9169-4169-9169-169169169169';
+
+    it('deletes expired keys in two tenants and keeps fresh ones', async () => {
+      await resetTenant(fixture.admin, OTHER_TENANT_ID, { cache: fixture.cache });
+      const stamp = Date.now();
+      const seed = (tenantId: string, key: string, age: string) =>
+        fixture.admin.query(
+          `INSERT INTO idempotency_keys (tenant_id, key, endpoint, request_hash, status, response_code, response_body, created_at)
+           VALUES ($1::uuid, $2, '/sales', 'hash', 'done', 201, '{"ok":true}', now() - $3::interval)`,
+          [tenantId, key, age],
+        );
+      await seed(TENANT_ID, `g-exp-a-${stamp}`, '25 hours');
+      await seed(OTHER_TENANT_ID, `g-exp-b-${stamp}`, '25 hours');
+      await seed(TENANT_ID, `g-fresh-a-${stamp}`, '1 hour');
+      await seed(OTHER_TENANT_ID, `g-fresh-b-${stamp}`, '1 hour');
+
+      const job = await maintenanceQueue.add(JOB_IDEM_CLEANUP, {
+        correlationId: `corr-global-${stamp}`,
+        olderThanSeconds: 86400,
+      });
+
+      const remaining = async (): Promise<string[]> =>
+        (
+          await fixture.admin.query(
+            `SELECT key FROM idempotency_keys WHERE key LIKE $1 ORDER BY key`,
+            [`g-%-${stamp}`],
+          )
+        ).map((r: { key: string }) => r.key);
+
+      // The old branch deleted 0 rows and still completed: wait on the rows, not the job.
+      await waitFor(async () => (await remaining()).length === 2);
+      expect(await remaining()).toEqual([`g-fresh-a-${stamp}`, `g-fresh-b-${stamp}`]);
+      expect((await maintenanceQueue.getJob(job.id!))?.returnvalue).toMatchObject({
+        fannedOut: expect.any(Number),
+      });
+    });
+  });
+
   describe('AC5: POST /quotes/purge & quotes.purge background job', () => {
     it('answers 202 Accepted immediately and purges quotes older than olderThanDays in background', async () => {
       const oldQuoteId = `quote-old-${Date.now()}`;

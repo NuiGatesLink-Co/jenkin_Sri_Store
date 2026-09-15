@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { Processor, WorkerHost } from '@nestjs/bullmq';
-import type { Job } from 'bullmq';
+import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
+import type { Job, Queue } from 'bullmq';
 import { DataSource } from 'typeorm';
 import type { Logger } from 'pino';
 import { LOGGER } from '../../infra/logger.provider.js';
@@ -21,6 +21,7 @@ export class MaintenanceProcessor extends WorkerHost {
     private readonly dataSource: DataSource,
     private readonly tenantJobRunner: TenantJobRunner,
     @Inject(LOGGER) private readonly logger: Logger,
+    @InjectQueue(QUEUE_MAINTENANCE) private readonly maintenanceQueue: Queue,
   ) {
     super();
   }
@@ -67,16 +68,32 @@ export class MaintenanceProcessor extends WorkerHost {
       });
     }
 
-    // System-wide cleanup across all tenants
-    const result = await this.dataSource.query(
-      `DELETE FROM idempotency_keys
-        WHERE created_at < now() - ($1::int * interval '1 second')
-        RETURNING key`,
-      [ttlSeconds],
+    // No tenant: fan out one tenant-scoped job per tenant (#169). The old branch ran the
+    // DELETE on the pos_app pool with no app.tenant_id, and forced RLS on idempotency_keys
+    // matched 0 rows while the job reported success. Fanning out keeps the delete under RLS
+    // and reuses the runner's suspended-tenant skip, retries and DLQ; ADMIN_DATA_SOURCE
+    // would bypass all three. `tenants` has no RLS, so listing it on the pool is safe.
+    const tenants: Array<{ id: string }> = await this.dataSource.query(
+      'SELECT id FROM tenants ORDER BY id',
     );
-    const deletedCount = extractDeletedCount(result);
-    this.logger.info({ ttlSeconds, deletedCount }, 'Global expired idempotency keys cleaned up');
-    return { cleaned: true, deletedCount };
+    const parent = job.id ?? 'adhoc';
+    await this.maintenanceQueue.addBulk(
+      tenants.map((t) => ({
+        name: JOB_IDEM_CLEANUP,
+        data: {
+          tenantId: t.id,
+          correlationId: job.data?.correlationId ?? `idem-cleanup-${parent}`,
+          olderThanSeconds: ttlSeconds,
+        },
+        // A retried parent re-adds the same ids, which BullMQ ignores (no double fan-out).
+        opts: { jobId: `idem-cleanup-${parent}-${t.id}` },
+      })),
+    );
+    this.logger.info(
+      { ttlSeconds, tenantCount: tenants.length },
+      'Idempotency key cleanup fanned out to every tenant',
+    );
+    return { fannedOut: tenants.length };
   }
 
   private async handleQuotesPurge(job: Job<QuotesPurgeJobPayload>): Promise<unknown> {
