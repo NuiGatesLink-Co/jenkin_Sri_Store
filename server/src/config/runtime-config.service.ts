@@ -24,6 +24,25 @@ const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 
 /**
+ * True when an error message means the etcd auth token is no longer good.
+ *
+ * Covers both shapes measured against etcd v3.6.12 (--auth-token-ttl=5): an expired token
+ * on /v3/kv/range or /v3/auth/authenticate answers HTTP 401 (`includes('401')`), but on
+ * /v3/watch it answers HTTP 200 with a stream body `{"canceled":true,"cancel_reason":"rpc
+ * error: code = Unauthenticated desc = etcdserver: invalid auth token"}` — the '401' check
+ * alone misses this and the stale token is never dropped, so the watch loop retries forever
+ * with the same bad token.
+ */
+function isAuthFailure(message: string): boolean {
+  const m = message.toLowerCase();
+  return (
+    m.includes('401') ||
+    m.includes('unauthenticated') ||
+    m.includes('invalid auth token')
+  );
+}
+
+/**
  * RuntimeConfigService: Dynamic runtime configuration via etcd v3 (ADR-0013, 07_CICD_DEPLOY.md §8).
  *
  * - Reads and watches `/pos/config/log_level` over etcd v3's gRPC-gateway HTTP API (/v3/kv/range, /v3/watch)
@@ -201,7 +220,7 @@ export class RuntimeConfigService implements OnModuleInit, OnModuleDestroy {
         await this.watchStream(etcdUrl);
       } catch (err: any) {
         if (this.isStopped) break;
-        if (String(err?.message).includes('401')) {
+        if (isAuthFailure(String(err?.message))) {
           this.authToken = undefined;
         }
         // 07_CICD_DEPLOY.md §8: warn once per outage; further retries are debug noise.
