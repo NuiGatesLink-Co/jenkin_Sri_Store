@@ -15,6 +15,7 @@ import { InventoryProcessor } from './processors/inventory.processor.js';
 import { MaintenanceProcessor } from './processors/maintenance.processor.js';
 import { BackupProcessor } from './processors/backup.processor.js';
 import { AuditModule } from '../audit/audit.module.js';
+import { JobSchedulerService } from './job-scheduler.service.js';
 
 @Global()
 @Module({
@@ -57,12 +58,14 @@ export class QueueModule {}
     InventoryProcessor,
     MaintenanceProcessor,
     BackupProcessor,
+    JobSchedulerService,
   ],
   exports: [
     SalePostProcessor,
     InventoryProcessor,
     MaintenanceProcessor,
     BackupProcessor,
+    JobSchedulerService,
   ],
 })
 export class QueueProcessorsModule {}
