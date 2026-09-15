@@ -710,10 +710,23 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   every such test app registered the scheduler, fanned DELETEs over every dev tenant and left it in shared Redis.
   🔴 Renaming the scheduler id orphans the old scheduler in Redis — remove it (`removeJobScheduler`) in the same change.
   A scheduler e2e must clear the queue first and drain active jobs before `app.close()` (`idem-cleanup-scheduler.e2e-spec.ts`).
+- **Merged 2026-09-15:** #201 → PR #205 — `DEFAULT_JOB_OPTIONS.backoff` is BullMQ's **builtin**
+  `{ type: 'exponential', delay: 1000, jitter: 1 }` (full jitter). The old custom `'exponential-jitter'` type was never
+  registered: a failing job threw `Unknown backoff strategy` and stuck `active` with `attemptsMade` 0 (no retry, no
+  DLQ). 🔴 Keep backoff a builtin type — a custom type needs `settings.backoffStrategy` on **every** Worker (it is a
+  per-Worker option, `@Processor(name, opts)`), and a strategy that throws recreates the same stuck-`active` failure.
+  `jitter-backoff.ts` is deleted; `test/backoff-strategy.e2e-spec.ts` pins retry + `failed` on a Worker with no settings.
+- **Merged 2026-09-15:** #188 → PR #204 — `GET /api/v1/doc-counters` (`pos` only, device from the token's `did`,
+  retired device → 403) returns the calling device's high-water marks for every period plus the tenant's current
+  `period`, computed by the issuer's shared `TENANT_PERIOD_SQL` (never copy it). Client: Drift **schema v6** —
+  `doc_counters` / `doc_counter_seeds` keyed by server **`deviceId`**, not `deviceNo` (`device_no` repeats across
+  tenants; a browser re-enrolled from the demo tenant kept its old counters). `DocCounterSeeder` applies
+  `local = max(local, server)` and the seeded marker in one local transaction on every `Authenticated` of a `pos`
+  device (`USE_API_WRITES` only); a failure never blocks sign-in. 🔴 A seeded marker proves only that a seed happened
+  at `seededAt`, **not** that the counter is current — in phase 1 the server keeps issuing after the seed and the
+  client does not advance from write responses; #189 must re-seed or compare before trusting it (hazards on #189).
 - **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
-  (owner runs 07 §4, #186); #201 the
-  `exponential-jitter` backoff is never registered, so a failing BullMQ job sticks `active` instead of retrying.
-  Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196. The repo's only long-lived
+  (owner runs 07 §4, #186); #199 and #200 (timeout follow-ups, being worked in another session). Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196. The repo's only long-lived
   branches are `main` and `POC_sample_offline_first`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
