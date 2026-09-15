@@ -129,8 +129,11 @@ export async function createTestApp(
   return { app, ds, admin, cache };
 }
 
-/** Every tenant-scoped table, in an order that respects the foreign keys. */
+/** Every tenant-scoped table, in an order that respects the foreign keys.
+ * `import_jobs` (#239) is not RLS'd or `TENANT_SCOPED_TABLES`-listed (it is admin-only), but it
+ * does carry `tenant_id` and a FK to `tenants`, so a reset must still clear it first. */
 export const TENANT_TABLES_DEPTH_FIRST = [
+  'import_jobs',
   'drawer_entries',
   'shifts',
   'return_items',

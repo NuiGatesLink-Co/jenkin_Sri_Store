@@ -26,6 +26,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
   let mockAdminDs: any;
   let mockRedisCache: any;
   let tenantCache: { invalidate: ReturnType<typeof vi.fn> };
+  let mockImportQueue: { add: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     mockAdminDs = {
@@ -39,6 +40,9 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     };
     auditService = new AuditService();
     tenantCache = { invalidate: vi.fn() };
+    // #239: TenantImportService.importSnapshot() (pre-flight + write, no job) is exercised
+    // here — the queue is never touched by it, so the mock only needs to exist.
+    mockImportQueue = { add: vi.fn() };
   });
 
   describe('AuditService', () => {
@@ -325,7 +329,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('rejects import if tenant already has sales or transactional data', async () => {
       mockAdminDs.query.mockResolvedValueOnce([{ n: 1 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -339,7 +343,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('pre-flight scan rejects negative product stock', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -355,7 +359,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('pre-flight scan rejects part numbers that differ only by case', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -375,7 +379,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('imports snapshot cleanly and executes audit log inside transaction', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       const res = await importService.importSnapshot(
         't1',
         {
@@ -401,7 +405,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('stamps imported products with clock_timestamp() and ignores historic updatedAt (#217)', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       await importService.importSnapshot(
         't1',
         {
@@ -435,7 +439,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('reads the store keys exportSnapshot() writes (#185)', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       await importService.importSnapshot(
         't1',
         {
@@ -486,7 +490,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('writes one soft-deleted, marked tombstone per missing reference and audits the counts (#238)', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       const res = await importService.importSnapshot(
         't1',
         {
@@ -514,7 +518,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('refuses in pre-flight a reference no tombstone can be named for, listing the ids (#238)', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -530,7 +534,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('refuses in pre-flight a row with no required reference id at all', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -546,7 +550,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
     it('drops an orphaned supplier row instead of refusing the import, and counts it', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       const res = await importService.importSnapshot(
         't1',
         {
@@ -570,7 +574,7 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
       vi.spyOn(auditService, 'log').mockRejectedValueOnce(new Error('Audit write failed'));
 
-      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
       await expect(
         importService.importSnapshot(
           't1',
@@ -583,6 +587,27 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
       ).rejects.toThrow('Audit write failed');
 
       expect(tenantCache.invalidate).not.toHaveBeenCalled();
+    });
+
+    // #239 review issue 3: `round2()` used to turn a present-but-unparseable money value
+    // into a silent 0, with no pre-flight check on any of ~28 money fields. `planClampViolations`
+    // now refuses it before the write ever starts (`snapshot-preflight.spec.ts` covers the
+    // pure scan directly; this proves it is actually wired into `preflight()`/`importSnapshot`).
+    it('pre-flight scan rejects a sale total that does not parse as a number (#239 item 3)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any, mockImportQueue as any);
+      await expect(
+        importService.importSnapshot(
+          't1',
+          {
+            __meta: { version: 2 },
+            sa_sales: [{ id: 's1', total: 'corrupt', items: [] }],
+          },
+          'adm1',
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(mockAdminDs.transaction).not.toHaveBeenCalled();
     });
   });
 });

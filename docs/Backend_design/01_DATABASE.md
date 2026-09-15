@@ -1058,16 +1058,30 @@ flowchart LR
 
 ขั้นตอน:
 1. สร้าง `tenants` + `users` + `devices` ให้ร้านผ่าน `POST /platform/tenants` (ADR-0001) — ไม่ insert มือ
-2. **Pre-flight scan ก่อนแตะ DB** (สแกน JSON อย่างเดียว ยังไม่ insert) — ถ้าเจอต้องหยุดและตัดสินใจก่อน:
+2. **Pre-flight scan ก่อนแตะ DB** (สแกน JSON อย่างเดียว ยังไม่ insert, รันแบบ synchronous ในคำขอ
+   `POST .../import` เอง — ไฟล์เสียได้ 400/409 ทันที) — ถ้าเจอต้องหยุดและตัดสินใจก่อน **(ครบทุกข้อแล้ว,
+   #239, `server/src/platform/snapshot-preflight.ts` + `snapshot-tombstones.ts`):**
    - สินค้าที่ `stock < 0` → `CHECK (stock >= 0)` จะ rollback ทั้งร้านเพราะสินค้าตัวเดียว
    - `category` ที่สินค้าอ้างถึงแต่ไม่มีในรายการหมวด
-   - `createdAt` ที่ parse ไม่ได้
-   - เลขเอกสารซ้ำ (`receipt_no` / `po_no` / `quote_no` / `cn_no`)
-3. import ตามลำดับ dependency:
+   - `createdAt`/`updatedAt`/`deletedAt` และวันที่อื่นทุกจุดที่ `parseDate()` อ่าน (ไม่ใช่แค่
+     `createdAt`) ที่ parse ไม่ได้ — เดิม parse ไม่ได้แล้วเงียบ ๆ กลายเป็นเวลา import ปัจจุบัน
+   - เลขเอกสารซ้ำ (`receipt_no` / `po_no` / `quote_no` / `cn_no`, และ `receipt_no` ของ
+     credit payment — คนละตารางกับ `sales.receipt_no`)
+   - ค่าที่เดิม clamp เงียบ ๆ (validate ก่อน แล้วค่อย clamp — บทเรียนจาก #22): `credit_balance`
+     ติดลบ, `points`/`minStock` ติดลบ, และ `qty` ของบรรทัดขาย/คืน/PO/ใบเสนอราคาที่เป็น 0, ติดลบ,
+     ไม่ใช่จำนวนเต็ม หรือหายไปเฉย ๆ — ทุกจุดปฏิเสธเป็น 400 พร้อม id แทนการ clamp
+   - `deletedAt` บนลูกค้า/ช่าง (Drift schema v2) — import เป็นแถว soft-deleted ตามไฟล์ ไม่ใช่แถว live
+3. **นำเข้าเป็น background job** (BullMQ, ตัดสินโดยเจ้าของโปรเจกต์ 2026-09-15, #239): `POST
+   .../import` ตอบ `202 Accepted` พร้อม `jobId` ทันทีหลัง pre-flight ผ่าน, worker แยก
+   (`TenantImportProcessor`) เป็นคนเขียนจริงตามลำดับ dependency ด้านล่าง — `GET
+   .../import/:jobId` เช็คสถานะ (`queued|running|succeeded|failed`) ได้ เหตุผล: import
+   synchronous ใช้เวลาประมาณ 6.4 วินาทีต่อ 2 MiB (วัดจริง) ขณะที่ nginx จำกัด
+   `proxy_read_timeout 30s` — ไฟล์ร้านที่ใหญ่ขึ้นจะโดน 504 ทั้งที่ transaction ไปสำเร็จจริง แล้ว
+   retry จะเจอ 409 ที่งงว่าเกิดอะไรขึ้น:
    `categories → products → suppliers → customers → mechanics → sales/sale_items →
    returns/return_items → credit_payments → purchase_orders/po_items → quotes/quote_items →
    movements → shifts → drawer_entries → parked_sales → settings → tenant_meta`
-4. รันทั้งหมดใน transaction เดียวต่อ tenant — ล้มก็ rollback ทั้งร้าน
+4. รันทั้งหมดใน transaction เดียวต่อ tenant (ภายใน worker) — ล้มก็ rollback ทั้งร้าน
 5. **ตรวจ 6 ค่าหลังย้าย** (ไม่ตรง = หยุด แล้วหาเหตุ):
    - `SUM(sales.total)` เท่ากับของเดิม
    - `SUM(products.stock)` เท่ากับของเดิม

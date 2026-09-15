@@ -109,6 +109,10 @@ export class WorkerModule {
         CoreModule.forRoot(config, logger),
         DbModule,
         RedisModule,
+        // #239: TenantImportProcessor's TenantImportService invalidates the products/
+        // categories/customers/mechanics/settings cache after a committed import, exactly
+        // like the synchronous endpoint always did.
+        TenantCacheModule,
         QueueModule,
         QueueProcessorsModule,
         QueueSchedulerModule,

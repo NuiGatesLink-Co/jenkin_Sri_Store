@@ -4,6 +4,13 @@ export const QUEUE_SALE_POST = 'sale-post';
 export const QUEUE_INVENTORY = 'inventory';
 export const QUEUE_MAINTENANCE = 'maintenance';
 export const QUEUE_BACKUP = 'backup';
+// #239: its own queue, not a second job name on QUEUE_BACKUP — `@nestjs/bullmq` starts one
+// BullMQ Worker per `@Processor(queueName)` class, and two Workers on the same queue name
+// race for every job Redis hands out. `BackupProcessor`'s `if (name !== JOB_TENANT_EXPORT)
+// return { skipped: true }` would then silently "complete" a `tenant.import` job about half
+// the time, without ever running `TenantImportProcessor`. A queue name is cheap (no new Redis
+// service — it is a keyspace in the existing `redis-queue`) and removes the whole hazard.
+export const QUEUE_TENANT_IMPORT = 'tenant-import';
 export const QUEUE_DLQ = 'dlq';
 
 export const ALL_QUEUES = [
@@ -11,6 +18,7 @@ export const ALL_QUEUES = [
   QUEUE_INVENTORY,
   QUEUE_MAINTENANCE,
   QUEUE_BACKUP,
+  QUEUE_TENANT_IMPORT,
   QUEUE_DLQ,
 ] as const;
 
@@ -28,10 +36,22 @@ export const JOB_INVENTORY_CHECK = 'inventory.check';
 export const JOB_IDEM_CLEANUP = 'idem.cleanup';
 export const JOB_QUOTES_PURGE = 'quotes.purge';
 export const JOB_TENANT_EXPORT = 'tenant.export';
+/** The only job name `TenantImportProcessor` (`QUEUE_TENANT_IMPORT`) handles. */
+export const JOB_TENANT_IMPORT = 'tenant.import';
 
 export interface TenantExportJobPayload extends BaseJobPayload {
   requestedByUserId: string;
   ip?: string;
+}
+
+/**
+ * Deliberately tiny: the snapshot itself (up to 10 MiB, `IMPORT_BODY_LIMIT`) lives in
+ * Postgres (`import_jobs.payload`), never in this Redis-backed job's `data` — see
+ * `tenant-import.service.ts`'s block comment on that choice. The worker loads the real
+ * payload by `importJobId`.
+ */
+export interface TenantImportJobPayload extends BaseJobPayload {
+  importJobId: string;
 }
 
 export interface SaleCreatedJobPayload extends BaseJobPayload {

@@ -127,6 +127,18 @@ What an orphan should become is the owner's decision → **#238**.
 - **`full/realistic` now imports:** 201 in 6.4 s. Tombstones: 2 products, 1 customer, 1 mechanic. All six §9 checks pass. Counts include the tombstones, the live rows equal the file, and 0 customers/mechanics differ.
 - The e2e runs both profiles.
 
+**Correction, 2026-09-15 (#239, after PR #252):** the "which references" line above (`movements/
+suppliers → products`) is stale — `suppliers` no longer forces a product tombstone. PR #252's
+review found that a product added with a supplier price and then hard-deleted before ever being
+stocked or sold has no `movements`/`sale_items` naming it, so it had no name anywhere to build a
+tombstone from, and the whole file was refused over one supplier price row. The owner's fix
+(2026-09-15): a `sa_suppliers` row whose product is gone **and** not otherwise tombstoned is now
+**dropped**, not forced into `unnamed` — counted in `droppedSuppliers` instead (`audit_log.after`,
+the import response, and `checkSnapshotInvariants`'s pre-flight report). Only `movements` forces a
+product tombstone now. See `snapshot-tombstones.ts`'s header comment, `01_DATABASE.md §9` and
+ADR-0005 addendum 4 for the current, correct rule — this note flags the drift rather than
+rewriting the run log above, which recorded what was true on this date.
+
 ## Bugs fixed in this PR (root cause + test)
 
 1. **Import body capped at 100 KiB** (`server/src/app.setup.ts`). A 10 MiB JSON parser (matching nginx `client_max_body_size`) now covers `POST /api/v1/platform/tenants/:id/import` only.
