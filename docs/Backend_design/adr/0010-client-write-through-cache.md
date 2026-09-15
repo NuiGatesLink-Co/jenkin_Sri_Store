@@ -146,9 +146,10 @@ group ด้วยคอลัมน์นี้ การยุบสองค�
       client ต้องถอย cursor ย้อนหลังกี่วินาที หรือ server ต้องเปลี่ยนวิธีประทับเวลา
       → **เคาะแล้ว 2026-09-15 (#191, เจ้าของโปรเจกต์):** cursor ของเฟส 2 = keyset นี้ **ไม่สร้าง `change_log`** ·
       client **ถอย cursor ย้อนหลัง 30 วินาที**ทุกครั้งที่ pull (แถวที่ได้ซ้ำ upsert ซ้ำได้ ไม่เสียหาย) · endpoint ส่งแถวที่ `deleted_at IS NOT NULL` (tombstone) ลงมาด้วย เครื่องซ่อน/ลบตาม
-      🔴 ถอย 30 วินาทีปลอดภัยเฉพาะเมื่อ write transaction commit ภายใน 30 วินาที — **วันนี้ server ยังไม่ตั้ง
-      `idle_in_transaction_session_timeout` / `transaction_timeout`** #213 บังคับเพดานนี้
-      หรือตั้งค่าถอยให้ยาวกว่าเพดานที่บังคับจริง
+      🔴 ถอย 30 วินาทีปลอดภัยเฉพาะเมื่อ write transaction commit ภายใน 30 วินาที — **บังคับแล้วตั้งแต่ #213 (PR #215):**
+      commit guard 25 วินาทีใน `TenantService.runTx` / `TenantJobRunner` + role `pos_app` `statement_timeout=25s`,
+      `idle_in_transaction_session_timeout=5s` (Postgres 16 ไม่มี `transaction_timeout`) — กติกาและข้อยกเว้นอยู่ที่
+      `server/README.md` *The transaction ceiling* · ช่องที่ยังเปิด: tenant import ประทับ `updated_at` ย้อนหลัง (#217)
 * [ ] cache invalidation ฝั่ง client — Drift ที่ค้างอยู่จะถือว่าหมดอายุเมื่อไหร่ (TTL? ตอน login? ตอน sync เสร็จ?)
 * [ ] อ่านตอน Online อ่านจาก Drift ก่อนแล้ว refresh (stale-while-revalidate) หรือรอ server เสมอ
 * [x] **ถามเจ้าของโปรเจกต์ — เคาะแล้ว 2026-09-15 (#191): ใช่ เชื่อ server เสมอ** เมื่อ server รับบิลแล้ว แอปต้องเชื่อตัวเลขของ server และทับของในเครื่อง
