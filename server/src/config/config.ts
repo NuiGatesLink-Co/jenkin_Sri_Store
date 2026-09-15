@@ -14,7 +14,6 @@ export interface AppConfig {
    */
   redisCommandTimeoutMs: number;
   jwtPlatformSecret: string;
-  jwtTenantSecret: string;
   /** Required only for API instances handling /auth/* (ADR-0009). */
   jwtPrivateKey?: string;
   /** Required only for API instances handling /auth/* and API validation. */
@@ -86,7 +85,6 @@ export function loadConfig(env = process.env): AppConfig {
     redisQueueUrl: required(env, 'REDIS_QUEUE_URL'),
     redisCommandTimeoutMs: positiveInt(env, 'REDIS_COMMAND_TIMEOUT_MS', 1000),
     jwtPlatformSecret: env.JWT_PLATFORM_SECRET ?? 'dev-only-platform-secret',
-    jwtTenantSecret: env.JWT_TENANT_SECRET ?? 'dev-only-tenant-secret',
     jwtPrivateKey: isApi ? required(env, 'JWT_PRIVATE_KEY') : undefined,
     jwtPublicKeys: isApi ? parsePublicKeys(required(env, 'JWT_PUBLIC_KEYS')) : undefined,
     jwtKeyId: env.JWT_KEY_ID ?? 'key-1',
