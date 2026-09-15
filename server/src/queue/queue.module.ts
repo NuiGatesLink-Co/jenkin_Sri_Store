@@ -15,6 +15,7 @@ import { InventoryProcessor } from './processors/inventory.processor.js';
 import { MaintenanceProcessor } from './processors/maintenance.processor.js';
 import { BackupProcessor } from './processors/backup.processor.js';
 import { AuditModule } from '../audit/audit.module.js';
+import { JobSchedulerService } from './job-scheduler.service.js';
 
 @Global()
 @Module({
@@ -66,3 +67,17 @@ export class QueueModule {}
   ],
 })
 export class QueueProcessorsModule {}
+
+/**
+ * Separate from `QueueProcessorsModule` on purpose: several e2e suites mount
+ * `QueueProcessorsModule` to exercise a processor directly (`test/backup.e2e-spec.ts`,
+ * `test/worker-jobs.e2e-spec.ts`) without wanting the global `idem.cleanup` schedule
+ * registered — and fanning that out over every dev tenant on every such boot is exactly the
+ * shared-state leak #182's review caught. Only `WorkerModule` imports this module.
+ */
+@Module({
+  imports: [QueueModule],
+  providers: [JobSchedulerService],
+  exports: [JobSchedulerService],
+})
+export class QueueSchedulerModule {}

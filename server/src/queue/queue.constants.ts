@@ -70,3 +70,9 @@ export const DEFAULT_JOB_OPTIONS: JobsOptions = {
   },
   removeOnFail: false, // keep failed jobs as evidence (Backend05 reliability)
 };
+
+// #182: the repeatable, tenant-less `idem.cleanup` job. `upsertJobScheduler` keys on this id,
+// so re-registering it (every worker boot) updates the same schedule instead of adding a
+// second one.
+export const IDEM_CLEANUP_SCHEDULER_ID = 'idem-cleanup-global';
+export const IDEM_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // hourly

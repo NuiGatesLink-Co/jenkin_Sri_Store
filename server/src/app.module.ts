@@ -23,7 +23,11 @@ import { CustomersModule } from './customers/customers.module.js';
 import { MechanicsModule } from './mechanics/mechanics.module.js';
 import { SettingsModule } from './settings/settings.module.js';
 import { ReportsModule } from './reports/reports.module.js';
-import { QueueModule, QueueProcessorsModule } from './queue/queue.module.js';
+import {
+  QueueModule,
+  QueueProcessorsModule,
+  QueueSchedulerModule,
+} from './queue/queue.module.js';
 import { QuotesModule } from './quotes/quotes.module.js';
 import { ParkedSalesModule } from './parked-sales/parked-sales.module.js';
 import { BackupModule } from './backup/backup.module.js';
@@ -107,6 +111,7 @@ export class WorkerModule {
         RedisModule,
         QueueModule,
         QueueProcessorsModule,
+        QueueSchedulerModule,
       ],
     };
   }
