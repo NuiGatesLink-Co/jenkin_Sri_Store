@@ -128,6 +128,26 @@ server ถืออยู่ในมือแล้วตอนเขียน 
 🔴 **`movements.type` ของ void คือ `'void'` ไม่ใช่ `'return'`** (migration `1788652800003`) รายงานทั้งหมด
 group ด้วยคอลัมน์นี้ การยุบสองค่านี้เข้าด้วยกัน = นับบิลที่ยกเลิกเป็นการคืนเงิน
 
+## Addendum 2026-09-15 — phase-2 owner session #240
+
+เจ้าของโปรเจกต์ตัดสิน D3, D5, D9 ใน #240 · สเปกเต็ม [`08_PHASE2_SPEC.md §4, §5, §12`](../08_PHASE2_SPEC.md)
+
+| # | ตัดสิน | ผลกับ ADR นี้ |
+|---|---|---|
+| D3 | **ไม่มี `offlineOk`** — ออฟไลน์ขายได้ถ้าสต็อกในเครื่องพอ | ข้อ 2 เพิ่ม `Products.offlineOk` ใน schema v3 ไว้ให้ `q2` — คอลัมน์นี้**ไม่มีใครใช้แล้ว** (ลบหรือปล่อยไว้ → `08 §15 Q12`) · ทางเลือก (ค) ในตารางด้านบนที่ตกเพราะ "`offlineOk` ต้อง query ในเครื่อง" — เหตุผลนั้นหมดไป แต่ (ก) ยังถูก เพราะการตรวจสต็อกในเครื่องก็ต้อง query เหมือนกัน · pull (#191) ไม่คำนวณ/ไม่อ่าน `offlineOk` |
+| D5 | เข้า Degraded เมื่อ health check ล้ม 3 ครั้ง / ช้า > 5 วินาที **หรือ write ที่ server ไม่ตอบ** · ออกด้วย health check เท่านั้น | write ที่ไม่ได้คำตัดสิน (`isVerdict` ไม่นับ) **เข้า outbox ด้วย id + key เดิม** แทนการค้างใน `PendingWrites` · "ฝั่งเขียนเป็น online-only จนกว่า `q2` จะเสร็จ" ในผลที่ตามมาจบลงเมื่อ outbox ลง |
+| D9 | ลูกค้า / ช่าง / ใบเสนอราคา = **เข้าคิว** · สินค้า / หมวด / ใบสั่งซื้อ (+ `purgeOldQuotes`) = **ออนไลน์เท่านั้น** | fallback `super.<write>()` ที่สร้างแถวอยู่ในเครื่องอย่างเดียว (#229, 18 จุด) ต้องหายหมด — ทุก write เป็น op ในคิวหรือถูกปฏิเสธ |
+
+**กติกาที่ outbox เพิ่มให้ข้อ 3 ("ใครเป็นเจ้าของ invariant")** — ไม่เปลี่ยนหลัก เพิ่มแค่ช่องทาง:
+
+* op ในคิวถูกเขียนลง Drift (แถวที่ op สร้าง + แถว `outbox_ops`) **ใน local transaction เดียว** ตอนกด — นี่คือการเขียน "ในเครื่อง"
+  ที่ข้อ 5 อนุญาตให้ประทับ `updatedAt` ได้ **แต่ห้ามเรียก transactional service ของ Drift** เหมือนเดิม (`saveSale` ไม่ถูกเรียกตอนเข้าคิว)
+  การตรวจสต็อก/วงเงินในเครื่องก่อนเข้าคิวเป็นการ**ตรวจ** ไม่ใช่ invariant — ผู้ตัดสินจริงยังเป็น server ตอน push
+* `/sync/push` ตอบ `applied` พร้อม **response เดียวกับ endpoint ออนไลน์** → patch ตามตารางข้อ 3 ทุกช่องเหมือนเดิม
+* outbox **ตารางเดียว** (`outbox_ops`, Drift schema v7) — `pending_credit_payments` ของ #24 ย้ายเข้ามา เพื่อให้ลำดับกับบิลเครดิตถูก
+* ตราบใดที่มี op ค้างส่ง write ใหม่ต่อท้ายคิว แม้ออนไลน์แล้ว (รักษาลำดับ) · สินค้าที่มี op ค้างไม่ถูกเขียนทับสต็อกตอน pull (#191 เดิม)
+* **ไม่เพิ่ม `sales.sync_status`** — สถานะของบิลอ่านจาก op ของมันใน outbox ที่เดียว
+
 ## ผลที่ตามมา
 
 * **`03_ARCHITECTURE §8` ต้องแก้คำ** — `q1` ไม่ใช่ *"แทน Drift repos"* แต่เป็น
@@ -150,6 +170,7 @@ group ด้วยคอลัมน์นี้ การยุบสองค�
       commit guard 25 วินาทีใน `TenantService.runTx` / `TenantJobRunner` + role `pos_app` `statement_timeout=25s`,
       `idle_in_transaction_session_timeout=5s` (Postgres 16 ไม่มี `transaction_timeout`) — กติกาและข้อยกเว้นอยู่ที่
       `server/README.md` *The transaction ceiling* · ช่องที่ยังเปิด: tenant import ประทับ `updated_at` ย้อนหลัง (#217)
+* [ ] **(2026-09-15, #240 D3)** คอลัมน์ `Products.offlineOk` ใน Drift — ลบใน schema v7 หรือปล่อยไว้ไม่ใช้ → `08 §15 Q12`
 * [ ] cache invalidation ฝั่ง client — Drift ที่ค้างอยู่จะถือว่าหมดอายุเมื่อไหร่ (TTL? ตอน login? ตอน sync เสร็จ?)
 * [ ] อ่านตอน Online อ่านจาก Drift ก่อนแล้ว refresh (stale-while-revalidate) หรือรอ server เสมอ
 * [x] **ถามเจ้าของโปรเจกต์ — เคาะแล้ว 2026-09-15 (#191): ใช่ เชื่อ server เสมอ** เมื่อ server รับบิลแล้ว แอปต้องเชื่อตัวเลขของ server และทับของในเครื่อง

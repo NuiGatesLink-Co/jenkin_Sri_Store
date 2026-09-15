@@ -699,6 +699,11 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 
 ## 7. Sync endpoints (ใช้เฉพาะ Architecture B / C)
 
+> 🔴 **แทนที่ 2026-09-15** — สัญญาของ `POST /sync/push` ที่ใช้จริงอยู่ที่ [`08_PHASE2_SPEC.md §6`](08_PHASE2_SPEC.md)
+> (ยืนยันด้วย device token, ผลต่อ op `applied`/`rejected`/`retry`, service เดียวกับ endpoint ออนไลน์) ·
+> `GET /sync/pull?since=serverSeq` / `GET /sync/bootstrap` / `change_log` **ไม่ทำ** (#191 — pull ใช้ keyset `GET /products?updatedSince=&afterId=`, 08 §12) ·
+> job `sync.apply` ใน §6 ไม่ทำ — push ตอบผลในคำขอเดียวกัน · ตารางและตัวอย่างข้างล่างเก็บไว้เป็นประวัติ
+
 | Method + Path | ทำอะไร |
 |---|---|
 | `GET /sync/bootstrap` | ดึงข้อมูลทั้งร้านครั้งแรก (เครื่องใหม่) — ตอบเป็น stream/แบ่งหน้า + คืน `serverSeq` ปัจจุบัน |
