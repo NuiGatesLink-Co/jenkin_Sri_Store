@@ -772,7 +772,7 @@ retire/enrol/export need an enrolled device token, no `offlineOk` (column droppe
 offline, `POST /sync/push` authenticates with the device token, acts as the tenant's single active user, replays by key then
 client id before any check and stops at the first non-verdict (a head op stuck 3 times goes to the owner screen), multiple
 shifts per day, online void = reason only (no PIN), the offline-PIN 3-day window is enforced on the till only, production =
-the department VM `mob04` deployed pull-based by a timer (no self-hosted runner; a real-shop cutover is a later phase).
+the department VM `mob04` deployed by the hardened self-hosted runner from PR #237 (F4′ reversed the pull-based timer; a real-shop cutover is a later phase).
 §2 records the design decisions; the only open item is the Thai-strings ticket (F10). ADR-0004/0007/0009/0010/0013 carry dated addenda.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old

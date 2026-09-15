@@ -1,7 +1,7 @@
 # 08 — Phase 2 spec: offline shell + production ในมหาวิทยาลัย
 
 > **เอกสารเจ้าของสเปกเฟส 2** (Architecture C — `03_ARCHITECTURE.md §4`)
-> ที่มา: เจ้าของโปรเจกต์ใน #240 — **D1–D15** (รอบ 1) · **E1–E11** (รอบ 2) · **F1–F10** (รอบ 3) — **รอบหลังชนะรอบก่อนเมื่อขัดกัน** ·
+> ที่มา: เจ้าของโปรเจกต์ใน #240 — **D1–D15** (รอบ 1) · **E1–E11** (รอบ 2) · **F1–F10** (รอบ 3) · **F4′** (รอบ 4: กลับ F4) — **รอบหลังชนะรอบก่อนเมื่อขัดกัน** ·
 > host: #242 (owner 2026-09-15) · แผนที่งาน #243 · review รอบ 1–2 ของ PR #254
 > ADR ที่แก้ตาม: [0004](adr/0004-device-roles.md) · [0007](adr/0007-receipt-numbering.md) · [0009](adr/0009-jwt-session-lifetime.md) · [0010](adr/0010-client-write-through-cache.md) · [0013](adr/0013-cicd-toolchain.md)
 > **ขัดกับ ADR → ยึด ADR** · ไฟล์นี้เก็บกติกา + ตัวอย่าง + เกณฑ์รับงาน เหตุผลยาวอยู่ใน ADR
@@ -33,7 +33,7 @@
 | retire เครื่องที่ยังมี op ค้าง | ปฏิเสธ · มีปุ่มบังคับ + หมายเหตุ → รายการตรวจ | F7 |
 | storage ของเครื่องถูกล้าง | ยอมรับว่า op ค้างหาย · enrol ใหม่ได้ `device_no` ใหม่เสมอ · คีย์บิลใหม่มือ | F8 |
 | หน้าจอ | หน้า "รอ owner" 2 แท็บ · discard = ออนไลน์ + หมายเหตุ | E10 |
-| production | `mob04` สภาพแวดล้อมเดียว · **deploy แบบ pull** (timer บน `mob04`) ไม่มี self-hosted runner | #242, F4 |
+| production | `mob04` สภาพแวดล้อมเดียว · deploy ด้วย **self-hosted runner ที่ PR #237 merge แล้ว** (hook + `gha-runner` + `pos-deploy`) · ไม่มี pull timer | #242, F4′ |
 
 ---
 
@@ -123,7 +123,7 @@
 | 5 | ชื่อ cache = `github.sha` · ลบของเก่าตอน activate | |
 | 6 | ถามก่อนโหลดรุ่นใหม่ ไม่ `skipWaiting` อัตโนมัติ | ห้ามรีโหลดกลางบิล — **server ต้องรับ client รุ่นก่อนหน้าได้หนึ่งรุ่น** (C16) |
 | 7 | `navigator.storage.persist()` ตอนบูต + บันทึก `persisted()` | F8 |
-| 8 | nginx `Cache-Control: no-cache` ที่ `/sw.js` | |
+| 8 | nginx `Cache-Control: no-cache` ที่ `/sw.js` | `deploy.yml` สร้าง nginx ใหม่ทุก deploy แล้ว (#256) — แก้ `nginx.conf` มีผลทันที |
 | 9 | แก้ skew asset web ก่อน (#245) | |
 | 10 | cert ที่ browser เชื่อบนเครื่องที่ใช้ | `mob04` self-signed — Chrome ไม่ register SW |
 | 11 | แท็บเดียว: `navigator.locks.request('srisurart-pos-writer', {ifAvailable:true})` · ไม่ได้ → ลองซ้ำ ~2 วินาที → หน้า "เปิดอยู่แล้ว" (placeholder) · ไม่เขียนอะไร | D10 |
@@ -155,7 +155,7 @@ stateDiagram-v2
 | Degraded | op ในคิว (§6) → outbox · ออนไลน์เท่านั้น → ปุ่มปิด |
 | Syncing | ต่อท้าย outbox · ออนไลน์เท่านั้น → รอ |
 
-ค่าคงที่ (ปรับใน PR ได้): health = `GET /health/ready` · ตรวจทุก 5 วินาที timeout 5 วินาที · "ไม่ได้คำตัดสิน" = ที่ `isVerdict` ไม่นับ (timeout, socket, 5xx, 429, `503 IDEMPOTENCY_KEY_IN_FLIGHT`) → เข้า outbox ด้วย id + key เดิม · 4xx = คำตัดสิน
+ค่าคงที่ (ปรับใน PR ได้): health = `GET /health/ready` (probe ใช้ pool ของตัวเองขนาด 1 ตั้งแต่ #253 — health เขียวไม่ได้แปลว่า pool ของ request ว่าง; write ที่ค้างยังทำให้ Degraded ตามข้อ "ไม่ได้คำตัดสิน") · ตรวจทุก 5 วินาที timeout 5 วินาที · "ไม่ได้คำตัดสิน" = ที่ `isVerdict` ไม่นับ (timeout, socket, 5xx, 429, `503 IDEMPOTENCY_KEY_IN_FLIGHT`) → เข้า outbox ด้วย id + key เดิม · 4xx = คำตัดสิน
 
 กติกาลำดับ: มี op `pending` ที่ส่งได้ → write ใหม่ต่อท้าย outbox (op `stuck` และ op ที่รอมันไม่นับ — §8.4)
 
@@ -340,6 +340,7 @@ stateDiagram-v2
 | ⚠️ ผลข้างออนไลน์ | กด "เปิดกะ" ขณะมีกะ active → กะเดิมถูก archive ไม่ได้นับเงิน (เดิมคืนกะเดิม) · หลังปิดกะ ใบลดหนี้เงินสด (#100) ไม่ต้องรอพรุ่งนี้แล้ว เปิดกะใหม่ได้เลย |
 | ปิดกะ | ออนไลน์ + outbox ไม่มี `pending`/`stuck`/`rejected` — **client บังคับ** (server ไม่เห็น outbox) |
 | รายการในคิว | server ประทับกะ active ณ ตอนนั้น — ลำดับ push ทำให้ตรง |
+| กะที่มาจาก import (#244) | ถูก archive ทุกกะ (`auto_archived` ถ้าไม่เคยปิด) โดย import เอง — **ไม่สร้าง** `shift_uncounted` (รายการตรวจเกิดจาก `open` เท่านั้น) · บิลที่ import ไม่มี `shift_id` → void ไม่ได้ ต้องออกใบลดหนี้ (#94 เดิม) |
 
 **ตัวอย่าง:** เน็ตล่มสองวัน: `open A`(15) → 20 บิล → `open B`(16) → 30 บิล → push ตามลำดับ → A archive + `shift_uncounted` · บิลลงกะของตัวเองครบ
 
@@ -431,7 +432,7 @@ stateDiagram-v2
 | cursor | `meta.nextCursor` ของ server เก็บใน Drift (`sync_cursors` ต่อ entity) · ห้ามคำนวณจากแถวในเครื่อง (`api_products/customers/mechanics_repository.dart` วันนี้ใช้ `MAX(updatedAt)`) |
 | ถอย | หน้าแรกของรอบ: `updatedSince = cursor − 30 วินาที` **และไม่ส่ง `afterId`** · หน้าต่อไปเดิน `nextCursor` จนหมด |
 | entity | products มี keyset แล้ว (#16) · **customers, mechanics ต้องได้ keyset + `nextCursor`** (วันนี้ `updated_at > $x` + OFFSET, `customers.service.ts:93`) · categories/settings โหลดทั้งก้อน |
-| tombstone | `deleted_at IS NOT NULL` → ลบ/ซ่อน |
+| tombstone | `deleted_at IS NOT NULL` → ลบ/ซ่อน · รวมแถว `import-tombstone` ที่ import สร้างให้ประวัติที่อ้างแถวที่ลบไปแล้ว (#238/#252) — ห้ามแสดงในรายการเลือกสินค้า/ลูกค้า |
 | สต็อก | ไม่เขียนทับสินค้าที่มี op ค้าง |
 | ปลอดภัยเพราะ | commit ceiling 25 วินาที (#213) · import ประทับ `clock_timestamp()` (#217 ปิดแล้ว PR #224) |
 
@@ -476,7 +477,7 @@ stateDiagram-v2
 | 22 | deploy `mob04` + วัด RAM | #184 | – |
 | 23 | `pg_dump --create` รายวันออกนอก VM + ซ้อม restore | NEW `ops.backup` | 22 |
 | 24 | ปิด `/api/v1/platform/` ให้เหลือ loopback/IP admin | NEW `sec.platform-allowlist` | – |
-| 25 | **deploy แบบ pull** (timer บน `mob04`, F4) | #67 | 22 |
+| 25 | run จริงของ `deploy.yml` บน runner ของ #237 (ตั้ง runner + hook + wrapper ตาม `07 §6.2`, ตรวจ log run แรกว่า hook เห็นตัวแปรครบ) | #67 | 22 |
 | – | cutover ร้านจริง | #231 — เฟสถัดไป | – |
 
 ---
@@ -488,9 +489,9 @@ stateDiagram-v2
 | ต้องมี | เกณฑ์รับงาน |
 |---|---|
 | deploy + rollback (#184) | `/health/ready` เขียว · `.current_sha` ถูก · rollback แล้วกลับได้ |
-| RAM 6 GB | k6 ตาม `02 §9` บน stack เต็ม · RSS ต่อ container · ไม่พอ → บอกเจ้าของก่อนตัด |
+| RAM 6 GB | ตอนว่าง stack + monitoring ใช้ ~1.1 GB / 5.9 GB (#246, `handoff_log/close3-demo-deploy-2026-09-15.md`) · ยังต้องวัดขณะมีโหลด: k6 ตาม `02 §9` ด้วยวิธีหลายเครื่อง `03 §8.1` (#251/#257) · RSS ต่อ container · ไม่พอ → บอกเจ้าของก่อนตัด |
 | backup | **`pg_dump --create`** รายวัน ส่งออกนอก VM · ซ้อม restore 1 ครั้ง · `--create` พา `ALTER ROLE pos_app IN DATABASE … SET` (#213, migration `1788652802131`) มาด้วย — `pg_dumpall --roles-only` **ไม่พา** (หรือรัน migration ซ้ำ) · หลัง restore `DbModule` ไม่เตือน |
-| **deploy แบบ pull (F4)** | systemd timer บน `mob04` (เช่นทุก 5 นาที) อ่าน digest ของ `ghcr.io/nuimanlp/srisurart-pos-server:main` และ `…-web:main` · เปลี่ยน → อ่าน sha จาก label `org.opencontainers.image.revision` → รัน `deploy.yml` ในเครื่อง (`IMAGE_TAG=<sha>`, rollback เดิม) · lock กันรันซ้อน · **ไม่มี self-hosted runner** (repo public: fork PR รันโค้ดบน production ได้) · ไม่ต้องมี inbound · ✅ AC: push `main` → ภายใน 10 นาที `.current_sha` = sha ใหม่ · image พัง → rollback อัตโนมัติ |
+| **deploy (F4′)** | ใช้ **self-hosted runner ของ PR #237** ตามที่เขียนใน ADR-0013 หัวข้อ *Actions เข้าถึง VM อย่างไร* (ไม่คัดลอกซ้ำ) · ✅ AC (#67): push `main` ที่ CI เขียว → `deploy.yml` รันบน `mob04` → `.current_sha` = sha ใหม่ · job จาก branch อื่น/fork ถูก hook ปฏิเสธก่อนขั้นแรก · playbook fail → rollback อัตโนมัติ run ยังแดง |
 | platform plane | allowlist `/api/v1/platform/` เหลือ loopback/IP admin |
 | PWA | cert ถูกเชื่อ · `persisted() == true` |
 | เลข | ปิด `DOC_NUMBER_FALLBACK` หลัง `pos` เป็นรุ่นใหม่ (§9) |
@@ -511,7 +512,7 @@ stateDiagram-v2
 |---|---|---|
 | X1 | E10 สั่งลบ `offlineOk` "Drift + Postgres" แต่ Postgres ไม่มีคอลัมน์ (`sales.service.ts:351`) | slice 18 ลบฝั่ง Drift |
 | X2 | D15 ใน #240 เขียน "ยังไม่เคาะ" — การตัดสินอยู่ที่ #242 | อ้าง #242 |
-| X3 | ADR-0013/07 เรียก environment `demo` · E11 (runner) ถูก F4 แทน | addendum ADR-0013 · 07 แก้ใน slice 25 |
+| X3 | ADR-0013/07 เรียก environment `demo` แต่ `mob04` คือ production · E11 → F4 (pull) → **F4′ กลับไปใช้ runner ของ #237** | addendum ADR-0013 (#237 + รอบ 4) · ชื่อ environment คงไว้ตาม #237 |
 | X4 | `audit_log` CHECK ต้องมี `user_id` แต่ push ไม่มีผู้ใช้ | F3 / C13 |
 | X5 | `sales.date DEFAULT now()` + `ShiftsService.open` ใช้ `today()` | §10, §11 |
 | X6 | customers/mechanics sync ไม่มี keyset | §15, slice 13a |
@@ -528,8 +529,9 @@ stateDiagram-v2
 | role 3 ชนิด, manager PIN, `users.pin_hash`, owner-only guard | `01 §5`, `InitialSchema.ts:57-58`, ADR-0009, #163 | E1–E3 + F6 (device token แทน role) |
 | หลาย user ต่อร้าน | provisioning เดิม | F9 |
 | รอบ 1 ของไฟล์นี้ (`owner`+`staff`, สิทธิ์ staff, PIN ต่อคน, verify-pin, `OWNER_POWER_NOT_QUEUEABLE`, discard ต้อง PIN, `SHIFT_MISMATCH`, `DEVICE_RETIRED`, Conflict, void 4 คอลัมน์) | PR #254 commit แรก | E1–E5, E10, B1–B4 |
+| รอบ 3 ของไฟล์นี้: deploy แบบ pull (timer บน `mob04`) | PR #254 `57b75d8` | F4′ — runner ของ #237 |
 | รอบ 2 ของไฟล์นี้: server ตรวจ 3 วัน (`devices.last_online_login_at`, `authMode`, `OFFLINE_PIN_REJECTED`) · `*_ID_REUSED` 4 code · period สองแหล่ง · C1 clamp เงียบ · C12 "คีย์จากใบเสร็จ" · `pg_dumpall --roles-only` · self-hosted runner · ถอยโดยคง `afterId` | PR #254 `f0b17f3` | F5/C5 · C2/`CLIENT_ID_REUSED` · C2 · C1 · F7/F8 · §17 · F4 · B4 |
-| D7 · D9 · D12 · D13 · D14 · E11 | #240 | E4 · E6 · E1 · E5 · E10 · F4 |
+| D7 · D9 · D12 · D13 · D14 · E11 · F4 | #240 | E4 · E6 · E1 · E5 · E10 · F4 → F4′ (#237) |
 | PIN ออฟไลน์เฉพาะ `cashier` + server ตรวจซ้ำ | ADR-0009 #187 | E5 + F5 |
 | ห้ามออกเลขทุกเดือนใหม่ที่ยังไม่ seed | ADR-0007 ข้อ 2 | E8 |
 | `sync.apply` · `/sync/pull` · `/sync/bootstrap` · `serverSeq` · `change_log` | `02 §4.2/§6/§7` | §8, §15 |
