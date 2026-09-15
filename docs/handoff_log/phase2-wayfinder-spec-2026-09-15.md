@@ -51,8 +51,27 @@
 **ทาง B — contract ก่อน (เท่ากันกว่า รอสั้นครั้งเดียว)**
 lane 1 ส่ง `sync.contract` เล็ก ๆ ก่อน (ตาราง outbox ใน Drift + รูป op + `/sync/push` stub ที่ตอบ `retry` + fake SyncService สำหรับเทสต์) แล้วแบ่ง op type ออกไป: lane 2 ถือ 12 #229 + 13b + 19 #195 · lane 3 ถือ 10 #211 + 17 + 21 · ที่เหลือตามทาง A
 
+**ทาง C — lane A (`team/1`) ทำน้อยที่สุด · แยก client / server ตาม contract ใน 08 (เจ้าของขอ 2026-09-15 ก่อนนอน — ⭐ ทางที่เสนอ)**
+
+หลักคิด: "จุดศูนย์กลาง" #228 มีทั้งฝั่ง client และ server อยู่แล้ว · 08 §7–§8 เขียน wire contract ของ `/sync/push` ไว้ครบ
+→ **ผ่า hub ตามฝั่ง** แต่ละ lane สร้างฝั่งของตัวเองเทียบ contract พร้อม fake ของอีกฝั่ง ไม่มีใครรอใคร ·
+lane A ถือแค่ slice ที่ **ไม่มีอะไรบล็อก และไม่มีใครรอ**
+
+| lane | ถืออะไร (เลข slice ใน 08 §16) | FE / BE / CI (กติกาคอร์ส) | จำนวน |
+|---|---|---|---|
+| **A `team/1` NuimanLP — น้อยสุด** | **18** `fe.drop-offlineok` (ลบคอลัมน์ Drift + migration, CI `build_runner` no-diff ตรวจ) · **24** `sec.platform-allowlist` (nginx allowlist + เช็ค IP ซ้ำใน `PlatformAuthGuard` + `nginx -t` / e2e ใน `server.yml`) | FE 18 · BE 24 · CI 18+24 | **2** |
+| **B `team/2` LomerAlloys — ฝั่งเครื่อง (offline shell)** | 0a #245 · 0b `fe.fonts` · 3 `pwa.1` · **8-client** (#228 ครึ่ง client: outbox, SyncService, สถานะ, stuck head) · 4-client + 5 #189 (เครื่องออกเลข + ห้ามเมื่อไม่มี marker) · 9 `q2.cp` · 10 #211 · 11-client · 12 #229 · 13b #212B · 14-client #194 · 19 #195 · **20-client** (contract test ใน `flutter.yml` กับ fake server) · BE: **13a** #212A keyset customers/mechanics | FE ส่วนใหญ่ · BE 13a · CI 0a/20 | ~14 |
+| **C `team/3` PattaraponKitcharoen — ฝั่ง server + platform/ops** | 1 `role.1` · 2 `sec.device-gate` · 4-server (upsert + fallback window) · 6 `review.1` · 7 `shift.multi` · **8-server** (`/sync/push`: replay, client id, ผู้กระทำ, วันที่, `outboxRemaining`) · 11-server `q2.void` · 14-server · 15 #190 · 17 `dev.retire-guard` · **20-server** (e2e push ใน `server.yml` จาก fixture) · 22 #184 · 23 `ops.backup` · 25 #67 · FE: **16** #230 หน้า "รอ owner" (อ่าน `GET /review-items` ของตัวเอง) · **21** #192 หน้าจัดการเครื่อง | BE ส่วนใหญ่ · FE 16/21 · CI 20/22/23/25 | ~15 |
+
+**ทำให้ "ไม่รอกัน" ได้จริงต้องมี 3 อย่างใน ticket:**
+1. **contract = 08 §7–§8 + ไฟล์ fixture JSON ต่อ op type** (`docs/Backend_design/fixtures/sync-push/*.json` — ตัวอย่าง request/response ของ sale/return/drawer/shift.open/cp/void/customer + verdict ทุกแบบ) · lane C เขียนใน PR แรก lane B เริ่มจากตัวอย่างใน 08 ได้เลยแล้วสลับมาอ่าน fixture เมื่อมี (**soft**: ไม่บล็อก) · ใครแก้ fixture ต้องแก้ 08 ใน PR เดียวกัน
+2. **slice ที่ถูกผ่า** (4, 8, 11, 14, 20) ออกเป็น ticket คู่ `-client` / `-server` คนละ lane · AC ของแต่ละใบทดสอบกับ fake/fixture เท่านั้น ห้ามอ้างว่า "ใช้ได้กับของจริง"
+3. **integration จริงไม่ใช่ ticket ของใคร** — เกิดเองบน `main` เมื่อทั้งสองครึ่ง merge · ถ้าพังให้เปิด bug ใหม่ให้ฝั่งที่ผิด contract
+
+**ความเสี่ยงที่ยอมรับ:** ผ่า hub = contract drift ถ้าสองฝั่งอ่าน 08 ต่างกัน (กันด้วย fixture เดียวกัน + contract test ทั้งสองฝั่ง) · B กับ C หนักกว่า A มาก (เจ้าของตั้งใจ) · #193 ที่เดิมเป็นเทสต์รวมถูกผ่าเป็น 20-client / 20-server
+
 **สิ่งที่ต้องทำพรุ่งนี้ (เจ้าของ):**
-1. เลือกทาง A หรือ B (หรือปรับ)
+1. เลือกทาง A, B หรือ **C** (หรือปรับ)
 2. พิมพ์ `/to-tickets` แล้วชี้มาที่ไฟล์นี้ + 08 §16 — แก้ ticket เดิม (#189 #190 #192–#195 #211 #212 #228–#230 #184 #67 #245) ให้ตรง 08, เปิด ticket NEW, ผูกเป็น sub-issue ของ #243 + blocked-by **เฉพาะภายใน lane**, ติดป้าย `team/N`
 3. ticket ข้อความไทย `copy.phase2` (F10): agent ร่างข้อละ 2–3 แบบ เจ้าของเลือก
 4. ติดตั้ง runner บน `mob04` ตาม `07 §6.2` (#67) และ #184 deploy + วัด RAM ภายใต้โหลด
