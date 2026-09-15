@@ -75,6 +75,7 @@ class _StubShiftsRepo extends ShiftsRepository {
 class _StubMechanicsRepo extends MechanicsRepository {
   _StubMechanicsRepo(super.db);
   Object? errorToThrow;
+  Future<CreditPaymentRow> Function({required bool allowOverpayment})? onAddCreditPayment;
 
   @override
   Future<CreditPaymentRow> addCreditPayment({
@@ -84,6 +85,9 @@ class _StubMechanicsRepo extends MechanicsRepository {
     required String paymentMethod,
     bool allowOverpayment = false,
   }) async {
+    if (onAddCreditPayment != null) {
+      return onAddCreditPayment!(allowOverpayment: allowOverpayment);
+    }
     if (errorToThrow != null) throw errorToThrow!;
     return super.addCreditPayment(
       mechanicId: mechanicId,
@@ -680,6 +684,82 @@ void main() {
         await tester.pumpAndSettle();
 
         expect(find.text('กรุณาเปิดกะก่อน'), findsOneWidget);
+      });
+    });
+
+    testWidgets('prompts overpayment confirmation on OVERPAYMENT_NOT_ALLOWED (#221)', (tester) async {
+      setWideViewport(tester);
+      final db = AppDatabase(NativeDatabase.memory());
+      addTearDown(db.close);
+
+      await db.into(db.mechanics).insert(
+        MechanicsCompanion.insert(
+          id: 'm-err-test-3',
+          code: 'M-ERR3',
+          name: 'ErrMechanic3',
+          nameTH: const Value('ช่างชำระเกิน'),
+          createdAt: '2026-09-15',
+          creditBalance: const Value(1000),
+          creditLimit: const Value(5000),
+        ),
+      );
+
+      final mechRepo = _StubMechanicsRepo(db);
+      var receivedAllow = false;
+      mechRepo.onAddCreditPayment = ({required allowOverpayment}) async {
+        if (!allowOverpayment) {
+          throw const PosException(
+            'OVERPAYMENT_NOT_ALLOWED',
+            'ยอดชำระเกินยอดหนี้คงเหลือ',
+            {'creditBalance': 500.0, 'amount': 800.0},
+          );
+        }
+        receivedAllow = true;
+        return CreditPaymentRow(
+          id: 'cp-ok',
+          receiptNo: 'RCP-001',
+          mechanicId: 'm-err-test-3',
+          amount: 800.0,
+          date: DateTime.now(),
+        );
+      };
+
+      await tester.runAsync(() async {
+        await tester.pumpWidget(
+          MultiRepositoryProvider(
+            providers: [
+              ...repositoryProviders(db),
+              RepositoryProvider<MechanicsRepository>.value(value: mechRepo),
+            ],
+            child: const MaterialApp(home: Scaffold(body: MechanicsScreen())),
+          ),
+        );
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
+
+        await tester.tap(find.textContaining('ช่างชำระเกิน', findRichText: true).first);
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('รับชำระ'));
+        await tester.pumpAndSettle();
+
+        await tester.enterText(
+          find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField)).first,
+          '800',
+        );
+        await tester.pumpAndSettle();
+
+        await tester.tap(find.text('✓ บันทึกการรับเงิน'));
+        await tester.pumpAndSettle();
+
+        // Confirmation dialog must appear with updated numbers
+        expect(find.text('ยืนยันรับเงิน'), findsOneWidget);
+        expect(find.textContaining('เกินยอดค้าง ฿500'), findsOneWidget);
+
+        // Tap confirm 'ตกลง'
+        await tester.tap(find.text('ตกลง'));
+        await tester.pumpAndSettle();
+
+        expect(receivedAllow, isTrue, reason: 'Must resend with allowOverpayment = true');
       });
     });
   });

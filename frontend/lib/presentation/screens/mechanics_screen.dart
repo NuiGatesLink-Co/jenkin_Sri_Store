@@ -1624,11 +1624,13 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
         await send(allowOverpayment);
       } on PosException catch (e) {
         // The check above tests the balance THIS dialog was opened with; the
-        // server tests the tab as it is now, and another counter may have moved
-        // it. Without this branch the refusal is a dead end that repeats on every
-        // press. Ask the same question again with the SERVER's numbers and resend
-        // only on a yes — the same shape as checkout's credit-limit 409 (#56).
-        if (e.code != 'CREDIT_PAYMENT_EXCEEDS_BALANCE' || allowOverpayment) {
+        // server (or local queue check) tests the tab as it is now, and another
+        // counter or pending payment may have moved it. Without this branch the
+        // refusal is a dead end that repeats on every press. Ask the same question
+        // again with the updated numbers and resend only on a yes (#221).
+        if ((e.code != 'CREDIT_PAYMENT_EXCEEDS_BALANCE' &&
+                e.code != 'OVERPAYMENT_NOT_ALLOWED') ||
+            allowOverpayment) {
           rethrow;
         }
         final d = e.details;
@@ -1637,10 +1639,11 @@ class _PayCreditDialogState extends State<_PayCreditDialog> {
         );
         if (serverBalance == null) rethrow;
         if (!mounted) return;
+        setState(() => _busy = false);
         if (!await _confirmOverpayment(amt, serverBalance)) {
-          if (mounted) setState(() => _busy = false);
           return;
         }
+        setState(() => _busy = true);
         await send(true);
       }
     } on CreditPaymentQueued catch (e) {
