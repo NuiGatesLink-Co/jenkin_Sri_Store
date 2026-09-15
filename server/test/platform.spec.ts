@@ -19,7 +19,6 @@ const mockConfig = {
   redisQueueUrl: 'redis://localhost:6379',
   redisCommandTimeoutMs: 200,
   jwtPlatformSecret: 'test-platform-secret',
-  jwtTenantSecret: 'test-tenant-secret',
 };
 
 describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
