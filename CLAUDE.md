@@ -332,7 +332,7 @@ keeps running this Drift build while the server is developed against a demo tena
 2026-09-04 this work happens on `main`** (see *Branch strategy* above): the server, the
 client's API layer and the CI/CD pipelines all land in this repo.
 
-**CI/CD — levels 1–3 are done (level 3 = both release images on GHCR since 2026-09-10, #69/#70). CD to the faculty VM (Ansible), etcd and Prometheus/Grafana are designed in `docs/Backend_design/07_CICD_DEPLOY.md` + ADR-0013 (spec #60) and ticketed #63–#67 under #10 for the teammates — read those before touching `.github/`, `deploy/`, `server/Dockerfile`, `server/docker-compose.yml` or `server/docker/nginx/`.** `.github/workflows/flutter.yml` is the
+**CI/CD — levels 1–3 are done (level 3 = both release images on GHCR since 2026-09-10, #69/#70). CD to the faculty VM (Ansible), etcd and Monitoring (Node Exporter + Prometheus + Grafana) are designed in `docs/Backend_design/07_CICD_DEPLOY.md` + ADR-0013 (spec #60) and ticketed #63–#67 under #10 for the teammates — read those before touching `.github/`, `deploy/`, `server/Dockerfile`, `server/docker-compose.yml` or `server/docker/nginx/`.** `.github/workflows/flutter.yml` is the
 client gate (`dart analyze`, `flutter test`, `build_runner` no-diff, `flutter build web` + the
 web-asset assertion), committed 2026-09-04. Status per level:
 1. ✅ **Flutter CI** — done. Runners are ASCII paths, so `build_runner` verification runs in CI —
@@ -448,9 +448,9 @@ Rules the slice establishes, all enforced or pinned:
   render a failure as `e.toString().replaceFirst('Exception: ', '')`, so an escaping one prints
   `ApiException(status: 409, code: …)` at the counter. `api_wire.dart`'s `rethrowThai` converts every
   server verdict to the plain `Exception(thaiMessage)` those screens already understand.
-- 🔴 **The bill id and `Idempotency-Key` are minted once per cart, not once per call.** `ApiClient`
-  sets no timeout, so the ordinary failure is a dropped reply for a bill the server committed; a
-  fresh id and key on the counter's second press defeat **both** server defences at once
+- 🔴 **The bill id and `Idempotency-Key` are minted once per cart, not once per call.** The ordinary
+  failure is a dropped or timed-out reply for a bill the server committed (`ApiClient` times out
+  since #183, but abandons rather than cancels the request); a fresh id and key on the counter's second press defeat **both** server defences at once
   (`existingSale` keys on the client's bill id, `idempotency_keys` on the header) and ring the sale
   up twice. The parked attempt lives in `api_wire.dart`'s **`PendingWrites`**, and all three money
   paths use it — `createReturn` and `addDrawerEntry` did not at first, which is a second refund and
@@ -696,9 +696,18 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   schedules it yet), #175 → PR #178 (audit pool timeout 10 s; loss not reproducible for role denials, burst pinned),
   #173 → PR #179 (🔴 cached reads: Redis first via `authorisedTenantId()`, `runTx` loader only on a miss — never
   open `runTx` before `singleFlight`). Read `docs/handoff_log/followups-169-173-175.md`.
+- **Merged 2026-09-15:** #183 → PR #197 — `ApiClient` timeouts: reads and `/auth/refresh` 15 s, writes 40 s
+  (nginx's own worst case is ~34 s). 🔴 A timeout throws `ApiTimeoutException` (a `ClientException`, never an
+  `ApiException`): it is **not a verdict**, so `PendingWrites` keeps the id + key. 🔴 Every #55 transport fallback
+  in `data/repositories/api_*.dart` has `on ApiTimeoutException { rethrow; }` before its `catch (_)` — a timed-out
+  write may have committed, and falling back ran it twice locally; `api_repository_contract_test.dart` enforces it.
+  A reset socket still falls back (pre-existing). Follow-ups #199 (Thai text instead of `ClientException` at the
+  counter), #200 (cancel via `AbortableRequest`).
 - **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
-  (owner runs 07 §4); `ApiClient` has no request timeout (unticketed); no scheduler for the global `idem.cleanup`. The repo's only long-lived branches are
-  `main` and `POC_sample_offline_first`.
+  (owner runs 07 §4, #186); no scheduler for the global `idem.cleanup` (#182, PR #198 in review); #201 the
+  `exponential-jitter` backoff is never registered, so a failing BullMQ job sticks `active` instead of retrying.
+  Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196. The repo's only long-lived
+  branches are `main` and `POC_sample_offline_first`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming

@@ -1,6 +1,6 @@
-# ADR-0013 — toolchain ของ CI/CD และการ deploy: GitHub Actions + GHCR + Ansible + etcd + Prometheus/Grafana
+# ADR-0013 — toolchain ของ CI/CD และการ deploy: GitHub Actions + GHCR + Ansible + etcd + Monitoring (Prometheus + Grafana + Node Exporter)
 
-* **สถานะ:** Accepted — 2026-09-10
+* **สถานะ:** Accepted — 2026-09-10 (พิจารณาปฏิเสธ Wazuh/ELK จากข้อจำกัด RAM: 2026-09-15)
 * **ผู้ตัดสิน:** เจ้าของโปรเจกต์ (grill 2 รอบ, 19 ข้อ) — บันทึกการสัมภาษณ์อยู่ใน `docs/handoff_log/`
 * **เอกสารเจ้าของเรื่องนี้:** [`07_CICD_DEPLOY.md`](../07_CICD_DEPLOY.md)
 
@@ -24,7 +24,7 @@ Build & Test · Security Scan · Package/Storage · Config & Deploy · KV Storag
 | Package / Storage | **Docker + GHCR** (package public) | repo เป็น public อยู่แล้ว · VM ดึงได้โดยไม่ต้องจัดการ token · **ยกเลิก tarball artefact** ให้เหลือทางปล่อยทางเดียว · ทั้ง server และ **web** เป็น image (web = ไฟล์ static ล้วน copy ลง volume ให้ Nginx เดิมอ่าน — **ไม่** bake nginx.conf ลง image ฝั่ง client) จะได้ใช้กลไก pull เดียวกันและ rollback ด้วย SHA เดียว |
 | Config & Deploy | **Ansible** → SSH เข้า VM คณะ (environment `demo`) **อัตโนมัติทุก main สีเขียว** | playbook ตั้งเครื่องเปล่าได้ = "เลือก production host ทีหลัง" เป็นจริง (แค่เพิ่ม inventory + เปิดอนุมัติ) · ไม่ใช้ Kubernetes — 1 VM, 4 vCPU |
 | KV Storage | **etcd** — เก็บเฉพาะ **dynamic config ที่ไม่ใช่ความลับ** | ให้ etcd มีงานจริง (แอปอ่านตอน boot + watch) โดย**ไม่แตะ data model** · **ห้ามเก็บข้อมูลธุรกิจ** — PostgreSQL ยังเป็น source of truth · แอปต้อง boot ได้แม้ไม่มี etcd (fallback ไป env) |
-| Monitoring | **Node Exporter + Prometheus + Grafana** บน VM เดียวกัน ผูก loopback | dashboard เดียว provision จาก JSON ใน repo · **ไม่มี Alertmanager** · เข้าถึงผ่าน SSH tunnel แบบเดียวกับ Bull-Board — ไม่เปิดของใหม่ออกอินเทอร์เน็ตบนเครื่องที่มีข้อมูลลูกค้า |
+| Monitoring | **Node Exporter + Prometheus + Grafana (Monitoring)** บน VM เดียวกัน ผูก loopback | dashboard เดียว provision จาก JSON ใน repo · **ไม่มี Alertmanager** · **ปฏิเสธ Wazuh และ ELK stack** — สแต็กความปลอดภัย/Log หนักเหล่านี้ต้องการ RAM 4–5 GB (OpenSearch/Elasticsearch heap) ซึ่งจะทำให้ VM คณะ 6 GB เกิด Out-Of-Memory (OOM) ชนกับ POS stack (~3.4 GB) ทันที · เลือกชุดเล็กที่คุมงบ RAM รวมได้ ~832 MB · เข้าถึงผ่าน SSH tunnel แบบเดียวกับ Bull-Board — ไม่เปิดของใหม่ออกอินเทอร์เน็ตบนเครื่องที่มีข้อมูลลูกค้า |
 
 **ข้อที่ตั้งใจให้ต่างจากที่คนมักคาดหวัง:**
 
@@ -43,7 +43,7 @@ Build & Test · Security Scan · Package/Storage · Config & Deploy · KV Storag
 * ระหว่าง scrutinize พบบั๊กเดิม: `location /platform/` ใน Nginx ไม่มีทางถูกเรียกถึงเพราะ global prefix `api/v1` — ต้องแก้เป็น `/api/v1/platform/` พร้อม allowlist (07 §9)
 * โฟลเดอร์ใหม่ `deploy/` ที่ root (Ansible, overlay, web Dockerfile) — ADR-0011 ยังใช้: repo เดียว
 * GitHub Environment `demo` ถือ secret ทั้งหมด (SSH + ค่าใน `server/.env`) · เปิด secret scanning + push protection
-* งบ RAM บน VM: ต้องใส่ `mem_limit` ให้ etcd / Prometheus / Grafana / node-exporter ทุกตัว
+* งบ RAM บน VM (6 GB): ต้องใส่ `mem_limit` ให้ etcd (256m) / Prometheus (512m) / Grafana (256m) / node-exporter (64m) ทุกตัว รวม monitoring overlay ~832m อยู่ในงบรวม ~4.2 GB / 6 GB อย่างปลอดภัย ไม่เพิ่ม Wazuh/ELK ที่กิน RAM 4–5 GB จนเสี่ยง OOM คิล Postgres/API
 
 ## ยังไม่เคาะ
 
