@@ -340,7 +340,7 @@ CREATE TABLE idempotency_keys (
 );
 CREATE INDEX idx_idem_created ON idempotency_keys (created_at);  -- ใช้ลบของเก่า (>24h)
 
--- ⛔ ไม่สร้าง — เคาะ 2026-09-15 (#191): pull ของเฟส 2 ใช้ keyset ?updatedSince=&afterId= (ADR-0010) แทน
+-- ⛔ ไม่สร้าง — เคาะ 2026-09-15 (#191, ถอย cursor 30 วินาที): pull ของเฟส 2 ใช้ keyset ?updatedSince=&afterId= (ADR-0010) แทน
 --    เก็บ DDL ไว้เป็นประวัติเท่านั้น (เดิม: "เฟส 2 เท่านั้น — มีบั๊ก cursor ที่ต้องแก้ก่อน ดูกล่องใต้ตาราง")
 -- log การเปลี่ยนแปลงสำหรับ sync แบบ pull
 CREATE TABLE change_log (
