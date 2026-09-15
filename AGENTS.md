@@ -423,9 +423,9 @@ Rules the slice establishes, all enforced or pinned:
   render a failure as `e.toString().replaceFirst('Exception: ', '')`, so an escaping one prints
   `ApiException(status: 409, code: …)` at the counter. `api_wire.dart`'s `rethrowThai` converts every
   server verdict to the plain `Exception(thaiMessage)` those screens already understand.
-- 🔴 **The bill id and `Idempotency-Key` are minted once per cart, not once per call.** `ApiClient`
-  sets no timeout, so the ordinary failure is a dropped reply for a bill the server committed; a
-  fresh id and key on the counter's second press defeat **both** server defences at once
+- 🔴 **The bill id and `Idempotency-Key` are minted once per cart, not once per call.** The ordinary
+  failure is a dropped or timed-out reply for a bill the server committed (`ApiClient` times out
+  since #183, but abandons rather than cancels the request); a fresh id and key on the counter's second press defeat **both** server defences at once
   (`existingSale` keys on the client's bill id, `idempotency_keys` on the header) and ring the sale
   up twice. The parked attempt lives in `api_wire.dart`'s **`PendingWrites`**, and all three money
   paths use it — `createReturn` and `addDrawerEntry` did not at first, which is a second refund and
