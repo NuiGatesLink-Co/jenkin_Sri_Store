@@ -42,8 +42,9 @@ const GENERATION_JITTER_SEC = 300;
 const LOCK_TTL_MS = 5000;
 /**
  * How long a waiter polls for the loader's value before it reads Postgres itself. Kept
- * well under `LOCK_TTL_MS` on purpose: the waiter holds its request's pooled connection
- * the whole time, so a loader that died must not idle a pool for five seconds.
+ * well under `LOCK_TTL_MS` on purpose: a loader that died must not stall its waiters'
+ * requests for five seconds. Callers take the lock before any `runTx` (#173), so a waiter
+ * holds no pooled connection while it polls — keep it that way.
  */
 const LOCK_WAIT_MS = 1000;
 const LOCK_POLL_MS = 5;

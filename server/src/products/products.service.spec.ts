@@ -34,6 +34,10 @@ describe('ProductsService Caching & Reads', () => {
       tenantId: '00000000-0000-4000-8000-000000000001',
       manager: managerMock,
     } as any);
+    // `list` / `byId` read the tenant before any transaction since #173.
+    vi.spyOn(requestContext, 'authorisedTenantId').mockReturnValue(
+      '00000000-0000-4000-8000-000000000001',
+    );
 
     service = new ProductsService(new TenantCache(redisMock, { warn: vi.fn() } as any), { log: vi.fn() } as any, { runTx: (fn: () => Promise<unknown>) => fn() } as any);
   });
