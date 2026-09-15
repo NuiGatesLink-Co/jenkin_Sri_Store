@@ -29,7 +29,11 @@ void main() {
       expect(ServerErrorResolver.resolve('RECEIPT_NO_CONFLICT'), 'เลขที่ใบเสร็จซ้ำ กรุณาทำรายการใหม่');
       expect(ServerErrorResolver.resolve('CREDIT_PAYMENT_EXCEEDS_BALANCE'), 'จำนวนเงินเกินยอดค้างชำระของช่าง');
       expect(ServerErrorResolver.resolve('CREDIT_PAYMENT_ID_REUSED'), 'รหัสการรับชำระเงินซ้ำ');
-      expect(ServerErrorResolver.resolve('SALE_NOT_IN_OPEN_SHIFT'), 'บิลนี้ไม่ได้อยู่ในกะที่เปิดอยู่ ไม่สามารถยกเลิกได้ กรุณาออกใบลดหนี้แทน');
+      expect(ServerErrorResolver.resolve('SALE_NOT_IN_OPEN_SHIFT'), 'บิลนี้ไม่ได้อยู่ในกะที่เปิดอยู่ ยกเลิกบิลไม่ได้ กรุณาทำรายการคืนสินค้า (ใบลดหนี้) แทน');
+      expect(ServerErrorResolver.resolve('POS_DEVICE_EXISTS'), 'ร้านมีเครื่องขายอยู่แล้ว 1 เครื่อง กรุณาปลดเครื่องขายเดิมก่อนเพิ่มเครื่องใหม่');
+      expect(ServerErrorResolver.resolve('DEVICE_NO_EXHAUSTED'), 'เพิ่มเครื่องไม่ได้ ร้านใช้เลขเครื่องครบ 99 เครื่องแล้ว');
+      expect(ServerErrorResolver.resolve('DEVICE_ALREADY_RETIRED'), 'เครื่องนี้ถูกปลดไปแล้ว');
+      expect(ServerErrorResolver.resolve('PHYSICAL_CASH_REQUIRED'), 'เครื่องนี้ยังมีกะเปิดอยู่ กรุณานับเงินในลิ้นชักและกรอกยอดก่อนปลดเครื่อง');
       expect(ServerErrorResolver.resolve('SHIFT_NOT_FOUND'), 'ไม่พบข้อมูลกะ');
       expect(ServerErrorResolver.resolve('UNAUTHENTICATED'), 'กรุณาเข้าสู่ระบบ');
       expect(ServerErrorResolver.resolve('FORBIDDEN'), 'ไม่มีสิทธิ์เข้าถึงข้อมูลหรือดำเนินการนี้');

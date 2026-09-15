@@ -581,7 +581,7 @@ row lock.
 After today's close, a cash refund waits for tomorrow's open, because `open()` hands back the closed row.
 
 Still open:
-- the Thai wording for `SALE_NOT_IN_OPEN_SHIFT` (the shop's to write, §8.1)
+- ~~the Thai wording for `SALE_NOT_IN_OPEN_SHIFT`~~ — chosen by the owner 2026-09-15 (#145, §8.1)
 - the Drift build does not enforce any of these drawer rules (the phase-1 divergence #24 accepted)
 
 Read `docs/handoff_log/p7-closing-report-and-shift-guards.md` before touching `server/src/reports/`,
@@ -687,8 +687,11 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   them deliberately, never to get green. 🔴 A new write route with **no** claim at all is still invisible to them.
   Follow-ups filed: #169 (`idem.cleanup` without a tenant deletes 0 rows under RLS), #173 (cached reads open a
   transaction before checking Redis), #175 (role/no-PIN void-denial audit rows can drop in a burst).
-- **Still open:** #67 (needs the owner's go-ahead); #145 Thai wording for
-  `SALE_NOT_IN_OPEN_SHIFT` (owner); #163 device-management decisions (owner); branch protection on `main`
+- **Settled 2026-09-15 (owner):** #145 + #163 — Thai wording for `SALE_NOT_IN_OPEN_SHIFT` and the four device
+  errors (02 §8.1, `ServerErrorResolver`); enrol/retire stays **owner only**; enrol code 15 min single use; the
+  plaintext code in `idempotency_keys` is accepted; one `เข้าสู่ระบบไม่สำเร็จ` for every login 401; code re-issue,
+  label edit and a client device screen are **phase 2** (ADR-0004 *ยังไม่เคาะ*).
+- **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
   (owner runs 07 §4); `ApiClient` has no request timeout (unticketed). The repo's only long-lived branches are
   `main` and `POC_sample_offline_first`.
 
