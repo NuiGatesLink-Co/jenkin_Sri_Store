@@ -549,4 +549,132 @@ void main() {
       expect(refreshes, 1);
     });
   });
+
+  group('#183 request timeout', () {
+    /// A response that never arrives — the hung socket the timeout exists for.
+    Future<http.Response> hang() => Completer<http.Response>().future;
+
+    const short = Duration(milliseconds: 200);
+
+    test('a GET that hangs fails as a transport error after readTimeout, not an ApiException', () async {
+      final client = ApiClient(
+        baseUrl: 'http://server.test',
+        httpClient: MockClient((_) => hang()),
+        readTimeout: short,
+      );
+
+      await expectLater(
+        client.get('/api/v1/products'),
+        throwsA(allOf(isA<ApiTimeoutException>(), isA<http.ClientException>(), isNot(isA<ApiException>()))),
+      );
+    });
+
+    test('reads and writes have separate timeouts', () async {
+      final client = ApiClient(
+        baseUrl: 'http://server.test',
+        httpClient: MockClient((_) async {
+          await Future<void>.delayed(const Duration(milliseconds: 400));
+          return http.Response(jsonEncode({'status': 'success', 'data': {'ok': true}}), 201);
+        }),
+        readTimeout: short,
+        writeTimeout: const Duration(seconds: 5),
+      );
+
+      await expectLater(client.get('/api/v1/products'), throwsA(isA<http.ClientException>()));
+      expect(await client.post('/api/v1/sales', body: {}), {'ok': true});
+    });
+
+    test('defaults: 15 s for reads, 40 s for writes', () {
+      final client = ApiClient(baseUrl: 'http://server.test', httpClient: MockClient((_) => hang()));
+      expect(client.readTimeout, const Duration(seconds: 15));
+      expect(client.writeTimeout, const Duration(seconds: 40));
+    });
+
+    test('a timed-out POST is sent once — never retried by the client', () async {
+      var sends = 0;
+      final client = ApiClient(
+        baseUrl: 'http://server.test',
+        tokenStorage: tokenStorage..accessToken = 'a'..refreshToken = 'r',
+        httpClient: MockClient((_) {
+          sends++;
+          return hang();
+        }),
+        writeTimeout: short,
+      );
+
+      await expectLater(
+        client.post('/api/v1/sales', body: {}, headers: {'Idempotency-Key': 'k'}),
+        throwsA(isA<http.ClientException>()),
+      );
+      expect(sends, 1);
+    });
+
+    test('a timeout on /auth/refresh keeps both tokens, and uses readTimeout (#161)', () async {
+      tokenStorage.accessToken = 'expired';
+      tokenStorage.refreshToken = 'refresh-1';
+      var expiries = 0;
+      final client = ApiClient(
+        baseUrl: 'http://server.test',
+        tokenStorage: tokenStorage,
+        httpClient: MockClient((req) async {
+          if (req.url.path.endsWith('/auth/refresh')) return hang();
+          return http.Response(
+            jsonEncode({'status': 'error', 'error': {'code': 'UNAUTHENTICATED', 'message': 'expired'}}),
+            401,
+          );
+        }),
+        readTimeout: short,
+        // A write timeout the test would never outlive: the refresh must not use it.
+        writeTimeout: const Duration(minutes: 5),
+      )..onSessionExpired = () => expiries++;
+
+      await expectLater(client.post('/api/v1/sales', body: {}), throwsA(isA<ApiTimeoutException>()));
+      expect(expiries, 0);
+      expect(tokenStorage.accessToken, 'expired');
+      expect(tokenStorage.refreshToken, 'refresh-1');
+    });
+
+    test('two requests waiting on one hung refresh both fail; the next call refreshes afresh', () async {
+      tokenStorage.accessToken = 'expired';
+      tokenStorage.refreshToken = 'refresh-1';
+      var expiries = 0;
+      var refreshes = 0;
+      final client = ApiClient(
+        baseUrl: 'http://server.test',
+        tokenStorage: tokenStorage,
+        httpClient: MockClient((req) async {
+          if (req.url.path.endsWith('/auth/refresh')) {
+            refreshes++;
+            if (refreshes == 1) return hang();
+            return http.Response(
+              jsonEncode({'status': 'success', 'data': {'accessToken': 'fresh', 'refreshToken': 'refresh-2'}}),
+              200,
+            );
+          }
+          if (req.headers['Authorization'] == 'Bearer fresh') {
+            return http.Response(jsonEncode({'status': 'success', 'data': {'ok': true}}), 200);
+          }
+          return http.Response(
+            jsonEncode({'status': 'error', 'error': {'code': 'UNAUTHENTICATED', 'message': 'expired'}}),
+            401,
+          );
+        }),
+        readTimeout: short,
+      )..onSessionExpired = () => expiries++;
+
+      final a = client.get('/api/v1/products');
+      final b = client.get('/api/v1/customers');
+      await Future.wait([
+        expectLater(a, throwsA(isA<ApiTimeoutException>())),
+        expectLater(b, throwsA(isA<ApiTimeoutException>())),
+      ]);
+      expect(refreshes, 1, reason: 'B must wait on A\'s refresh, not start its own');
+      expect(expiries, 0);
+      expect(tokenStorage.accessToken, 'expired');
+      expect(tokenStorage.refreshToken, 'refresh-1');
+
+      expect(await client.get('/api/v1/products'), {'ok': true});
+      expect(refreshes, 2, reason: 'the timed-out refresh must not stay cached');
+    });
+  });
 }
