@@ -21,7 +21,7 @@ Read this before picking up #184, #67, #185 or any phase-2 ticket.
 
 ## 2. Merged today
 
-PR #223 (#219) · #224 (#217) · #225 (#221) · #227 (#220 docs + protection) · #232 (CI image push fix + provision fixes).
+PR #223 (#219) · #224 (#217) · #225 (#221) · #227 (#220 docs + protection) · #232 (CI image push fix + provision fixes) · #233 (compose secrets).
 
 ## 3. Tickets filed today
 
@@ -55,7 +55,7 @@ SSH alias `mob04` (user `cloud`, sudo) is in `~/.ssh/config` on the original Mac
 - `~/.config/srisurart/demo.env` (0600) — strong random passwords + fresh RS256 JWT keypair
 - `~/.config/srisurart/deploy_ed25519` — SSH key of the VM's `deploy` user
 
-Copy both to the other machine securely (e.g. `scp` / a password manager), **not** through git or chat.
+Also `~/.ssh/mob04-SriStore` (VM login key, user `cloud`). Copy all three to the other machine securely (e.g. `scp` / a password manager), **not** through git or chat.
 The VM already holds the env file at `/opt/pos/.env`, so a deploy only needs the deploy key.
 
 **Deploy command** (from `deploy/ansible/`):
@@ -65,16 +65,35 @@ IMAGE_TAG=<full sha with both images on GHCR> ansible-playbook deploy.yml </dev/
 ```
 Only reachable from the campus network (or a VPN into it).
 
-**State when this was written (snapshot, a background agent was still working):**
-- PR #232 merged; the first deploy attempt reached the VM: postgres, both redis and etcd are healthy, but
-  `api-1` is in a **restart loop** and `.current_sha` is not written (deploy not finished, `/health/ready` not 200).
-- **PR #233 (open)** — `fix(server): app containers get POSTGRES_PASSWORD + required JWT_PLATFORM_SECRET`.
-  Likely cause of the restart loop: the app containers need env the compose file did not pass, and
-  `JWT_PLATFORM_SECRET` is **not in `demo.env`** yet. Check #233's diff, add the variable to
-  `~/.config/srisurart/demo.env` **and** `/opt/pos/.env` on the VM (strong random value, e.g.
-  `openssl rand -hex 32`), get #233 green + merged, then deploy the new SHA.
-- Then: rollback once (deploy the previous SHA, then the newest again), k6 per `02 §9` incl. 200 concurrent
-  `POST /sales` on a 50-stock product, write the #184 handoff, tick `03 §8`, close #184.
+**State at hand-off:**
+- PR #232 (`b47ab9b`) and **PR #233 (`4f3a244`) are merged.** #233: the API containers never received
+  `POSTGRES_PASSWORD` (the server fell back to the dev password → api-1 crash loop on any real host), and
+  `JWT_PLATFORM_SECRET` fell back to a public dev string (anyone could forge platform-admin tokens on a real host);
+  compose now requires it, `.env.example` carries a dev value for CI.
+- After #232, `main` built and pushed both images again; anonymous pulls of both `<sha>` tags return 200.
+- **VM:** no `.current_sha`; postgres, both redis and etcd healthy; api-1 still crash-looping from the
+  `b47ab9b` attempt (pre-#233). The VM `.env` does **not** have `JWT_PLATFORM_SECRET` yet — it was added only to
+  `~/.config/srisurart/demo.env` on the original Mac.
+- **No #184 AC is done.** The prerequisites are met: strong `ETCD_ROOT_PASSWORD` / `GRAFANA_ADMIN_PASSWORD`
+  are in `demo.env`, and the compose network was created fresh with `ip_range`.
+
+**Next steps, in order:**
+1. Confirm Server CI + Flutter CI on `4f3a244` pushed both images.
+2. Re-run `provision.yml` as `cloud` with `DEMO_ENV_FILE="$(cat ~/.config/srisurart/demo.env)"` so the VM `.env` gains `JWT_PLATFORM_SECRET`.
+3. `deploy.yml` as `deploy` with `IMAGE_TAG=4f3a24447094547bdcc00486bd29b53833f81c3f`; check `/health/ready` and `.current_sha`.
+4. Rollback: deploy `b47ab9b`, then `4f3a244` again.
+5. k6: `server/test/k6/setup.ts` seeds through SQL, so it needs SSH tunnels to the compose postgres + redis and
+   `JWT_PRIVATE_KEY` from `demo.env`; `BASE_URL=https://172.30.58.20`, k6 `--insecure-skip-tls-verify`
+   (self-signed). Then `pnpm k6:verify`. Include 200 concurrent `POST /sales` on a 50-stock product.
+6. Write the #184 result, tick `03 §8`, close #184.
+
+**Findings still to act on:**
+- `DEMO_ENV_FILE` (and later the `demo` GitHub Environment secret) must contain `JWT_PLATFORM_SECRET`.
+- `setup.ts` rewrites the committed `server/test/k6/k6-env.json`; after a VM run it holds 24 h tokens signed with
+  the demo key — `git checkout` it, never commit it. The committed copy already holds dev-key tokens.
+- `deploy.yml` prints an ignored "File not found: .current_sha" on a first deploy — harmless.
+- `JWT_TENANT_SECRET` still defaults to a dev string in `server/src/config/config.ts`; nothing seems to use it at
+  runtime — worth removing.
 - Diagnose with `ssh -i ~/.config/srisurart/deploy_ed25519 deploy@172.30.58.20 'cd /opt/pos && docker compose logs --tail 50 api-1'`.
 
 ## 6. #67 auto-deploy — blocked on network reachability
