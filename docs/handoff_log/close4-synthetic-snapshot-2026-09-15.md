@@ -129,6 +129,28 @@ What an orphan should become is the owner's decision → **#238**.
    - a sale line's `cost` → `cost_at_sale`
    - tests: `platform.spec.ts` *reads the store keys exportSnapshot() writes (#185)*, and the e2e above
 
+### Review round on PR #244 (commit 277d402)
+
+- 🔴 **MAJOR — the file's drawer was stranded.** It landed `is_active = true, device_id = NULL`, and every close/entry/archive path filters by device. So `GET /shifts/current` (tenant-wide) showed it only until a device opened a drawer; after that it and that day's entries were in neither current nor history. My original observation ("current never shows it") was wrong; #239 has the correction.
+  - Fix: every imported shift is archived. The file's drawer gets `auto_archived` when it was never closed, and `archived_at` = import time.
+  - The e2e checks there is no active shift, the drawer is first in history with its entries, and it is still there after `pos1` opens a drawer.
+- The 10 MiB parser runs only when a bearer token is present. Body-parser 413/400 now answer their own envelope, not 500 (`app.setup.spec.ts`).
+- products/customers/mechanics `updated_at` are re-stamped with `clock_timestamp()` as the last statements before COMMIT. The import took 6.4 s per 2.0 MiB, and a longer file could otherwise exceed ADR-0010's 30 s rewind (`server/README.md`).
+- Reconcile got stricter:
+  - check 3 also compares `__meta.recordCounts`
+  - check 6 compares `date_str` and never silently vanishes
+  - the seed-category row is informational
+  - with `SNAPSHOT_FILE`, a pre-flight violation stops the run
+  - `RECONCILE_OUT` carries counts only
+- The Dart test gained a round-trip on store keys and per-store field names; the documented drops are `zone` and `__meta.synthetic`. Falsified: removing the `zone` allowance turns it red.
+- `server.yml`'s change filter includes the committed fixture.
+- Generator:
+  - `category` always, plus `zone` when set (half of the zoned products are legacy zone-only)
+  - no `cost` on the first five days' lines
+  - some drawer notes are `''`
+  - `sa_schema_version` is `'6'`
+- Re-run: all 26 original rows plus 12 `__meta` rows pass. The e2e is 3/3, the client test 5/5, server unit 321/322 (the pre-existing Windows path failure).
+
 ## Filed, not fixed
 
 - **#238:** hard-deleted products, customers and mechanics referenced by history → FK 500. Very likely blocks the real file. Options: tombstones / null the reference / refuse in pre-flight (owner).
@@ -137,9 +159,9 @@ What an orphan should become is the owner's decision → **#238**.
   - unparseable dates silently become import time
   - negative balances clamped, not refused
   - `deletedAt` ignored
-  - body-parser 413 → 500
+  - ~~body-parser 413 → 500~~ fixed in #244
   - a synchronous 6.3 s per 2 MiB against nginx `proxy_read_timeout 30s` (504 while it commits)
-  - observations: imported bills have no `shift_id`; the imported active drawer has `device_id NULL` and can never be closed
+  - observation: imported bills have no `shift_id` (the stranded-drawer observation was wrong and is fixed, see above)
 
 ## Checks run
 
