@@ -1,22 +1,21 @@
 name: Deploy (demo)
 
 # #67 cd.2 — every green `main` reaches the demo VM on its own, and any earlier release can be put
-# back with a manual run (07_CICD_DEPLOY.md §6, §6.1; ADR-0013 + its 2026-09-15 addendum).
+# back with a manual run (07_CICD_DEPLOY.md §6, §6.1, §6.2; ADR-0013 + its 2026-09-15 addendum).
 #
 # The demo VM (172.30.58.20) is campus-internal: a GitHub-hosted runner cannot reach it, so the
 # deploy job runs on a SELF-HOSTED runner installed on the VM itself (outbound HTTPS only, no open
-# port — ADR-0013 addendum). It runs deploy/ansible/deploy.yml against the VM with a local
-# connection: the playbook stays the one deploy procedure, the same one a person runs by hand.
+# port). That runner's user has no docker group and cannot read /opt/pos/.env. The one thing it may
+# do is `sudo -u deploy /usr/local/bin/pos-deploy` (deploy/scripts/pos-deploy.sh), which fetches
+# `main` itself, refuses any commit not on it, runs deploy/ansible/deploy.yml with a local
+# connection, and rolls back automatically. A job-started hook on the runner admits only this file,
+# on `main`, for workflow_run / workflow_dispatch (deploy/scripts/runner-job-started.sh).
 #
-# 🔴 This repo is PUBLIC and that runner has the docker group on the demo VM (root-equivalent).
+# 🔴 This repo is PUBLIC.
 #   * Nothing here may ever be triggered by `pull_request` / `pull_request_target`, and no other
-#     workflow may name the runner's label. The `if:` guards below protect THIS file; a fork PR that
-#     edits a workflow to use the label is stopped only by the repo setting "Require approval for
-#     all external contributors" (07 §6.2) — never approve a fork run that touches `.github/`.
-#   * Only commits that are on `main` deploy (ancestry check in `resolve`), so a dispatcher cannot
-#     deploy a fork commit that GitHub serves through refs/pull/*.
-#   * No `${{ }}` of an input or event field is interpolated into a shell script; they are passed
-#     through `env:` and validated.
+#     workflow may name the runner's label (the hook refuses it anyway).
+#   * No `${{ }}` of an input or event field is interpolated into a shell script; values go through
+#     `env:` and are validated.
 #   * The workflow reads no secrets: /opt/pos/.env is placed by provision.yml, which a person runs.
 
 on:
@@ -39,8 +38,8 @@ permissions:
 jobs:
   resolve:
     name: resolve release
-    # GitHub-hosted: the registry check and the ancestry check need nothing from the VM, so a run
-    # that is not going to deploy never occupies (or even reaches) the self-hosted runner.
+    # GitHub-hosted: the registry and history checks need nothing from the VM, so a run that is not
+    # going to deploy never reaches the self-hosted runner or the `deploy-demo` concurrency slot.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: >-
@@ -53,7 +52,7 @@ jobs:
         || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     outputs:
       sha: ${{ steps.sha.outputs.sha }}
-      ready: ${{ steps.images.outputs.ready }}
+      images_ready: ${{ steps.images.outputs.images_ready }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,23 +86,40 @@ jobs:
             echo "::error::$sha is not on main; only commits on main are deployed"
             exit 1
           fi
+          # An automatic run deploys only the current head of main. A re-run of an older commit's CI
+          # would otherwise take the single pending slot of `deploy-demo` and replace a waiting deploy
+          # of a newer release. Consequence: after two quick merges only the later one deploys, and
+          # if its CI fails nothing deploys until the next merge (or a manual run).
+          head=$(git rev-parse origin/main)
+          if [[ "$EVENT" == "workflow_run" && "$sha" != "$head" ]]; then
+            echo "::notice::Not deploying $sha: main has moved on to $head, whose own CI completion deploys it."
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Release to deploy: $sha"
 
       - name: both release images on GHCR?
         id: images
+        if: steps.sha.outputs.sha != ''
         env:
           EVENT: ${{ github.event_name }}
           SHA: ${{ steps.sha.outputs.sha }}
         run: |
-          if deploy/scripts/verify-ghcr-tags.sh "$SHA"; then
-            echo "ready=true" >> "$GITHUB_OUTPUT"
-          elif [[ "$EVENT" == "workflow_run" ]]; then
+          rc=0
+          deploy/scripts/verify-ghcr-tags.sh "$SHA" || rc=$?
+          if [[ "$rc" == 0 ]]; then
+            echo "images_ready=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$rc" == 1 && "$EVENT" == "workflow_run" ]]; then
             # The expected path for the first of the two CI completions — not an error.
             echo "::notice::Not deploying $SHA: GHCR does not have both images yet. The other CI workflow's completion triggers the deploy."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
+            echo "images_ready=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$rc" == 1 ]]; then
             echo "::error::GHCR does not have both release images for $SHA; nothing to deploy"
+            exit 1
+          else
+            # Exit 2: the registry could not be asked. Red, so an outage never reads as "not yet".
+            echo "::error::Could not check GHCR for $SHA; nothing deployed. Re-run this workflow once GHCR answers."
             exit 1
           fi
 
@@ -111,105 +127,28 @@ jobs:
     name: deploy to demo
     needs: resolve
     if: >-
-      needs.resolve.outputs.ready == 'true'
-      && github.repository == 'NuimanLP/srisurart-pos-flutter'
-      && (github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch')
+      needs.resolve.outputs.images_ready == 'true'
+      && github.repository == 'NuimanLP/srisurart-pos-flutter' && (
+        (github.event_name == 'workflow_run'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.head_branch == 'main')
+        || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
     runs-on: [self-hosted, srisurart-demo-deploy]
     environment: demo
     # Serialised and never cancelled mid-flight: cancelling between two API restarts leaves the VM
-    # running two versions (07 §6.1). GitHub keeps one *pending* run per group, so a newer run
-    # replaces a pending one (never the running one) — see 07 §6.2.
+    # running two versions (07 §6.1). GitHub keeps one *pending* run per group; a newer run replaces
+    # a pending one, never the running one (07 §6.1 lists what that means for a manual rollback).
     concurrency:
       group: deploy-demo
       cancel-in-progress: false
-    # A hard bound so a hung compose command cannot hold the runner for GitHub's 6-hour default.
-    # The playbook's own waits total well under this (3 × 75 s health waits + 45 s readiness).
-    timeout-minutes: 45
-    env:
-      APP_DIR: /opt/pos
-      SHA: ${{ needs.resolve.outputs.sha }}
-      EVENT: ${{ github.event_name }}
+    # pos-deploy bounds each playbook attempt (deploy, then rollback) at 20 minutes, so a hung
+    # compose command fails the attempt and still rolls back; this is only the backstop above both.
+    timeout-minutes: 50
     steps:
-      # The compose files, nginx.conf and playbook come from the release being deployed, so a
-      # rollback puts back the files that match its images, not today's.
-      - name: check out the release
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-          path: release
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: read the running release
-        id: current
-        run: |
-          previous=""
-          if [[ -r "$APP_DIR/.current_sha" ]]; then
-            previous=$(tr -d '[:space:]' < "$APP_DIR/.current_sha")
-          fi
-          if [[ -n "$previous" && ! "$previous" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::warning::$APP_DIR/.current_sha does not hold a commit SHA; automatic rollback is off for this run"
-            previous=""
-          fi
-          echo "previous=$previous" >> "$GITHUB_OUTPUT"
-          echo "Running on the VM: ${previous:-<none>}"
-
-          # An automatic run must not move the VM backwards: a slow or re-run CI workflow for an
-          # older commit can complete after a newer release is already live. A manual run is
-          # allowed to go back — that is how rollback works.
-          skip=false
-          if [[ "$EVENT" == "workflow_run" && -n "$previous" && "$previous" != "$SHA" ]] \
-             && git -C release merge-base --is-ancestor "$SHA" "$previous" 2>/dev/null; then
-            echo "::notice::Not deploying $SHA: the VM already runs $previous, which is newer."
-            skip=true
-          fi
-          echo "skip=$skip" >> "$GITHUB_OUTPUT"
-
-      # The playbook itself ends early when .current_sha already names this SHA (07 §6 step 1),
-      # which is what makes a double trigger harmless.
-      - name: ansible-playbook deploy.yml (local connection)
-        id: deploy
-        if: steps.current.outputs.skip != 'true'
-        working-directory: release/deploy/ansible
+      - name: pos-deploy (deploy, roll back on failure)
         env:
-          IMAGE_TAG: ${{ needs.resolve.outputs.sha }}
-        # </dev/null: ansible-core refuses non-blocking stdio (handoff 2026-09-15 §4). bash runs
-        # with pipefail, so `| cat` keeps the playbook's exit code.
-        shell: bash
+          MODE: ${{ github.event_name == 'workflow_dispatch' && 'manual' || 'auto' }}
+          RELEASE: ${{ needs.resolve.outputs.sha }}
         run: |
-          ansible-playbook -i 'vm-demo,' \
-            -e ansible_connection=local \
-            -e ansible_python_interpreter=/usr/bin/python3 \
-            deploy.yml </dev/null 2>&1 | cat
-
-      # Automatic rollback. deploy.yml writes .current_sha only after /health/ready returned 200
-      # through Nginx, so after a failed run it still names the release that was live before.
-      - name: roll back — check out the previous release
-        id: rollback-checkout
-        if: >-
-          failure() && steps.deploy.outcome == 'failure'
-          && steps.current.outputs.previous != ''
-          && steps.current.outputs.previous != needs.resolve.outputs.sha
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.current.outputs.previous }}
-          path: rollback
-          persist-credentials: false
-
-      - name: roll back — redeploy the previous release
-        if: failure() && steps.rollback-checkout.outcome == 'success'
-        working-directory: rollback/deploy/ansible
-        env:
-          IMAGE_TAG: ${{ steps.current.outputs.previous }}
-        shell: bash
-        run: |
-          echo "::error::Release $SHA failed to deploy; redeploying the previous release $IMAGE_TAG. This run stays red."
-          # .current_sha still names $IMAGE_TAG, so the playbook's duplicate-release check would end
-          # the play without touching the half-rolled VM. Removing it is the playbook's own
-          # documented way to force a same-SHA redeploy; the successful run writes it back.
-          rm -f "$APP_DIR/.current_sha"
-          ansible-playbook -i 'vm-demo,' \
-            -e ansible_connection=local \
-            -e ansible_python_interpreter=/usr/bin/python3 \
-            deploy.yml </dev/null 2>&1 | cat
-          echo "::warning::Rolled back to $IMAGE_TAG. The schema was not rolled back (there are no down-migrations)."
+          [[ "$RELEASE" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::resolve produced no commit SHA"; exit 1; }
+          sudo -n -u deploy /usr/local/bin/pos-deploy "$MODE" "$RELEASE"
