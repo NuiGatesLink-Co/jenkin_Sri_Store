@@ -7,6 +7,7 @@
 #
 # Installed root-owned at /usr/local/bin/pos-deploy and run by the self-hosted runner's user
 # (`gha-runner`, no docker group) through ONE sudoers rule, as `deploy`:
+#   Defaults!/usr/local/bin/pos-deploy env_reset
 #   gha-runner ALL=(deploy) NOPASSWD: /usr/local/bin/pos-deploy
 # So a job on that runner — including one that should never have reached it — can do nothing with
 # the docker group or /opt/pos/.env except redeploy a commit that is already on `main`. That is why
@@ -23,9 +24,14 @@ readonly CLONE="$STATE_DIR/repo"
 # forgeable JWT_PLATFORM_SECRET fallback), so nothing older is ever deployed here, rollback included.
 readonly ROLLBACK_FLOOR="4f3a24447094547bdcc00486bd29b53833f81c3f"
 # A hung compose command must fail this attempt (and so trigger the rollback) instead of running
-# into the job's timeout, which cancels the job and runs nothing after it. Two attempts at most
-# (deploy + rollback) must fit inside the job's timeout-minutes.
-readonly PLAYBOOK_TIMEOUT="20m"
+# into the job's timeout. Budget against the job's timeout-minutes (50): two attempts (deploy +
+# rollback) × (20 min + 1 min kill grace) = 42 min, which leaves 8 min for the lock wait, the
+# fetch and the checkouts — hence a 5-minute lock wait.
+readonly PLAYBOOK_TIMEOUT_SECONDS=1200
+readonly KILL_GRACE_SECONDS=60
+readonly LOCK_WAIT_SECONDS=300
+# The whole output of the deploy section, also kept here in case the job log went away (a cancelled run).
+readonly LOG="$STATE_DIR/last-deploy.log"
 
 die() { echo "::error::pos-deploy: $*"; exit 1; }
 
@@ -40,7 +46,8 @@ release="${2:-}"
 mkdir -p "$STATE_DIR"
 # The workflow serialises deploys; this lock also serialises anything else that calls the script.
 exec 9>"$STATE_DIR/lock"
-flock -w 3600 9 || die "another pos-deploy has held the lock for an hour"
+flock -w "$LOCK_WAIT_SECONDS" 9 \
+  || die "another pos-deploy still holds the lock after ${LOCK_WAIT_SECONDS}s (a cancelled run's deploy may still be finishing; see $LOG)"
 
 if [[ ! -d "$CLONE/.git" ]]; then
   git clone --quiet --no-checkout "$REPO_URL" "$CLONE"
@@ -59,18 +66,35 @@ checkout() {
 }
 
 # run_playbook <sha> [extra ansible-playbook args...] — the files and the images of one release.
+# The playbook runs in its own session (setsid), so a signal sent to this script's process group
+# never reaches it, and with INT/TERM/HUP ignored (see below) it inherits them ignored. GNU `timeout`
+# is deliberately not used: it installs its own INT/TERM handlers, so the command it execs gets
+# them back at their defaults and a cancelled run would stop the playbook between two API restarts.
+# The watchdog is a separate session too, killed as a group when the playbook ends in time.
 run_playbook() {
   local sha="$1"
   shift
+  local pid watchdog rc=0
+  # </dev/null: ansible-core refuses non-blocking stdio (handoff 2026-09-15 §4).
   (
     cd "$CLONE/deploy/ansible"
-    # </dev/null: ansible-core refuses non-blocking stdio (handoff 2026-09-15 §4).
-    IMAGE_TAG="$sha" timeout --kill-after=60s "$PLAYBOOK_TIMEOUT" \
-      ansible-playbook -i 'vm-demo,' \
-        -e ansible_connection=local \
-        -e ansible_python_interpreter=/usr/bin/python3 \
-        "$@" deploy.yml </dev/null
-  )
+    IMAGE_TAG="$sha" exec setsid ansible-playbook -i 'vm-demo,' \
+      -e ansible_connection=local \
+      -e ansible_python_interpreter=/usr/bin/python3 \
+      "$@" deploy.yml </dev/null
+  ) &
+  pid=$!
+  # shellcheck disable=SC2016 # $1..$3 are the positional arguments passed to bash -c below
+  setsid bash -c 'sleep "$1"; kill -TERM -- "-$2"; sleep "$3"; kill -KILL -- "-$2"' \
+    watchdog "$PLAYBOOK_TIMEOUT_SECONDS" "$pid" "$KILL_GRACE_SECONDS" </dev/null >/dev/null 2>&1 &
+  watchdog=$!
+  disown "$watchdog" # no "Killed" job notice when it is stopped below
+  wait "$pid" || rc=$?
+  kill -KILL -- "-$watchdog" 2>/dev/null || true
+  if [[ "$rc" == 137 || "$rc" == 143 ]]; then
+    echo "::error::pos-deploy: the playbook for $sha was killed after ${PLAYBOOK_TIMEOUT_SECONDS}s"
+  fi
+  return "$rc"
 }
 
 deployable "$release" || die "$release is not a commit on main at or after $ROLLBACK_FLOOR; nothing deployed"
@@ -92,6 +116,18 @@ if [[ "$mode" == "auto" && -n "$running" && "$running" != "$release" ]] \
   exit 0
 fi
 
+# From here on the VM can change, so a cancelled workflow run must not stop us between two API
+# restarts, or between a failed deploy and its rollback. Cancelling a run in the Actions UI signals
+# the step (INT, then TERM, then a kill of the processes the runner user may kill — not these,
+# which run as `deploy`); sudo relays INT/TERM/HUP to this script, which ignores them, and so do the
+# playbook and tee it starts. The deploy therefore always runs to its end, rollback included
+# (07 §6.1). Output also goes to $LOG, and tee keeps writing it when the job log is gone.
+trap '' INT TERM HUP
+exec > >(tee --output-error=warn "$LOG") 2>&1
+tee_pid=$!
+# Let tee flush the last lines (the ::error:: annotation) to the job log before sudo returns.
+trap 'exec >&- 2>&-; wait "$tee_pid" 2>/dev/null' EXIT
+
 checkout "$release"
 if run_playbook "$release"; then
   exit 0
@@ -106,8 +142,8 @@ fi
 deployable "$running" || die "the running release $running is not on main at or after $ROLLBACK_FLOOR; not rolling back to it"
 checkout "$running"
 # Releases from before force_redeploy existed would end the play at their duplicate-release check
-# and silently roll back nothing.
-grep -q 'force_redeploy' "$CLONE/deploy/ansible/deploy.yml" \
+# and silently roll back nothing. Match the `when:` expression itself, so a comment cannot pass.
+grep -Eq 'when:.*not \(force_redeploy \| default\(false\) \| bool\)' "$CLONE/deploy/ansible/deploy.yml" \
   || die "$running's playbook predates force_redeploy; roll back by hand (07 §7)"
 
 echo "::warning::pos-deploy: rolling back to $running (the schema is not rolled back; there are no down-migrations)"

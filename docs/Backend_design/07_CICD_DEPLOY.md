@@ -256,7 +256,8 @@ on:
 * job `deploy` (`runs-on: [self-hosted, srisurart-demo-deploy]`, `environment: demo`, concurrency `deploy-demo`
   `cancel-in-progress: false` ระดับ job, `timeout-minutes: 50`): **ไม่ checkout อะไร** ขั้นเดียวคือ
   `sudo -n -u deploy /usr/local/bin/pos-deploy auto|manual <sha>` (`auto` = `workflow_run`, `manual` = `workflow_dispatch`)
-* `pos-deploy` (รันเป็น `deploy`, lock ด้วย `flock`): fetch `main` ลง `/home/deploy/pos-deploy/repo` เอง → ปฏิเสธ commit ที่
+* `pos-deploy` (รันเป็น `deploy`, lock ด้วย `flock` รอสูงสุด 5 นาที — งบของ job 50 นาที = 2 รอบ × (20 + 1 นาที grace) + 8 นาทีสำหรับ
+  lock/fetch/checkout): fetch `main` ลง `/home/deploy/pos-deploy/repo` เอง → ปฏิเสธ commit ที่
   ไม่อยู่บน `main` หรือเก่ากว่า `ROLLBACK_FLOOR` (= merge ของ #233 `4f3a244`; release ก่อนนั้น crash-loop บนเครื่องจริง) →
   `auto` และ SHA นี้เป็น ancestor ของ `.current_sha` → ไม่ deploy → checkout SHA นั้น (compose/nginx.conf/playbook ตรงกับ image
   ของ release นั้น — rollback ได้ไฟล์เก่ากลับมาด้วย) → `ansible-playbook -i 'vm-demo,' -e ansible_connection=local deploy.yml`
@@ -267,6 +268,11 @@ on:
   `force_redeploy` (release ก่อน PR #237 merge) — ต้อง rollback ด้วยมือ · rollback หลัง fail ที่เกิด**ก่อน**แตะ container
   (pull ไม่ได้, network pre-flight ของ #148) = rolling restart release เดิมฟรีหนึ่งรอบ ไม่เสียหาย · pre-flight fail เหมือนกันทุก SHA
   จึง rollback fail ด้วย และ `.current_sha` ไม่ถูกแตะ
+* 🔴 **กด Cancel ใน Actions ไม่หยุด deploy ที่เริ่มแล้ว** — ตั้งแต่ checkout release แรก `pos-deploy` ไม่รับ INT/TERM/HUP และ
+  playbook รันใน session ของตัวเอง (`setsid`) จึงรันจนจบ **รวม rollback** · run ใน Actions ขึ้น cancelled ทันที แต่ผลจริงอยู่ที่
+  `/home/deploy/pos-deploy/last-deploy.log` และ `/opt/pos/.current_sha` · ตั้งใจ: หยุดกลาง rolling restart = VM รันสอง version ·
+  run ถัดไปที่เริ่มระหว่างนั้นรอ lock 5 นาทีแล้วแดงถ้ายังไม่เสร็จ — สั่งใหม่เมื่อ log จบ (ทดสอบแล้ว: INT+TERM ถึง sudo, process group
+  ของมัน และ `pos-deploy` แล้ว KILL sudo ระหว่าง deploy และระหว่าง rollback — ทั้งสองรันจนจบ)
 * **concurrency:** run ที่*รอ*อยู่ถูกแทนด้วย run ใหม่ได้ (ตัวที่*กำลังรัน*ไม่ถูกแตะ) — **rollback ด้วยมือที่รออยู่อาจถูก deploy อัตโนมัติ
   ของ merge ใหม่แซง** ดูว่า run ของตัวเองขึ้น cancelled หรือไม่ แล้วสั่งใหม่
 * 🔴 **`pos-deploy.sh` และ `runner-job-started.sh` บน VM เป็นสำเนาที่เจ้าของติดตั้ง** — PR ที่แก้สองไฟล์นี้ไม่มีผลจนกว่าจะติดตั้งใหม่
@@ -304,8 +310,12 @@ on:
    sudo install -o root -g root -m 0755 /tmp/pos-src/deploy/scripts/pos-deploy.sh /usr/local/bin/pos-deploy
    sudo install -d -o root -g root -m 0755 /usr/local/lib/pos-runner
    sudo install -o root -g root -m 0755 /tmp/pos-src/deploy/scripts/runner-job-started.sh /usr/local/lib/pos-runner/job-started.sh
-   echo 'gha-runner ALL=(deploy) NOPASSWD: /usr/local/bin/pos-deploy' | sudo tee /etc/sudoers.d/pos-deploy >/dev/null
-   sudo chmod 0440 /etc/sudoers.d/pos-deploy && sudo visudo -cf /etc/sudoers.d/pos-deploy
+   # sudoers: ตรวจไฟล์ชั่วคราวก่อน แล้วค่อยวางเข้าที่ — ไฟล์ผิดใน /etc/sudoers.d ทำให้ sudo ใช้ไม่ได้ทั้งเครื่อง (VM ไม่มีรหัส root)
+   printf '%s\n' 'Defaults!/usr/local/bin/pos-deploy env_reset' \
+     'gha-runner ALL=(deploy) NOPASSWD: /usr/local/bin/pos-deploy' > /tmp/pos-deploy.sudoers
+   sudo visudo -cf /tmp/pos-deploy.sudoers \
+     && sudo install -o root -g root -m 0440 /tmp/pos-deploy.sudoers /etc/sudoers.d/pos-deploy
+   rm -f /tmp/pos-deploy.sudoers
    sudo chmod 0750 /home/deploy                                   # gha-runner อ่าน clone ของ deploy ไม่ได้
    rm -rf /tmp/pos-src
    id gha-runner                                                  # ต้องไม่มี docker ในรายการ group

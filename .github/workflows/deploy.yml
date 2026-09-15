@@ -143,6 +143,9 @@ jobs:
       cancel-in-progress: false
     # pos-deploy bounds each playbook attempt (deploy, then rollback) at 20 minutes, so a hung
     # compose command fails the attempt and still rolls back; this is only the backstop above both.
+    # 🔴 Cancelling this run (or hitting this timeout) does NOT stop a deploy already in progress:
+    # pos-deploy ignores INT/TERM/HUP once it starts changing the VM and runs to the end, rollback
+    # included; its log is /home/deploy/pos-deploy/last-deploy.log (07 §6.1).
     timeout-minutes: 50
     steps:
       - name: pos-deploy (deploy, roll back on failure)
