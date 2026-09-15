@@ -367,6 +367,39 @@ class SettingsRow extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+/// Schema v6 (#188, ADR-0007 "ช่องพังที่ต้องปิดก่อนเฟส 2" item 1): the local
+/// high-water mark per `(device_no, doc_type, period)` — the counter a phase-2
+/// `pos` device will issue RC/CN from. Nothing issues from it yet (phase 1: the
+/// server issues every number); for now it is only seeded from
+/// `GET /doc-counters`, and a seed never lowers [lastNo].
+@DataClassName('DocCounterRow')
+class DocCounters extends Table {
+  IntColumn get deviceNo => integer()();
+
+  /// The server's `doc_counters.doc_type`: `receipt` / `cn` / `po` / `quote` / `cp`.
+  TextColumn get docType => text()();
+
+  /// Buddhist year-month, `2569-09` — the server's `doc_counters.period`.
+  TextColumn get period => text()();
+  IntColumn get lastNo => integer()();
+
+  @override
+  Set<Column> get primaryKey => {deviceNo, docType, period};
+}
+
+/// Schema v6 (#188): a period this device's counters were seeded from the
+/// server for. ADR-0007 item 2 (#189) refuses offline numbers for a period that
+/// has no row here.
+@DataClassName('DocCounterSeedRow')
+class DocCounterSeeds extends Table {
+  IntColumn get deviceNo => integer()();
+  TextColumn get period => text()();
+  DateTimeColumn get seededAt => dateTime()();
+
+  @override
+  Set<Column> get primaryKey => {deviceNo, period};
+}
+
 @DataClassName('AppMetaRow')
 class AppMeta extends Table {
   TextColumn get key => text()();

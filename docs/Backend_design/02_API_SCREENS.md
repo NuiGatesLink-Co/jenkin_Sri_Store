@@ -607,6 +607,16 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 * กันกรณี counter ใน Drift เพี้ยนโดยที่ device token ยังอยู่ (เช่น restore Drift จากไฟล์เก่า) —
   ส่วนกรณี IndexedDB ถูกล้างทั้งก้อน device token หายไปด้วย จึงเป็นการ enrol เครื่องใหม่ ไม่ใช่ seed
 
+> **ลงมือแล้ว #188 (2026-09-15)** — `server/src/documents/doc-counters.*` · client `DocCounterSeeder`
+> * `200 {deviceNo, period, counters: [{docType, period, lastNo}]}` · เครื่องมาจาก `did` ใน token เท่านั้น
+>   (query ใด ๆ ไม่สนใจ) · `period` = เดือนปัจจุบันตาม timezone ร้าน (สูตรเดียวกับตัวออกเลข) ให้ client
+>   บันทึกเป็น period ที่ seed แล้วโดยไม่ต้องเดาจากนาฬิกาเครื่อง · `counters` คืน**ทุก period** ของเครื่องนี้
+>   (ไม่ใช่แค่เดือนปัจจุบัน — ข้ามเดือนระหว่างนาฬิกา server กับเครื่องต้องไม่ทำแถวที่ยังออกเลขอยู่หาย และมีไม่เกิน
+>   5 แถว/เดือน) · token ไม่ใช่ `pos` / ไม่มีเครื่อง / เครื่องไม่อยู่ในร้านนี้ = `403 DEVICE_ROLE_FORBIDDEN`
+> * client (เฉพาะ `USE_API_WRITES`, เครื่อง `pos`): Drift schema v6 `doc_counters` + `doc_counter_seeds` ·
+>   seed เมื่อ `AuthCubit` emit `Authenticated` (เปิดแอปที่ session ยังอยู่ และหลังล็อกอิน) · ไม่ await ·
+>   ดึงหรือพาร์สไม่ผ่าน = ไม่แตะแถวในเครื่องเลย
+
 ---
 
 ## 5. Cache strategy (Redis, cache-aside)

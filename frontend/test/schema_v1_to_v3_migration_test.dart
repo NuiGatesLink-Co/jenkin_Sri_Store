@@ -154,7 +154,7 @@ void main() {
         .customSelect('PRAGMA user_version')
         .map((r) => r.data.values.first)
         .getSingle();
-    expect(version, 5);
+    expect(version, 6);
   });
 
   test('the v2 block still applies on the way through', () async {

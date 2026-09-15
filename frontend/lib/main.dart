@@ -8,8 +8,10 @@ import 'app.dart';
 import 'core/network/api_client.dart';
 import 'data/db/database.dart';
 import 'data/repositories/auth_repository.dart';
+import 'data/services/doc_counter_seeder.dart';
 import 'presentation/blocs/auth_cubit.dart';
 import 'presentation/blocs/cart_cubit.dart';
+import 'presentation/blocs/doc_counter_seeding.dart';
 import 'presentation/blocs/pending_quote_cubit.dart';
 import 'presentation/repositories/repository_providers.dart';
 import 'presentation/widgets/font_scale_controller.dart';
@@ -31,7 +33,14 @@ void main() {
             create: (ctx) {
               final cubit = AuthCubit(
                 authRepository: ctx.read<AuthRepository>(),
-              )..init();
+              );
+              // #188: seed the document-number counter on app open and login.
+              // Only the API build has a server to seed from; subscribed
+              // before init() so the app-open emission is not missed.
+              if (const bool.fromEnvironment('USE_API_WRITES')) {
+                seedDocCountersOnSignIn(cubit, ctx.read<DocCounterSeeder>());
+              }
+              cubit.init();
               // The refresh path clears the tokens and calls this; without the
               // wiring the app kept a signed-in state that every request 401'd
               // against. #54 AC3.

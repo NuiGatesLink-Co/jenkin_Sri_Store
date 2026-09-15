@@ -45,8 +45,9 @@ export function formatDocNumber(
 /**
  * Issues document numbers. In phase 1 the server issues **every** series — RC, CN,
  * PO, QT and CP alike (ADR-0007 as amended 2026-09-04); the phase-2 split, where the
- * `pos` device issues RC and CN from its own Drift counter, is not built here and
- * `GET /doc-counters` does not exist yet.
+ * `pos` device issues RC and CN from its own Drift counter, is not built here.
+ * `GET /doc-counters` (#188, `DocCountersService`) already reads what this writes, so
+ * the device can seed that counter.
  *
  * Three properties the shop's paperwork depends on:
  *
