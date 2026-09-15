@@ -692,8 +692,8 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   plaintext code in `idempotency_keys` is accepted; one `เข้าสู่ระบบไม่สำเร็จ` for every login 401; code re-issue,
   label edit and a client device screen are **phase 2** (ADR-0004 *ยังไม่เคาะ*). PR #176; read
   `docs/handoff_log/owner-decisions-145-163.md`.
-- **Merged 2026-09-15 (tx follow-ups):** #169 → PR #177 (global `idem.cleanup` fans out per tenant; 🔴 nothing
-  schedules it yet), #175 → PR #178 (audit pool timeout 10 s; loss not reproducible for role denials, burst pinned),
+- **Merged 2026-09-15 (tx follow-ups):** #169 → PR #177 (global `idem.cleanup` fans out per tenant;
+  scheduled hourly since #182), #175 → PR #178 (audit pool timeout 10 s; loss not reproducible for role denials, burst pinned),
   #173 → PR #179 (🔴 cached reads: Redis first via `authorisedTenantId()`, `runTx` loader only on a miss — never
   open `runTx` before `singleFlight`). Read `docs/handoff_log/followups-169-173-175.md`.
 - **Merged 2026-09-15:** #183 → PR #197 — `ApiClient` timeouts: reads and `/auth/refresh` 15 s, writes 40 s
@@ -703,8 +703,15 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   write may have committed, and falling back ran it twice locally; `api_repository_contract_test.dart` enforces it.
   A reset socket still falls back (pre-existing). Follow-ups #199 (Thai text instead of `ClientException` at the
   counter), #200 (cancel via `AbortableRequest`).
+- **Merged 2026-09-15:** #182 → PR #198 — `JobSchedulerService` upserts the global `idem.cleanup` as a BullMQ job
+  scheduler (id `idem-cleanup-global`, every hour; BullMQ 6.3.4 runs the first occurrence **immediately** on first
+  registration, not at the next hour). 🔴 It lives in `QueueSchedulerModule`, imported **only** by
+  `WorkerModule.forRoot` — never add it to `QueueProcessorsModule`, which e2e files import: the first cut did, and
+  every such test app registered the scheduler, fanned DELETEs over every dev tenant and left it in shared Redis.
+  🔴 Renaming the scheduler id orphans the old scheduler in Redis — remove it (`removeJobScheduler`) in the same change.
+  A scheduler e2e must clear the queue first and drain active jobs before `app.close()` (`idem-cleanup-scheduler.e2e-spec.ts`).
 - **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
-  (owner runs 07 §4, #186); no scheduler for the global `idem.cleanup` (#182, PR #198 in review); #201 the
+  (owner runs 07 §4, #186); #201 the
   `exponential-jitter` backoff is never registered, so a failing BullMQ job sticks `active` instead of retrying.
   Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196. The repo's only long-lived
   branches are `main` and `POC_sample_offline_first`.
