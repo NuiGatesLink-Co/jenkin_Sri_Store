@@ -9,6 +9,7 @@ import {
   QUEUE_INVENTORY,
   QUEUE_MAINTENANCE,
   QUEUE_SALE_POST,
+  QUEUE_TENANT_IMPORT,
 } from '../src/queue/queue.constants.js';
 
 describe('queue substrate (unit)', () => {
@@ -26,12 +27,16 @@ describe('queue substrate (unit)', () => {
     expect(allDeps).not.toHaveProperty('@nestjs/bull');
   });
 
-  it('registers all 5 required queues (4 operational + 1 DLQ)', () => {
+  it('registers all 6 required queues (5 operational + 1 DLQ)', () => {
     expect(ALL_QUEUES).toEqual([
       QUEUE_SALE_POST,
       QUEUE_INVENTORY,
       QUEUE_MAINTENANCE,
       QUEUE_BACKUP,
+      // #239: its own queue, not a `tenant.import` job name on QUEUE_BACKUP — see that
+      // constant's comment (two `@Processor` classes on one queue name would race for
+      // every job).
+      QUEUE_TENANT_IMPORT,
       QUEUE_DLQ,
     ]);
   });

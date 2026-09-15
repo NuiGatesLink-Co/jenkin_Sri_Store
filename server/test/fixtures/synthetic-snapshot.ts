@@ -139,8 +139,8 @@ const iso = (ms: number | null | undefined) => (ms == null ? null : new Date(ms)
 // ── in-memory model (mirrors the Drift rows) ─────────────────────────────────
 
 interface Product { id: string; partNo: string; name: string; nameTH: string; category: string; zone?: string; brand: string; price: number; cost: number; stock: number; minStock: number; compat?: string | null; updatedAt: number; deleted?: boolean }
-interface Customer { id: string; code: string; name: string; nameTH: string; phone?: string | null; address?: string; points: number; totalSpend: number; createdAt: string; updatedAt?: number; deleted?: boolean }
-interface Mechanic { id: string; code: string; name: string; nameTH: string; nickname?: string | null; shopName: string; phone: string; note?: string; creditLimit: number; creditBalance: number; totalSales: number; totalCredit: number; totalDiscount: number; totalMarkup: number; createdAt: string; updatedAt?: number; deleted?: boolean }
+interface Customer { id: string; code: string; name: string; nameTH: string; phone?: string | null; address?: string; points: number; totalSpend: number; createdAt: string; updatedAt?: number; deleted?: boolean; deletedAt?: number }
+interface Mechanic { id: string; code: string; name: string; nameTH: string; nickname?: string | null; shopName: string; phone: string; note?: string; creditLimit: number; creditBalance: number; totalSales: number; totalCredit: number; totalDiscount: number; totalMarkup: number; createdAt: string; updatedAt?: number; deleted?: boolean; deletedAt?: number }
 interface SaleItem { productId: string; partNo: string; name: string; nameTH: string; qty: number; price: number; cost: number }
 interface Sale { id: string; receiptNo: string; subtotal: number; discount: number; total: number; paymentMethod: string; customerId?: string; customerName?: string; mechanicId?: string; mechanicName?: string; mechanicDelta?: number; pointsGranted: number; date: number; voided: boolean; voidedAt?: number; items: SaleItem[] }
 interface Shift { date: string; startingCash: number; openedAt: number; closedAt: number | null; physicalCash: number | null; isActive: boolean; autoArchived: boolean; archivedAt?: number; entries: Array<{ id: string; type: 'in' | 'out'; amount: number; note: string; createdAt: number }> }
@@ -543,6 +543,19 @@ export function generateSyntheticSnapshot(options: SyntheticOptions = {}): Json 
     }
   }
 
+  // #239 item 4: a customer/mechanic can be *soft*-deleted in Drift (schema v2's `deletedAt`)
+  // while still present in the file — a different shape from the hard-delete-and-vanish
+  // scenario above (`deleteDay`), which the import turns into a tombstone. This one must
+  // import as a soft-deleted row carrying its real ledger values, not a zeroed placeholder.
+  // Picked after the day loop so it never interferes with the day-by-day simulation, and from
+  // customers/mechanics still `live()` (never the one hard-deleted at `deleteDay`).
+  if (profile === 'realistic') {
+    const softDeletedCustomer = live(customers).find((c) => sales.some((s) => s.customerId === c.id));
+    if (softDeletedCustomer) softDeletedCustomer.deletedAt = lastMs;
+    const softDeletedMechanic = live(mechanics).find((m) => sales.some((s) => s.mechanicId === m.id));
+    if (softDeletedMechanic) softDeletedMechanic.deletedAt = lastMs;
+  }
+
   // Bills parked at the counter when the backup was taken (ParkedRepository.parkSale).
   const parked: Json[] = [];
   for (let k = 0; k < (scale.days > 30 ? 3 : 2); k++) {
@@ -585,7 +598,9 @@ export function generateSyntheticSnapshot(options: SyntheticOptions = {}): Json 
 
   const data: Json = {
     sa_products: saProducts,
-    sa_customers: live(customers).map(({ deleted: _d, updatedAt, ...c }) => ({ ...c, ...(updatedAt ? { updatedAt: iso(updatedAt) } : {}) })),
+    sa_customers: live(customers).map(({ deleted: _d, updatedAt, deletedAt, ...c }) => ({
+      ...c, ...(updatedAt ? { updatedAt: iso(updatedAt) } : {}), ...(deletedAt ? { deletedAt: iso(deletedAt) } : {}),
+    })),
     sa_sales: [...sales].sort(byDateDesc((s) => s.date)).map((s) => ({
       ...s, date: iso(s.date), ...(s.voidedAt != null ? { voidedAt: iso(s.voidedAt) } : {}),
       // Bills from the first five days predate Drift schema v2's `costAtSale`: the export
@@ -600,7 +615,9 @@ export function generateSyntheticSnapshot(options: SyntheticOptions = {}): Json 
       ...(p.cancelledAt != null ? { cancelledAt: iso(p.cancelledAt as number) } : {}),
     })),
     sa_settings: settings,
-    sa_mechanics: live(mechanics).map(({ deleted: _d, updatedAt, ...m }) => ({ ...m, ...(updatedAt ? { updatedAt: iso(updatedAt) } : {}) })),
+    sa_mechanics: live(mechanics).map(({ deleted: _d, updatedAt, deletedAt, ...m }) => ({
+      ...m, ...(updatedAt ? { updatedAt: iso(updatedAt) } : {}), ...(deletedAt ? { deletedAt: iso(deletedAt) } : {}),
+    })),
     sa_quotes: [...quotes].sort(byDateDesc((q) => q.date as number)).map((q) => ({
       ...q, date: iso(q.date as number), validUntil: iso(q.validUntil as number),
       ...(q.convertedAt != null ? { convertedAt: iso(q.convertedAt as number) } : {}),

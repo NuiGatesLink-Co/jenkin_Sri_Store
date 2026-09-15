@@ -7,16 +7,20 @@ import type { Redis } from 'ioredis';
 import { signJwt } from '../src/common/jwt.js';
 import { hashPassword } from '../src/common/password.js';
 import { APP_CONFIG, type AppConfig } from '../src/config/config.js';
+import { QueueProcessorsModule } from '../src/queue/queue.module.js';
 import { generateSyntheticSnapshot } from './fixtures/synthetic-snapshot.js';
 import { accessToken, clearTenantCache, createTestApp, TENANT_TABLES_DEPTH_FIRST } from './support/fixture.js';
 import { checkSnapshotInvariants, reconcileImport, snapshotShifts } from './support/snapshot-checks.js';
 
 /**
- * #185 — a shop snapshot through the tenant import path and `01_DATABASE.md §9`, end to end:
- * provision the tenant with `POST /platform/tenants` (step 1), pre-flight the file (step 2),
- * `POST /platform/tenants/:id/import` it over HTTP (steps 3–4), then the six checks (step 5),
- * and finally prove the tenant is usable: the imported drawer is archived and visible, the
- * closing report reads it, and a first new bill takes number 0001 against the imported stock.
+ * #185 / #239 — a shop snapshot through the tenant import path and `01_DATABASE.md §9`, end to
+ * end: provision the tenant with `POST /platform/tenants` (step 1), pre-flight the file (step 2),
+ * `POST /platform/tenants/:id/import` it over HTTP — `202 Accepted` + a `jobId` since #239, so the
+ * suite polls `GET .../import/:jobId` for the worker (`TenantImportProcessor`, run in-process via
+ * `QueueProcessorsModule` — same pattern as `backup.e2e-spec.ts`) to finish (steps 3–4), then the
+ * six checks (step 5), and finally proves the tenant is usable: the imported drawer is archived and
+ * visible, the closing report reads it, and a first new bill takes number 0001 against the imported
+ * stock.
  *
  * By default the snapshot is the synthetic one (`test/fixtures/synthetic-snapshot.ts`). For the
  * shop's real file — never committed — run only this file:
@@ -33,7 +37,16 @@ const REPORT = process.env.RECONCILE_OUT;
 
 type Json = Record<string, any>;
 
-describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)', () => {
+async function waitFor(fn: () => Promise<boolean>, timeoutMs = 20000): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await fn()) return;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  throw new Error(`Timeout waiting for condition after ${timeoutMs}ms`);
+}
+
+describe('tenant import of a shop snapshot through the 01 §9 checklist (#185, #239)', () => {
   let app: INestApplication;
   let admin: DataSource;
   let cache: Redis;
@@ -42,7 +55,7 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
   const tenants: string[] = [];
 
   beforeAll(async () => {
-    ({ app, admin, cache } = await createTestApp());
+    ({ app, admin, cache } = await createTestApp([QueueProcessorsModule]));
     const config = app.get<AppConfig>(APP_CONFIG);
     adminId = randomUUID();
     await admin.query(
@@ -84,17 +97,38 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
     return res.body.data.tenantId as string;
   };
 
+  /** §9 steps 2-4: pre-flight, then enqueue — #239: 202 + jobId, never 201 any more. */
   const importFile = (tenantId: string, snapshot: Json) =>
     request(app.getHttpServer())
       .post(`/api/v1/platform/tenants/${tenantId}/import`)
       .set('Authorization', `Bearer ${adminToken}`)
       .send(snapshot);
 
+  const getImportJob = (tenantId: string, jobId: string) =>
+    request(app.getHttpServer())
+      .get(`/api/v1/platform/tenants/${tenantId}/import/${jobId}`)
+      .set('Authorization', `Bearer ${adminToken}`);
+
+  /** Polls the job status endpoint (not BullMQ's own `job.getState()`) until it leaves
+   * `queued`/`running` — `import_jobs` is the single source of truth #239 establishes. */
+  const waitForImportJob = async (tenantId: string, jobId: string): Promise<Json> => {
+    let last: Json = {};
+    await waitFor(async () => {
+      const res = await getImportJob(tenantId, jobId);
+      expect(res.status).toBe(200);
+      last = res.body.data;
+      return last.status === 'succeeded' || last.status === 'failed';
+    });
+    return last;
+  };
+
   const count = async (tenantId: string, table: string) =>
     Number((await admin.query(`SELECT count(*)::int AS n FROM ${table} WHERE tenant_id = $1`, [tenantId]))[0].n);
 
   // `realistic` carries what a real Drift file does: history naming hard-deleted products,
-  // customers and mechanics, which the import turns into tombstones (#238).
+  // customers and mechanics, which the import turns into tombstones (#238); and a customer and
+  // a mechanic the shop *soft*-deleted (still present in the file) — imported soft-deleted, not
+  // live (#239 item 4).
   const PROFILES = REAL_FILE ? ['SNAPSHOT_FILE'] : ['clean', 'realistic'];
 
   it.each(PROFILES)('imports the %s snapshot and passes all six post-import checks', async (profile) => {
@@ -122,13 +156,21 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
     const tenantId = await provision();
     const started = Date.now();
     const res = await importFile(tenantId, snapshot);
+    // #239: the server's own pre-flight (`snapshot-preflight.ts` + `snapshot-tombstones.ts`)
+    // must agree with the client-side checker above — a real gap here means one of the two
+    // disagrees with the other, not that either is wrong on its own.
+    expect(res.status).toBe(202);
+    expect(res.body.data).toMatchObject({ jobId: expect.any(String) });
+    const jobId = res.body.data.jobId as string;
+
+    const job = await waitForImportJob(tenantId, jobId);
     const importMs = Date.now() - started;
-    console.info(`import answered ${res.status} in ${importMs} ms`, res.status >= 400 ? res.body : '');
-    report({ importStatus: res.status, importMs, tenantId: KEEP ? tenantId : undefined });
-    expect(res.status).toBe(201);
+    console.info(`import job ${jobId} answered ${job.status} in ${importMs} ms`, job.status === 'failed' ? job.error : '');
+    report({ importStatus: job.status, importMs, tenantId: KEEP ? tenantId : undefined });
+    expect(job.status).toBe('succeeded');
     const { products, customers, mechanics, droppedSuppliers } = preflight.tombstones;
-    expect(res.body.data.tombstones).toEqual({ products, customers, mechanics });
-    expect(res.body.data.droppedSuppliers).toBe(droppedSuppliers);
+    expect(job.tombstones).toEqual({ products, customers, mechanics });
+    expect(job.droppedSuppliers).toBe(droppedSuppliers);
     // Audited inside the import transaction, with the count per table.
     const [audit] = await admin.query(
       `SELECT after FROM audit_log WHERE tenant_id = $1 AND action = 'platform.tenant.import'`,
@@ -210,28 +252,50 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
     const [after] = await admin.query(`SELECT stock FROM products WHERE tenant_id = $1 AND id = $2`, [tenantId, product.id]);
     expect(after.stock).toBe(product.stock - 1);
     report({ firstBillAfterImport: { numberedFrom0001: true, stockBefore: product.stock, stockAfter: after.stock } });
-  });
+  }, 60000);
 
-  it.skipIf(Boolean(REAL_FILE))('rolls the whole shop back when one row is refused (§9 step 4)', async () => {
+  it.skipIf(Boolean(REAL_FILE))('fails the job and rolls the whole shop back when one row is refused (§9 step 4)', async () => {
     const snapshot = generateSyntheticSnapshot({ scale: 'small', profile: 'clean' }) as Json;
     // One of the last rows the import writes (after every sale, return, PO and movement):
-    // a drawer entry Postgres refuses (CHECK amount > 0).
+    // a drawer entry Postgres refuses (CHECK amount > 0). Pre-flight does not catch this one
+    // (it is not one of #239's clamp rules — a zero drawer entry is neither a balance, a
+    // point total, a stock quantity nor a line qty), so it still reaches the transaction and
+    // rolls back exactly as before, only now as a `failed` job instead of a 4xx response.
     const history = snapshot.sa_shift_history as Json[];
     history[history.length - 1].entries.push({ id: 'de-poison', type: 'out', amount: 0, note: 'poison', createdAt: '2026-05-01T03:00:00.000Z' });
 
     const tenantId = await provision();
     const res = await importFile(tenantId, snapshot);
-    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBe(202);
+    const job = await waitForImportJob(tenantId, res.body.data.jobId);
+    expect(job.status).toBe('failed');
+    expect(typeof job.error).toBe('string');
     for (const table of ['products', 'sales', 'customers', 'mechanics', 'shifts', 'drawer_entries', 'movements']) {
       expect({ table, n: await count(tenantId, table) }).toEqual({ table, n: 0 });
     }
-  });
+  }, 30000);
 
-  it.skipIf(Boolean(REAL_FILE))('refuses a second import into a tenant that already has bills', async () => {
+  it.skipIf(Boolean(REAL_FILE))('refuses a second import into a tenant that already has bills, synchronously', async () => {
     const snapshot = generateSyntheticSnapshot({ scale: 'small', profile: 'clean' });
     const tenantId = await provision();
-    expect((await importFile(tenantId, snapshot)).status).toBe(201);
+    const first = await importFile(tenantId, snapshot);
+    expect(first.status).toBe(202);
+    const job = await waitForImportJob(tenantId, first.body.data.jobId);
+    expect(job.status).toBe('succeeded');
+    // §9's "tenant already has bills" refusal is pre-flight, synchronous — no job, no poll.
     const again = await importFile(tenantId, snapshot);
     expect(again.status).toBe(409);
-  });
+  }, 30000);
+
+  it.skipIf(Boolean(REAL_FILE))('refuses a second import while the first is still queued or running, with 409', async () => {
+    const snapshot = generateSyntheticSnapshot({ scale: 'full', profile: 'clean' });
+    const tenantId = await provision();
+    const first = await importFile(tenantId, snapshot);
+    expect(first.status).toBe(202);
+    // The second attempt races the worker — it may find `queued` or `running`, but either
+    // way `uq_import_jobs_active` refuses it before a second worker could ever start.
+    const second = await importFile(tenantId, snapshot);
+    expect(second.status).toBe(409);
+    await waitForImportJob(tenantId, first.body.data.jobId);
+  }, 30000);
 });
