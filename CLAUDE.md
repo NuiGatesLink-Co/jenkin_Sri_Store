@@ -34,7 +34,7 @@ The repo now carries **two lines of work**. Know which one you are on before you
   The Dart repositories stay the behavioural reference for those rules — port them, don't reinvent.
 - `POC_sample_offline_first` preserves the offline-first build exactly as the shop runs it today,
   so the phase-1 rule **"the shop keeps running the Drift build, no cutover"** stays testable.
-- The offline-first design is **not abandoned** — it returns as **phase 2** (outbox + `offlineOk`
+- The offline-first design is **not abandoned** — it returns as **phase 2** (outbox + ~~`offlineOk`~~ — dropped 2026-09-15, see 08
   + a single `role='pos'` writer per tenant, ADR-0004). The POC branch is its starting point.
 
 > Read `docs/Backend_design/adr/README.md` before writing backend code, and remember:
@@ -656,10 +656,15 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   (strong random values, not `.env.example`'s), then re-run `provision.yml`. A missing `ETCD_ROOT_PASSWORD` fails
   the next Ansible deploy at compose interpolation; a missing Grafana password only leaves monitoring down.
   CI is unaffected.
-- 🔴 **#67 was closed without its workflow.** `.github/workflows/deploy.yml` has never existed in git history
-  (not on `feat/67-auto-deploy` either); #67 is reopened. Deploys are `ansible-playbook` by hand until it lands,
-  so 07 §2's "merge → deploy.yml" arrow is design, not fact. An agent building it was stopped by the Claude Code
-  permission classifier ("Production Deploy") — it needs the owner's explicit go-ahead.
+- **#67 (automatic deploy):** `.github/workflows/deploy.yml` exists since PR #237 (2026-09-15). It runs on a
+  **self-hosted runner on the demo VM**, because the campus-internal VM is unreachable from GitHub-hosted runners
+  (ADR-0013 addendum, 07 §6.2). The runner user `gha-runner` may only `sudo -u deploy /usr/local/bin/pos-deploy`.
+  That wrapper fetches `main` into its own clone, refuses a commit not on `main` or below `ROLLBACK_FLOOR`, and
+  rolls back with `-e force_redeploy=true`, **never deleting `.current_sha`**. A job-started hook admits only
+  `deploy.yml@refs/heads/main`. 🔴 `pos-deploy.sh` greps `when:.*not \(force_redeploy \| default\(false\) \| bool\)`
+  in the target release's `deploy/ansible/deploy.yml`, so those two `when:` lines must survive every playbook edit.
+  🔴 A rollback runs the **target release's** playbook, not main's. 🔴 The runner is **not installed yet** and
+  #67's real-run ACs are unproven, so deploys are still `ansible-playbook` by hand (07 §6.2 has the owner's steps).
 - **Merged 2026-09-14 (orchestrated round):** #141 → PR #157 (e2e runner lock), #140 → PR #158 (ioredis
   `commandTimeout`, `REDIS_COMMAND_TIMEOUT_MS` default 1000 ms, not on BullMQ connections), #144 → PR #159
   (`src/devices`), #143 → PR #155 (login screen + redirect, `USE_API_WRITES` only), #148 → PR #156.
@@ -761,10 +766,62 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   A dev DB that ran the short-lived id `1788652802130` must delete that `migrations` row and re-migrate.
   `TenantJobRunner` also stopped losing the DLQ after a failed rollback or a failed `BEGIN`.
   Follow-up #217: tenant import stamps historic `updated_at`, so already-synced devices never pull imported rows.
-- **Still open:** #67 (needs the owner's go-ahead); #217; #219–#221. Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196;
-  the owner decided 2026-09-15 to clear all of it before starting phase 2 — read
-  `docs/handoff_log/lane-a-closeout-round-2026-09-15.md` for the ordered next steps. The repo's only long-lived
-  branches are `main` and `POC_sample_offline_first`.
+- **Merged 2026-09-15 (evening orchestrated round, 12 PRs):** #235 #236 #237 #244 #246 #247 #250 #252 #253 #255
+  #256 #257. Read `docs/handoff_log/orchestrated-closeout-round-2026-09-15.md` before touching the deploy playbook,
+  etcd, the tenant import or k6.
+  - 🔴 **etcd auth had never been on on the demo VM (#250).** Nothing copied `etcd-init.sh`, so Docker created a
+    root-owned *directory* at the bind-mount source, `sh` exited 0 on it, and the deploy stayed green. The playbook
+    now copies the script, runs `docker compose run --rm etcd-init` (blocking), asserts an anonymous read gets 400,
+    and seeds `/pos/config/log_level` put-if-absent. The next deploy of a new SHA must show `etcdctl auth status` =
+    `true`.
+  - 🔴 **An expired token on `/v3/watch` answers HTTP 200** with `canceled … Unauthenticated`, never a 401 (#255).
+    Auth failures are typed (`EtcdHttpError.status === 401`, `EtcdWatchAuthError`). Never string-match `'401'`:
+    compaction revisions contain those digits. An idle watch reconnects every ~5 min (undici `bodyTimeout`); that is
+    harmless.
+  - 🔴 **nginx.conf is a single-file bind mount (#256).** Every deploy runs `nginx -t` in a
+    `docker compose run --rm --no-deps nginx` container, then `up -d --force-recreate nginx` (1–3 s blip). Reproduce
+    inode bugs on a Linux daemon (`docker:dind`): Docker Desktop on Windows re-resolves by path and hides them.
+  - **`/health/ready` has its own `HEALTH_DATA_SOURCE`** (pool 1, `pos_app`, 2 s; #253). Readiness means "Postgres
+    answers", not "the request pool has a free slot". Connection budget 62 ≤ 80 (`server/README.md`).
+  - **Tenant import (#244, #252):**
+    - It reads the real `sa_*` keys: `sa_pos`, `sa_cash_drawer` + `sa_shift_history`, `sa_parked`.
+    - The 10 MiB JSON parser runs only for a **verified** platform JWT.
+    - Imported shifts are all `is_active=false`. A device-less active drawer was stranded forever.
+    - `updated_at` is re-stamped last before COMMIT.
+    - Orphan references get **soft-deleted tombstones**: `products.brand='import-tombstone'` or
+      `code='import-tombstone:<id>'`. Orphan supplier rows are **dropped** (`droppedSuppliers`).
+    - Every reference id goes through `fieldId()`. A missing id, an unnamed orphan or a credit note without its bill
+      is a pre-flight 400, never a 500.
+    - Synthetic generator: `server/test/fixtures/synthetic-snapshot.ts`.
+  - **k6 §9 latency (#257, owner decision):** run from several machines with `SHARD=i/N` (24 r/s per source IP,
+    under nginx `perip`), remote-writing to the VM's Prometheus through
+    `location = /prometheus-remote-write/api/v1/write` (allowlist + basic auth, write only; 07 §10.3). Read p95 per
+    machine. 🔴 The campus IP range is still a `TODO(owner)` in `nginx.conf`. `DEMO_ENV_FILE` needs
+    `K6_REMOTE_WRITE_BASIC_AUTH_USER` / `_PASSWORD`.
+  - 🔴 **Never `docker compose down -v` on a shared Docker daemon.** A subagent did, on the default `srisurart-pos`
+    project, and wiped another session's dev Postgres/Redis volumes. Throwaway stacks use a unique `-p`; run
+    `docker ps` first.
+- **Still open:**
+  - #239: import hardening + background job (owner decision: 202 + poll).
+  - #67: install the runner and prove the ACs with real runs.
+  - #184 / #251: the three-laptop k6 run.
+  - #185: re-run with the real shop file.
+  - Phase 2 order: #228 → #229 → #212 / #211 / #189 → #230 → #190 → #231.
+
+  The repo's only long-lived branches are `main` and `POC_sample_offline_first`.
+
+**Phase 2 spec — `docs/Backend_design/08_PHASE2_SPEC.md` (2026-09-15; owner decisions D1–D15, E1–E11, F1–F10 in #240, map #243).**
+Read it before any phase-2 ticket: one user role `owner` + one active shop account per tenant (slice 1; device roles unchanged),
+retire/enrol/export need an enrolled device token, no `offlineOk` (column dropped), the `pos` device issues RC/CN online and
+offline, `POST /sync/push` authenticates with the device token, acts as the tenant's single active user, replays by key then
+client id before any check and stops at the first non-verdict (a head op stuck 3 times goes to the owner screen), multiple
+shifts per day, online void = reason only (no PIN), the offline-PIN 3-day window is enforced on the till only, production =
+the department VM `mob04` deployed by the hardened self-hosted runner from PR #237 (F4′ reversed the pull-based timer; a real-shop cutover is a later phase).
+§2 records the design decisions; the only open item is the Thai-strings ticket (F10). ADR-0004/0007/0009/0010/0013 carry dated addenda.
+Merged as PR #254 (`1072f17`). 🔴 **The §16 slices are not ticketed yet**, and #189/#190/#192–#195/#211/#212/#228–#230 still carry
+pre-spec content (7 days, 5 s rewind, `offlineOk`, cashier) — do not implement from them. The owner wants **lane-independent tickets**
+(no lane waits on another); slice 8 (#228) is a hub, so the lane split (option A: one lane owns the offline path; option B: contract
+first) is still the owner's call, and `/to-tickets` is user-invoked only. Read `docs/handoff_log/phase2-wayfinder-spec-2026-09-15.md`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
@@ -796,7 +853,7 @@ back** (decided 2026-09-04). Recover from git history if you ever need the Supab
 - **Multi-tenant client work** — the Flutter side of phase 1/2: an `ApiRepository` layer behind the
   existing repository interfaces (`03_ARCHITECTURE.md §8` task `q1`) that **writes through to
   Drift** and maps at the repository boundary ([ADR-0010](docs/Backend_design/adr/0010-client-write-through-cache.md)),
-  then the outbox + `offlineOk` shell. Thai strings for the 7 new server errors now have
+  then the outbox ~~+ `offlineOk`~~ shell (no `offlineOk` since 2026-09-15 — `docs/Backend_design/08_PHASE2_SPEC.md`). Thai strings for the 7 new server errors now have
   **agent-drafted placeholders** accepted by the project owner (`02_API_SCREENS.md §8.1`) — three
   of them are counter-facing and still need the shop's own wording. Never invent new ones.
 - **Re-capture tutorial screenshots** from the Flutter app (current images are from the JS app).

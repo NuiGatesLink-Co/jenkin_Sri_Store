@@ -51,7 +51,7 @@ Build & Test · Security Scan · Package/Storage · Config & Deploy · KV Storag
 
 * **key ใน etcd มีตัวเดียว (`log_level`)** — ค่า rate limit ถูกตัดออกเพราะไม่มีผู้ใช้ (ADR-0006 เก็บโควตาใน `tenants.plan`)
 * **maintenance mode ใน etcd** — ต้องมีข้อความไทยหน้าเคาน์เตอร์ใหม่ ซึ่ง `CLAUDE.md` ห้ามแต่งเอง รอร้าน
-* **production host** — ยังไม่เลือก (ครบกำหนดก่อน `q4`) · เมื่อเลือก: inventory ที่สอง + required reviewer
+* ~~**production host** — ยังไม่เลือก (ครบกำหนดก่อน `q4`) · เมื่อเลือก: inventory ที่สอง + required reviewer~~ — **เคาะ 2026-09-15 (#242): `mob04` production เดียว** (addendum ด้านล่าง)
 * **ชื่อโดเมน** — ถ้ามีเมื่อไร ค่อยเปลี่ยน self-signed เป็น certbot
 * **retention ของ image บน GHCR** — ยังไม่ตั้งนโยบายลบ tag เก่า · (addendum 2026-09-15: rollback อัตโนมัติ
   ต้องการ image ของ release ก่อนหน้า — นโยบายลบ tag ต้องไม่ลบ tag ที่ `.current_sha` ชี้อยู่)
@@ -118,3 +118,24 @@ runner ของ GitHub (GitHub-hosted) ต่อเข้าไม่ได้ 
 * `deploy/ansible/deploy.yml` แก้แค่ `force_redeploy` ที่ duplicate-release check · inventory override จาก `pos-deploy` ด้วย
   `-i 'vm-demo,' -e ansible_connection=local` · การรันด้วยมือผ่าน SSH (handoff 2026-09-15 §5) ยังใช้ได้เหมือนเดิม
 * `deploy/scripts/verify-ghcr-tags.sh` แยก exit 1 (ยังไม่มี image) ออกจาก 2 (ถาม registry ไม่ได้) — 2 ทำให้ run แดง
+
+## Addendum 2026-09-15 — owner round 2 on #240 (E11) + #242
+
+| # | ตัดสิน | ผลกับ ADR นี้ |
+|---|---|---|
+| #242 | host = VM ของภาค **`mob04`** · **สภาพแวดล้อมเดียว และเป็น production** · ไม่มี demo แยก · cutover ร้านจริงจากนอกมหาวิทยาลัย = เฟสถัดไป | environment ที่ ADR นี้และ `07_CICD_DEPLOY.md` เรียก `demo` คือ production ตัวเดียว (ชื่อ environment ใน GitHub แก้ใน #67) |
+| ~~E11~~ | ~~deploy ด้วย **self-hosted GitHub Actions runner บน `mob04`** · รันเฉพาะ job `deploy` บน `main` ผ่าน protected environment · **ห้ามรัน workflow ของ PR** (repo public)~~ | ~~แทน "Actions → SSH → Ansible" จาก GitHub-hosted runner ซึ่งเข้า VM ในเครือข่ายมหาวิทยาลัยไม่ได้ · Ansible playbook ยังใช้ แต่รันจาก runner บนเครื่องเอง~~ ~~**(แทนที่โดย F4 รอบ 3)**~~ **(F4′: runner ที่ใช้จริงคือของ #237 — ดูหัวข้อ *Actions เข้าถึง VM อย่างไร* ด้านบน)** |
+
+รายละเอียด: [`08_PHASE2_SPEC.md §17`](../08_PHASE2_SPEC.md) · ticket #67
+
+## ~~Addendum 2026-09-15 (รอบ 3) — owner round 3 on #240 (F4)~~ — ถูกกลับโดย F4′
+
+| # | ตัดสิน | ผลกับ ADR นี้ |
+|---|---|---|
+| ~~F4~~ | ~~**deploy แบบ pull**: systemd timer บน `mob04` อ่าน digest ของ image `main` บน GHCR (server + web) · เปลี่ยน → อ่าน sha จาก label `org.opencontainers.image.revision` → รัน `deploy.yml` ในเครื่อง (rollback เดิม) · lock กันรันซ้อน · **ไม่มี self-hosted runner**~~ | ~~แทน E11 และ "Actions → SSH → Ansible" · repo public — runner ที่ fork PR เรียกได้ = รันโค้ดบน production · ไม่ต้องมี inbound · GitHub Actions เหลือ build + scan + push image~~ |
+
+รายละเอียด: [`08_PHASE2_SPEC.md §17`](../08_PHASE2_SPEC.md) · ticket #67
+
+## Addendum 2026-09-15 (รอบ 4) — owner F4′ on #240
+
+**F4′ แทน F4:** ใช้ **self-hosted runner ที่ PR #237 merge แล้ว** (job-started hook รับเฉพาะ `deploy.yml@refs/heads/main` fail-closed · user `gha-runner` ไม่มี docker/`.env` · sudoers คำสั่งเดียว `pos-deploy` deploy เฉพาะ commit บน `main` · workflow ไม่ใช้ secret) · **ไม่สร้าง pull-based timer** · รายละเอียดทั้งหมดอยู่ในหัวข้อ *Actions เข้าถึง VM อย่างไร* ด้านบน — ไม่คัดลอกซ้ำ · ความเสี่ยง fork PR ที่ review รอบ 2 ของ PR #254 ยกขึ้นปิดด้วย hook + wrapper · run จริงบน VM = #67 · 08 §17

@@ -509,9 +509,9 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | POST | `/auth/refresh` | refresh | – (เช็ค `devices.retired_at` ของ `did`) | – | – | – |
 | POST | `/auth/device` `{code}` 🆕 | – | – | – | – | – |
 | GET | `/auth/me` | ✔ | ทั้งคู่ | – | – | – |
-| GET | `/devices` 🆕 | owner | ทั้งคู่ | – | – | – |
-| POST | `/devices` `{label, role}` 🆕 | owner | ทั้งคู่ | – | – | ✔ |
-| POST | `/devices/{id}/retire` `{physicalCash?}` 🆕 (#144) | owner | ทั้งคู่ | – | – | ✔ |
+| GET | `/devices` 🆕 | ~~owner~~ **ต้องมี `did`** (2026-09-15 F6, 08 §3) | ทั้งคู่ | – | – | – |
+| POST | `/devices` `{label, role}` 🆕 | ~~owner~~ **ต้องมี `did`** (2026-09-15 F6, 08 §3) | ทั้งคู่ | – | – | ✔ |
+| POST | `/devices/{id}/retire` `{physicalCash?}` 🆕 (#144) | ~~owner~~ **ต้องมี `did`** (2026-09-15 F6, 08 §3) | ทั้งคู่ | – | – | ✔ |
 | **GET** | **`/bootstrap`** 🆕 (#25) | ✔ | ทั้งคู่ | `ETag`/`304`, ไม่ใช่ Redis — ดู §3.1 (#32 ไม่ทำ Redis cache ให้ bootstrap — ไม่มีใน §5) | – | – |
 | GET | `/products` (`?search=` / `?partNo=` / `?updatedSince=`) | ✔ | ทั้งคู่ | ✅ 5m | – | – |
 | GET | `/products/:id` | ✔ | ทั้งคู่ | ✅ 5m | – | – |
@@ -550,11 +550,12 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | GET | `/reports/*` | ✔ | ทั้งคู่ | – *(ยังไม่ cache — §5 บอก "ปล่อยหมดอายุเอง" ขัดกับ AC3 ของ #32 ที่ให้อ่านหลังเขียนต้องสด → คำถามถึงเจ้าของโปรเจกต์ ดู `server/README.md` The server cache)* | – | – |
 | GET | `/settings` | ✔ (ทุก role) | ทั้งคู่ | ✅ 3600s ±10% (#32) | – | – |
 | PATCH | `/settings` | manager | ทั้งคู่ | invalidate (#32) | – | ✔ |
-| POST | `/backup/export` | **owner เท่านั้น** | ทั้งคู่ | – | ✅ `tenant-export` | ✔ |
+| POST | `/backup/export` | ~~**owner เท่านั้น**~~ **ต้องมี `did`** (2026-09-15 F6) | ทั้งคู่ | – | ✅ `tenant-export` | ✔ |
 | ~~POST~~ | ~~`/backup/import`~~ → ย้ายไป **§4.1 admin plane** | – | – | – | – | – |
 | **GET** | **`/doc-counters`** 🆕 | ✔ | **pos เท่านั้น** | – | – | – |
 | GET | `/export/:entity.csv` | manager | ทั้งคู่ | – | – | – |
-| POST | `/sync/push` · GET `/sync/pull` · `/sync/bootstrap` | ✔ | **pos เท่านั้น** | – | – | **✔ บังคับ** |
+| ~~POST~~ | ~~`/sync/push` · GET `/sync/pull` · `/sync/bootstrap`~~ | ~~✔~~ | ~~**pos เท่านั้น**~~ | – | – | ~~**✔ บังคับ**~~ |
+| POST | `/sync/push` (2026-09-15, 08 §8 — `/sync/pull`/`/sync/bootstrap` ไม่ทำ) | **device token** (`X-Device-Token`) ไม่ใช่ JWT | **pos เท่านั้น** | – | – | **✔ บังคับ ต่อ op** |
 | GET | `/health/live` · `/health/ready` | – | – | – | – | – |
 | GET | `/metrics` | internal | – | – | – | – |
 
@@ -689,7 +690,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | `maintenance` | `idem.cleanup` | repeatable ทุกชั่วโมง | ลบ idempotency key > 24h |
 | `backup` | `tenant.export` | `POST /backup/export` (ADR-0005) | export ข้อมูลร้านเดียว (ไม่ใช่ทั้ง cluster) เป็นโครง `sa_*` + `__meta` เดิม, สร้างลิงก์ดาวน์โหลดที่หมดอายุ, เขียน `audit_log` — **ไม่ใช่ backup สำหรับ restore** |
 | `tenant-import` | `tenant.import` | `POST /platform/tenants/{id}/import` (ADR-0005, #239) | นำเข้าข้อมูลตอน onboard ร้านใหม่เท่านั้น — ปฏิเสธถ้า tenant มีบิลอยู่แล้ว · **คิวแยกจาก `backup`** แม้เป็นงานฝั่งเดียวกัน (ADR-0005) เพราะ `@nestjs/bullmq` สร้าง Worker หนึ่งตัวต่อคิวต่อคลาส — สองคลาสแย่งคิวเดียวกันจะสุ่มว่าใครได้ job (เหตุผลเต็มใน `server/README.md` §*Tenant import*) · endpoint ตอบ `202` + `jobId`, เช็คสถานะที่ `GET /platform/tenants/{id}/import/{jobId}` |
-| `sync` | `sync.apply` | `/sync/push` (Arch C) | apply command จากเครื่องที่ออฟไลน์ |
+| ~~`sync`~~ | ~~`sync.apply`~~ | ~~`/sync/push` (Arch C)~~ | ~~apply command จากเครื่องที่ออฟไลน์~~ — **ไม่ทำ (2026-09-15, 08 §8): push ตอบผลต่อ op ในคำขอเดียวกัน** |
 
 **กติกา (จาก Backend05):**
 * ทุก job ต้อง **idempotent** — BullMQ เป็น at-least-once, job รันซ้ำได้เสมอ
@@ -700,6 +701,11 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 ---
 
 ## 7. Sync endpoints (ใช้เฉพาะ Architecture B / C)
+
+> 🔴 **แทนที่ 2026-09-15** — สัญญาของ `POST /sync/push` ที่ใช้จริงอยู่ที่ [`08_PHASE2_SPEC.md §8`](08_PHASE2_SPEC.md)
+> (ยืนยันด้วย device token, ผลต่อ op `applied`/`rejected`/`retry`, service เดียวกับ endpoint ออนไลน์) ·
+> `GET /sync/pull?since=serverSeq` / `GET /sync/bootstrap` / `change_log` **ไม่ทำ** (#191 — pull ใช้ keyset `GET /products?updatedSince=&afterId=` + `meta.nextCursor`, 08 §15) ·
+> job `sync.apply` ใน §6 ไม่ทำ — push ตอบผลในคำขอเดียวกัน · ตารางและตัวอย่างข้างล่างเก็บไว้เป็นประวัติ
 
 | Method + Path | ทำอะไร |
 |---|---|
@@ -789,7 +795,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | 409 | `PO_ALREADY_RECEIVED` | `ใบสั่งซื้อนี้รับของแล้ว` | โค้ดเดิม **ไม่มี status guard** — รับของซ้ำได้และสต็อกบวกซ้ำ (บั๊กที่ควรปิด) |
 | 409 | `DUPLICATE_PART_NO` | `รหัสอะไหล่นี้มีอยู่แล้ว` | โค้ดเดิม **ไม่ throw** — `add()` คืน `null`, `update()` คืน `false` แล้ว UI จัดการเอง |
 | 409 | `TOTAL_MISMATCH` | `ยอดเงินไม่ตรงกัน กรุณาทำรายการใหม่` | ยอดที่ client ส่งกับที่ server คำนวณต่างกันเกิน 0.01 (ดู §1.4) |
-| 409 | `OFFLINE_NOT_ALLOWED` | `สินค้านี้ขายตอนออฟไลน์ไม่ได้` | ขายสินค้าที่ไม่ผ่านเกณฑ์ `offlineOk` ขณะออฟไลน์ (เฟส 2) |
+| 409 | ~~`OFFLINE_NOT_ALLOWED`~~ | ~~`สินค้านี้ขายตอนออฟไลน์ไม่ได้`~~ | ~~ขายสินค้าที่ไม่ผ่านเกณฑ์ `offlineOk` ขณะออฟไลน์ (เฟส 2)~~ · **ยกเลิก 2026-09-15 (D3, #240):** ไม่มี `offlineOk` แล้ว — error เฟส 2 และข้อความไทยทั้งหมดอยู่ที่ `08_PHASE2_SPEC.md` §18 |
 | 403 | `TENANT_SUSPENDED` | `ร้านนี้ถูกระงับการใช้งาน` | ร้านถูกระงับ/เลิกใช้ (ADR-0003) — ของเดิมไม่มีสถานะร้าน ไม่มีบทจะเจอเคสนี้ |
 | 403 | `DEVICE_ROLE_FORBIDDEN` | `เครื่องนี้ขายของไม่ได้` | เครื่อง `backoffice` พยายามทำงานที่จำกัดเฉพาะเครื่อง `pos` (ADR-0004) — ของเดิมมีเครื่องเดียว ไม่มีแนวคิด "เครื่องนี้ทำไม่ได้" |
 | 429 | `RATE_LIMITED` | `ระบบกำลังทำงานหนัก กรุณารอสักครู่` | เกินโควตาต่อ tenant (ADR-0006) — ต้องมี header `Retry-After` ด้วยเสมอ |
@@ -860,6 +866,19 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | `POST /sales` (write-heavy) | 200 VUs ยิงสินค้าชุดเดียวกัน | **สต็อกห้ามติดลบแม้แต่ครั้งเดียว**, ไม่มีบิลซ้ำ, p95 < 500ms |
 | ยิง `POST /sales` ซ้ำด้วย Idempotency-Key เดิม 5 ครั้ง | 100 VUs | สร้างบิลเดียว, ตัดสต็อกครั้งเดียว |
 | Mixed (80% read / 20% write) | 500 VUs, 10 นาที | ไม่มี connection pool หมด, replication lag < 1s |
+
+🔴 **วิธีวัด latency ให้สะอาด — เคาะแล้ว 2026-09-15 (owner, issue #251):** ยิงจาก**หลายเครื่องพร้อมกัน**
+(สามเครื่องทีม บน campus network) แต่ละเครื่องอยู่ใต้ `limit_req zone=perip rate=30r/s burst=60` ของ
+Nginx เอง (ห้ามยกเว้น `perip` ให้ — ตัวจำกัดต้องเข้มเท่าที่ร้านจริงเจอ) ผล metrics ส่งเข้า Prometheus
+ของ VM ผ่าน `--web.enable-remote-write-receiver` (`deploy/compose/monitoring.yml`) หลัง Nginx ที่
+`location /prometheus-remote-write/` (allowlist + Basic Auth, `server/docker/nginx/nginx.conf`)
+รวมผลใน Grafana. เหตุผลที่ยิงจากเครื่องเดียวผ่าน Nginx วัดไม่ได้สะอาด, SSH tunnel วัดได้แค่ tunnel,
+และ k6 บน VM เองแย่ง CPU กับ server — ดู `docs/handoff_log/close3-demo-deploy-2026-09-15.md` §4.1.
+สูตรแบ่งโหลดต่อเครื่อง (`SAFE_RATE_PER_SHARD` = 24r/s, 80% ของ 30r/s; `SAFE_BURST_PER_SHARD` = 45
+requests, 75% ของ burst=60) อยู่ที่ `server/test/k6/lib/shard.js`; ขั้นตอนเต็มอยู่ที่
+`server/test/k6/README.md`. **p95/p99 เป็นค่าต่อเครื่อง ไม่ใช่ค่าเฉลี่ยรวม** — k6's remote-write
+คำนวณ percentile ในเครื่องตัวเอง รวมทีหลังไม่ได้ (ไม่ใช่สถิติเชิงเส้น) — ทุกเครื่องต้องผ่านเกณฑ์
+ของตัวเองแยกกัน.
 
 **Data-integrity proof ที่ต้องแคปหน้าจอส่ง (แบบเดียวกับ assignment):**
 `SELECT stock FROM products WHERE id='p12'` ต้องเท่ากับ `สต็อกตั้งต้น − SUM(sale_items.qty)` พอดี และ **ไม่ติดลบ**

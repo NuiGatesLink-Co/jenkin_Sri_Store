@@ -539,6 +539,42 @@ conf ปัจจุบันไม่มี ทำให้ `.js`/`.wasm` ข�
 2. **ความเสี่ยงต่อระบบหลัก (OOM Risk):** VM คณะ (`demo`) มี RAM เพียง 6 GB และระบบ POS ทั้งหมด (Postgres, Redis ×2, API ×3, Worker, Bull-Board, etcd) ใช้ RAM ไปแล้ว ~3.4 GB หากรัน Wazuh ร่วมด้วยจะทำให้ RAM เกิน 6 GB ทันที ส่งผลให้ Linux OOM Killer ยิง Database หรือ API Container ดับ
 3. **ข้อสรุปทางสถาปัตยกรรม:** จึงปฏิเสธการติดตั้ง Wazuh และเลือกใช้ **Node Exporter + Prometheus + Grafana** ซึ่งกิน RAM รวมเพียง ~832 MB อยู่ในงบรวม ~4.2 GB / 6 GB อย่างปลอดภัย ส่วนความปลอดภัยด้านช่องโหว่ (CVE) มอบหมายให้ Trivy สแกนใน CI Pipeline ล่วงหน้าแทน
 
+### 10.3 k6 remote-write receiver (#251 — distributed load-test evidence)
+
+`server/test/k6/README.md` เป็น runbook เต็ม; ที่นี่คือสิ่งที่ต่อเข้า Ansible/compose จริง
+
+* **เส้นทาง:** Prometheus ใน `deploy/compose/monitoring.yml` เปิด `--web.enable-remote-write-receiver`
+  (endpoint จริงของ Prometheus คือ `POST /api/v1/write`) แต่ **ไม่ publish port ใหม่ใด ๆ** — เข้าถึงได้
+  ทางเดียวคือผ่าน `location = /prometheus-remote-write/api/v1/write` ใน
+  `server/docker/nginx/nginx.conf` ซึ่งเป็น **exact match บน path เดียว ไม่ใช่ prefix** (proxy แค่
+  `/api/v1/write` เส้นเดียว — path อื่นใต้ prefix เดียวกัน เช่น `/api/v1/query` ตอบ `404` เสมอจาก
+  location อีกอันที่จับ prefix นี้ไว้ทั้งหมด) ป้องกันไม่ให้ query/series/status/config/federate/metrics
+  API ทั้งชุดของ Prometheus หลุดออกไปให้ใครก็ได้ที่มี credential เดียวกัน — การอ่านผล (query) ทำผ่าน
+  Grafana เท่านั้น (SSH tunnel ตามปกติ, §7)
+* **การเข้าถึง:** ต้องผ่านทั้งสองชั้น (Nginx's default `satisfy all`) — IP allowlist (RFC1918 +
+  campus CIDR ที่ owner ต้องเติมเอง ดู `TODO(owner)` ใน `nginx.conf`) **และ** HTTP Basic Auth
+  * credential มาจาก `K6_REMOTE_WRITE_BASIC_AUTH_USER`/`_PASSWORD` ใน `server/.env`
+    (`.env.example` มีค่า dev-only เท่านั้น — **ห้าม commit ค่าจริง**) — บน VM ต้องเพิ่มสอง key นี้
+    ใน secret `DEMO_ENV_FILE` แล้วรัน `provision.yml` ใหม่ ก่อนการยิง k6 จริงครั้งแรก เหมือนที่
+    `ETCD_ROOT_PASSWORD`/`GRAFANA_ADMIN_PASSWORD` ต้องทำมาก่อนหน้านี้
+  * htpasswd ไฟล์ถูกสร้างโดย `htpasswd-gen` (`server/docker-compose.yml`) — one-shot container
+    รูปแบบเดียวกับ `certgen` ของ cert self-signed, idempotent, ต้องรัน**ก่อน** Nginx ทุกครั้ง
+    (`deploy/ansible/deploy.yml`: อยู่ใน task "Ensure backing datastores, certgen, htpasswd-gen
+    and etcd are running" ซึ่งมาก่อน task "Validate the copied Nginx configuration"/
+    "Recreate Nginx" เสมอ — ไม่งั้น `auth_basic_user_file` จะหาไฟล์ไม่เจอ)
+* 🔴 **receiver เปิดค้างถาวร ไม่มี toggle อัตโนมัติระหว่างช่วงที่ไม่ได้ยิง k6** — `--web.enable-
+  remote-write-receiver` เป็น flag คงที่ใน `monitoring.yml`'s `command:` list ของ compose ปิด/เปิด
+  แบบมี env var ตรง ๆ ไม่ได้ง่าย ๆ (compose ไม่รองรับ "ใส่ arg นี้เมื่อเงื่อนไขจริง" ในลิสต์ ต้องมี
+  wrapper script ถึงจะทำแบบนั้นได้ — สโคปนี้ไม่ทำ) **เกตจริงคือ Nginx** (allowlist + Basic Auth
+  ด้านบน) ไม่ใช่ตัว flag ของ Prometheus เอง — endpoint เปิดอยู่ตลอดแต่ยิงไม่ถึงถ้าไม่ผ่านทั้งสองชั้นนั้น
+  วิธี "ปิด" ระหว่างช่วงพักการทดสอบที่ทำได้จริงตอนนี้:
+  1. **หมุน credential** — รัน `htpasswd-gen` ใหม่ด้วย `K6_REMOTE_WRITE_BASIC_AUTH_PASSWORD` ค่าใหม่
+     ใน `.env`/`DEMO_ENV_FILE` แล้ว re-deploy (บังคับให้ container เก่าที่ยังมีรหัสเดิมใช้งานไม่ได้)
+  2. **ถอด flag ออกจริง** — ลบบรรทัด `--web.enable-remote-write-receiver` ออกจาก
+     `deploy/compose/monitoring.yml` แล้ว deploy ใหม่ (Prometheus recreate ตามปกติของ block
+     monitoring ใน `deploy.yml`) — วิธีนี้ปิด endpoint จริง ไม่ใช่แค่ปิดกั้นที่ Nginx แต่ต้องแก้โค้ด
+     แล้ว deploy ทุกครั้งที่จะเปิด/ปิด จึงไม่เหมาะกับรอบทดสอบสั้น ๆ บ่อย ๆ — ใช้ทาง (1) สำหรับงานประจำวัน
+
 ---
 
 ## 11. ใครทำอะไร (กฎคอร์ส: ทุกคนแตะ CI/CD)
