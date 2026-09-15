@@ -198,10 +198,13 @@ For comparison, #37 on a dev machine hit api directly without nginx: p95 of 123 
 
 ## 6. Owner to-dos
 
-- [ ] Decide how §9 latency gets measured cleanly: (a) exempt the load-generator IP from `perip`
-      for a test window (an nginx change, via PR), (b) a load generator on a separate host near the VM
-      with several source IPs, or (c) accept correctness-only evidence on the VM plus #37's dev-machine
-      latency. Then tick or re-scope `03 §8` "k6 ผ่านเกณฑ์".
+- [x] Decide how §9 latency gets measured cleanly — **owner decision 2026-09-15, issue #251:**
+      option (b), refined to "several machines at once" rather than one separate host: three team
+      laptops on the campus network, each under its own `perip` budget (no exemption), streaming
+      into the demo VM's Prometheus via a new allowlisted + Basic-Auth Nginx location and
+      aggregated in Grafana. Implemented in the #251 PR (`server/test/k6/lib/shard.js`,
+      `server/test/k6/README.md`, `03_ARCHITECTURE.md` §8.1, `02_API_SCREENS.md` §9). The real
+      run is still the owner's to do — this closes the *how*, not the *done*.
 - [ ] Close #184 if §1 is enough. Latency is the only AC not met cleanly.
 - [ ] After the `fix/etcd-init-deploy` PR merges and deploys: confirm `etcdctl auth status` shows `true`, and remove the
       root-owned `docker/etcd/etcd-init.sh` directory if the PR does not.

@@ -198,9 +198,11 @@
         chdir: "{{ app_dir }}"
 
     # etcd must be in this `up -d` line: every later step in this playbook uses --no-deps, so a
-    # service missing here is never brought up by anything else.
-    - name: Ensure backing datastores, certgen and etcd are running
-      ansible.builtin.command: "docker compose {{ pos_compose_files }} up -d postgres redis-cache redis-queue certgen etcd"
+    # service missing here is never brought up by anything else. htpasswd-gen (#251) is the same
+    # shape as certgen — idempotent, must exist before Nginx starts, and Nginx's own restart
+    # below runs with --no-deps too.
+    - name: Ensure backing datastores, certgen, htpasswd-gen and etcd are running
+      ansible.builtin.command: "docker compose {{ pos_compose_files }} up -d postgres redis-cache redis-queue certgen htpasswd-gen etcd"
       environment:
         IMAGE_TAG: "{{ image_tag }}"
       args:
