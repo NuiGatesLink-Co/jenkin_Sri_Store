@@ -97,14 +97,12 @@ class ApiClient {
     Map<String, String>? headers,
     Map<String, dynamic>? queryParameters,
     bool skipAuth = false,
-  }) async {
-    return _sendWithRetry(
-      () async {
-        final uri = _buildUri(path, queryParameters);
-        final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
-        return _client.get(uri, headers: h);
-      },
-      path: path,
+  }) {
+    return _send(
+      'GET',
+      path,
+      headers: headers,
+      queryParameters: queryParameters,
       skipAuth: skipAuth,
       timeout: readTimeout,
     );
@@ -115,15 +113,12 @@ class ApiClient {
     dynamic body,
     Map<String, String>? headers,
     bool skipAuth = false,
-  }) async {
-    return _sendWithRetry(
-      () async {
-        final uri = _buildUri(path);
-        final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
-        final encodedBody = body != null ? (body is String ? body : jsonEncode(body)) : null;
-        return _client.post(uri, headers: h, body: encodedBody);
-      },
-      path: path,
+  }) {
+    return _send(
+      'POST',
+      path,
+      body: body,
+      headers: headers,
       skipAuth: skipAuth,
       timeout: writeTimeout,
     );
@@ -134,15 +129,12 @@ class ApiClient {
     dynamic body,
     Map<String, String>? headers,
     bool skipAuth = false,
-  }) async {
-    return _sendWithRetry(
-      () async {
-        final uri = _buildUri(path);
-        final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
-        final encodedBody = body != null ? (body is String ? body : jsonEncode(body)) : null;
-        return _client.put(uri, headers: h, body: encodedBody);
-      },
-      path: path,
+  }) {
+    return _send(
+      'PUT',
+      path,
+      body: body,
+      headers: headers,
       skipAuth: skipAuth,
       timeout: writeTimeout,
     );
@@ -153,15 +145,12 @@ class ApiClient {
     dynamic body,
     Map<String, String>? headers,
     bool skipAuth = false,
-  }) async {
-    return _sendWithRetry(
-      () async {
-        final uri = _buildUri(path);
-        final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
-        final encodedBody = body != null ? (body is String ? body : jsonEncode(body)) : null;
-        return _client.patch(uri, headers: h, body: encodedBody);
-      },
-      path: path,
+  }) {
+    return _send(
+      'PATCH',
+      path,
+      body: body,
+      headers: headers,
       skipAuth: skipAuth,
       timeout: writeTimeout,
     );
@@ -171,14 +160,11 @@ class ApiClient {
     String path, {
     Map<String, String>? headers,
     bool skipAuth = false,
-  }) async {
-    return _sendWithRetry(
-      () async {
-        final uri = _buildUri(path);
-        final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
-        return _client.delete(uri, headers: h);
-      },
-      path: path,
+  }) {
+    return _send(
+      'DELETE',
+      path,
+      headers: headers,
       skipAuth: skipAuth,
       timeout: writeTimeout,
     );
@@ -191,10 +177,15 @@ class ApiClient {
     bool skipAuth = false,
   }) async {
     final response = await _executeWithRetry(
-      () async {
+      (abortTrigger) async {
         final uri = _buildUri(path, queryParameters);
         final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
-        return _client.get(uri, headers: h);
+        return _sendAbortable(
+          'GET',
+          uri,
+          headers: h,
+          abortTrigger: abortTrigger,
+        );
       },
       path: path,
       skipAuth: skipAuth,
@@ -216,8 +207,54 @@ class ApiClient {
     return _handleResponse(response) as PaginatedResult;
   }
 
+  Future<http.Response> _sendAbortable(
+    String method,
+    Uri uri, {
+    Map<String, String>? headers,
+    String? body,
+    required Future<void> abortTrigger,
+  }) async {
+    final request = http.AbortableRequest(method, uri, abortTrigger: abortTrigger);
+    if (headers != null) {
+      request.headers.addAll(headers);
+    }
+    if (body != null) {
+      request.body = body;
+    }
+    final streamed = await _client.send(request);
+    return http.Response.fromStream(streamed);
+  }
+
+  Future<dynamic> _send(
+    String method,
+    String path, {
+    dynamic body,
+    Map<String, String>? headers,
+    Map<String, dynamic>? queryParameters,
+    bool skipAuth = false,
+    required Duration timeout,
+  }) {
+    return _sendWithRetry(
+      (abortTrigger) async {
+        final uri = _buildUri(path, queryParameters);
+        final h = await _buildHeaders(extraHeaders: headers, skipAuth: skipAuth);
+        final encodedBody = body != null ? (body is String ? body : jsonEncode(body)) : null;
+        return _sendAbortable(
+          method,
+          uri,
+          headers: h,
+          body: encodedBody,
+          abortTrigger: abortTrigger,
+        );
+      },
+      path: path,
+      skipAuth: skipAuth,
+      timeout: timeout,
+    );
+  }
+
   Future<http.Response> _executeWithRetry(
-    Future<http.Response> Function() rawExecute, {
+    Future<http.Response> Function(Future<void> abortTrigger) rawExecute, {
     required String path,
     required bool skipAuth,
     required Duration timeout,
@@ -226,7 +263,7 @@ class ApiClient {
     // [timeout], and the refresh in between gets [readTimeout]; so one call
     // waits at most 2 × timeout + readTimeout. A timeout is never retried
     // here: it throws out of this method.
-    Future<http.Response> execute() => _withTimeout(rawExecute(), timeout, path);
+    Future<http.Response> execute() => _withTimeout(rawExecute, timeout, path);
 
     final sentWith = await tokenStorage?.getAccessToken();
     final response = await execute();
@@ -251,7 +288,7 @@ class ApiClient {
   }
 
   Future<dynamic> _sendWithRetry(
-    Future<http.Response> Function() execute, {
+    Future<http.Response> Function(Future<void> abortTrigger) execute, {
     required String path,
     required bool skipAuth,
     required Duration timeout,
@@ -277,16 +314,25 @@ class ApiClient {
   /// it takes exactly the path a lost socket takes everywhere — the attempt
   /// stays parked, the refresh keeps both tokens.
   ///
-  /// The abandoned request is not cancelled (a browser XHR keeps running);
-  /// its late reply is simply dropped, which is why the retry must replay.
+  /// The timed-out request is cancelled via [http.AbortableRequest] so an
+  /// abandoned XHR does not keep holding a browser connection slot (#200).
   Future<http.Response> _withTimeout(
-    Future<http.Response> send,
+    Future<http.Response> Function(Future<void> abortTrigger) send,
     Duration timeout,
     String path,
   ) {
-    return send.timeout(
+    final abortCompleter = Completer<void>();
+    final uri = _buildUri(path);
+    final responseFuture = send(abortCompleter.future);
+    return responseFuture.timeout(
       timeout,
-      onTimeout: () => throw ApiTimeoutException(timeout, _buildUri(path)),
+      onTimeout: () {
+        if (!abortCompleter.isCompleted) {
+          abortCompleter.complete();
+        }
+        responseFuture.ignore();
+        throw ApiTimeoutException(timeout, uri);
+      },
     );
   }
 
@@ -344,10 +390,12 @@ class ApiClient {
     // A timeout is one of those (#183) — it keeps both tokens.
     const refreshPath = '/api/v1/auth/refresh';
     final response = await _withTimeout(
-      _client.post(
+      (abortTrigger) async => _sendAbortable(
+        'POST',
         _buildUri(refreshPath),
         headers: await _buildHeaders(skipAuth: true),
         body: jsonEncode({'refreshToken': currentRefreshToken}),
+        abortTrigger: abortTrigger,
       ),
       readTimeout,
       refreshPath,
