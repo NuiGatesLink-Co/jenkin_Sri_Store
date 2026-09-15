@@ -1,6 +1,8 @@
 # ADR-0013 — toolchain ของ CI/CD และการ deploy: GitHub Actions + GHCR + Ansible + etcd + Monitoring (Prometheus + Grafana + Node Exporter)
 
-* **สถานะ:** Accepted — 2026-09-10 (พิจารณาปฏิเสธ Wazuh/ELK จากข้อจำกัด RAM: 2026-09-15)
+* **สถานะ:** Accepted — 2026-09-10 (พิจารณาปฏิเสธ Wazuh/ELK จากข้อจำกัด RAM: 2026-09-15) ·
+  addendum **2026-09-15** *"Actions เข้าถึง VM อย่างไร"* — แถว Config & Deploy เปลี่ยนจาก "SSH เข้า VM" เป็น
+  **self-hosted runner บน VM** (ดูหัวข้อท้ายไฟล์)
 * **ผู้ตัดสิน:** เจ้าของโปรเจกต์ (grill 2 รอบ, 19 ข้อ) — บันทึกการสัมภาษณ์อยู่ใน `docs/handoff_log/`
 * **เอกสารเจ้าของเรื่องนี้:** [`07_CICD_DEPLOY.md`](../07_CICD_DEPLOY.md)
 
@@ -51,4 +53,57 @@ Build & Test · Security Scan · Package/Storage · Config & Deploy · KV Storag
 * **maintenance mode ใน etcd** — ต้องมีข้อความไทยหน้าเคาน์เตอร์ใหม่ ซึ่ง `CLAUDE.md` ห้ามแต่งเอง รอร้าน
 * **production host** — ยังไม่เลือก (ครบกำหนดก่อน `q4`) · เมื่อเลือก: inventory ที่สอง + required reviewer
 * **ชื่อโดเมน** — ถ้ามีเมื่อไร ค่อยเปลี่ยน self-signed เป็น certbot
-* **retention ของ image บน GHCR** — ยังไม่ตั้งนโยบายลบ tag เก่า
+* **retention ของ image บน GHCR** — ยังไม่ตั้งนโยบายลบ tag เก่า · (addendum 2026-09-15: rollback อัตโนมัติ
+  ต้องการ image ของ release ก่อนหน้า — นโยบายลบ tag ต้องไม่ลบ tag ที่ `.current_sha` ชี้อยู่)
+
+## Actions เข้าถึง VM อย่างไร — addendum 2026-09-15 (#67, เจ้าของโปรเจกต์)
+
+**ปัญหาที่พบ:** แถว Config & Deploy เขียนว่า "Ansible → SSH เข้า VM" โดยให้ job ของ GitHub Actions เป็นคน SSH
+แต่ตอนลง deploy จริงครั้งแรก (#184) พบว่า VM `demo` (`mob04`, `172.30.58.20`) เป็น **address ภายในมหาวิทยาลัย** —
+runner ของ GitHub (GitHub-hosted) ต่อเข้าไม่ได้ และที่ `07 §5` บันทึกว่า "รับ inbound จากนอกมหาวิทยาลัยได้"
+ก็ไม่เคยมี public address/port ใดถูกบันทึกไว้จริง · ขาออกของ VM ออกผ่าน NAT ได้ปกติ
+
+**การตัดสินใจ (เจ้าของโปรเจกต์ 2026-09-15 — ตัวเลือก 2 ของ handoff `session-2026-09-15-phase1-closeout.md` §6):**
+ติดตั้ง **GitHub Actions self-hosted runner บน VM `demo` เอง** — runner ต่อ**ขาออก** (HTTPS 443) ไปหา GitHub
+แล้วรอรับ job ไม่มี port ใหม่เปิดเข้า (ufw ยังเป็น 22/80/443 ตามเดิม)
+
+| หัวข้อ | ค่าที่เคาะ |
+|---|---|
+| งานที่ runner รับ | job `deploy` ของ `.github/workflows/deploy.yml` **job เดียว** · label เฉพาะ `srisurart-demo-deploy` · job อื่นทุกตัว (CI, build image, การเช็ค tag บน GHCR ก่อน deploy) ยังรันบน GitHub-hosted |
+| runner เรียก deploy อย่างไร | รัน **`deploy/ansible/deploy.yml` ตัวเดิม** บน VM ด้วย `ansible_connection=local` — **ไม่**เขียนขั้น deploy ซ้ำใน workflow · เหตุผล: ADR นี้เลือก Ansible เป็นเครื่องมือของบล็อก Config & Deploy และ playbook เป็นขั้นตอน deploy **ชุดเดียว**ที่คนรันด้วยมือก็ใช้ (07 §6) — ถ้าย้ายขั้นไปไว้ใน YAML ของ workflow จะมีสองชุดที่ต้องแก้คู่กันและเพี้ยนกันในที่สุด · เปลี่ยนแค่ "ต่อเครื่องอย่างไร" (SSH → local) ไม่เปลี่ยน "ทำอะไร" · production host ในอนาคตที่ต่อ SSH ได้ ใช้ playbook เดิมผ่าน SSH ได้ทันที |
+| user ของ runner | **`deploy`** ที่ `provision.yml` สร้างไว้แล้ว (ไม่มี sudo, อยู่ใน group `docker`, เป็นเจ้าของ `/opt/pos`) · **ไม่**สร้าง user แยก เพราะ `docker compose` ต้องอ่าน `/opt/pos/.env` (0600 ของ `deploy`) และ group `docker` เทียบเท่า root อยู่แล้ว — user แยกจะต้องได้ sudo เป็น `deploy` (อำนาจเท่ากัน) หรือต้องคลายสิทธิ์ `.env` (แย่กว่า) · รันเป็น systemd service ผ่าน `svc.sh` (คนที่มี sudo ติดตั้งครั้งเดียว) |
+| secret | workflow **ไม่ใช้ secret เลย** — `.env` ยังวางโดย `provision.yml` ที่คนรัน (ต้อง sudo) · `DEMO_SSH_HOST/USER/KEY` ไม่จำเป็นต่อ deploy อัตโนมัติอีกต่อไป จึง**ไม่ต้อง**เก็บ private key ของ VM ไว้ใน GitHub · Environment `demo` ยังต้องมี เพื่อบังคับ deployment branch = `main` และเก็บประวัติ deploy · ข้อนี้**แทน**บรรทัด "GitHub Environment `demo` ถือ secret ทั้งหมด" ใน *ผลที่ตามมา* ข้างบน |
+| rollback | **อัตโนมัติ**เมื่อ playbook fail: deploy SHA ใน `.current_sha` ด้วย playbook ตัวเดิม — playbook เขียนไฟล์นี้หลัง `/health/ready` ผ่านเท่านั้น ตอน fail จึงยังเป็น release ก่อนหน้า · **มือ**: `workflow_dispatch` รับ SHA · schema ไม่ถอยเหมือนเดิม · run ที่ rollback แล้วยังเป็น**สีแดง** |
+
+**ตัวเลือกที่ปฏิเสธ:**
+
+1. **public IP / port forward มาที่ SSH ของ VM** — คงแบบเดิมของ ADR นี้ได้ครบ แต่ต้องขอคณะเปิด port และทำให้
+   SSH ของเครื่องอยู่บนอินเทอร์เน็ต ขัดกับหลัก "ไม่เปิดของใหม่ออกอินเทอร์เน็ต" ของแถว Monitoring · และ GitHub-hosted
+   runner ไม่มี IP คงที่ จึงทำ allowlist ต้นทางไม่ได้ ต้องเปิดให้ทั้งโลก
+2. **Tailscale บน VM + runner** — ไม่เปิด port เหมือนตัวเลือกที่เลือก แต่เพิ่มบัญชี/บริการภายนอกอีกตัว, auth key ที่ต้อง
+   เก็บเป็น secret และหมุน, และ daemon อีกตัวบน VM ที่ RAM จำกัด (07 §5) · ได้สิ่งที่ runner ขาออกให้อยู่แล้ว
+   แลกกับชิ้นส่วนเพิ่ม
+
+**ข้อบังคับความปลอดภัย (repo เป็น public — self-hosted runner บน repo public คือความเสี่ยงที่ GitHub เตือนไว้เอง):**
+
+* 🔴 **workflow ที่ใช้ label ของ runner ต้องไม่มีทาง trigger จาก `pull_request` / `pull_request_target`** —
+  `deploy.yml` รับเฉพาะ `workflow_run` (ของ push บน `main` ใน repo นี้, conclusion success) กับ `workflow_dispatch`
+  บน `main` · ทุก job มี `if:` เช็ค event + `github.repository` + branch · job `resolve` เช็คอีกชั้นว่า commit อยู่บน
+  ประวัติของ `main` (กัน SHA ของ fork ที่ GitHub เสิร์ฟผ่าน `refs/pull/*`) · ห้าม workflow อื่นใช้ label นี้
+* 🔴 **`if:` กันได้แค่ไฟล์นี้** — PR จาก fork ที่แก้ workflow ให้ `runs-on` label นี้เอง ไม่ผ่าน `if:` ของเราเลย ·
+  ตัวกันคือ setting ของ repo **"Require approval for all external contributors"** (run ของ fork PR ทุกอันต้องมีคน
+  กดอนุมัติ) ซึ่ง**ต้อง**ตั้งก่อนลงทะเบียน runner · ห้ามกดอนุมัติ run ของ fork ที่แตะ `.github/`
+* `permissions: contents: read` ระดับไฟล์ · checkout ด้วย `persist-credentials: false` · ค่าจาก input/event ส่งเข้า
+  shell ผ่าน `env:` และตรวจรูปแบบก่อนใช้ ไม่ interpolate `${{ }}` ลง script
+* runner ลงทะเบียนกับ **repo นี้เท่านั้น** (ไม่ใช่ระดับ account) · user `deploy` ไม่มี sudo · runner ไม่ใช้รันงานอื่น
+* ความเสี่ยงที่ยอมรับ: ใครที่เอา commit ขึ้น `main` ได้ (ผ่าน PR ตาม branch protection 07 §4) สั่งอะไรก็ได้บน VM `demo`
+  ในสิทธิ์ `docker` — เท่ากับอำนาจที่ deploy อัตโนมัติต้องมีอยู่แล้วไม่ว่าจะต่อด้วยวิธีไหน · ยอมรับได้บน `demo` ที่ไม่มี
+  ข้อมูลร้านจริง · **production host ต้องทบทวนข้อนี้ใหม่** (required reviewer ของ Environment, runner แบบ ephemeral)
+
+**ผลที่ตามมา:**
+
+* `.github/workflows/deploy.yml` (ใหม่) + `.github/actionlint.yaml` ประกาศ label · ขั้นตั้ง runner และสิ่งที่เจ้าของต้องทำ
+  อยู่ใน `07_CICD_DEPLOY.md §6.2`
+* VM ต้องมี `ansible-core` + `git` เพิ่ม (runner รัน playbook บนเครื่องตัวเอง)
+* `deploy/ansible/deploy.yml` **ไม่ต้องแก้** — workflow override inventory ด้วย `-i 'vm-demo,' -e ansible_connection=local` ·
+  การรันด้วยมือผ่าน SSH (handoff 2026-09-15 §5) ยังใช้ได้เหมือนเดิม

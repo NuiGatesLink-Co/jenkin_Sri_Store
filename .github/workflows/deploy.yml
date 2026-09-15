@@ -1,0 +1,215 @@
+name: Deploy (demo)
+
+# #67 cd.2 — every green `main` reaches the demo VM on its own, and any earlier release can be put
+# back with a manual run (07_CICD_DEPLOY.md §6, §6.1; ADR-0013 + its 2026-09-15 addendum).
+#
+# The demo VM (172.30.58.20) is campus-internal: a GitHub-hosted runner cannot reach it, so the
+# deploy job runs on a SELF-HOSTED runner installed on the VM itself (outbound HTTPS only, no open
+# port — ADR-0013 addendum). It runs deploy/ansible/deploy.yml against the VM with a local
+# connection: the playbook stays the one deploy procedure, the same one a person runs by hand.
+#
+# 🔴 This repo is PUBLIC and that runner has the docker group on the demo VM (root-equivalent).
+#   * Nothing here may ever be triggered by `pull_request` / `pull_request_target`, and no other
+#     workflow may name the runner's label. The `if:` guards below protect THIS file; a fork PR that
+#     edits a workflow to use the label is stopped only by the repo setting "Require approval for
+#     all external contributors" (07 §6.2) — never approve a fork run that touches `.github/`.
+#   * Only commits that are on `main` deploy (ancestry check in `resolve`), so a dispatcher cannot
+#     deploy a fork commit that GitHub serves through refs/pull/*.
+#   * No `${{ }}` of an input or event field is interpolated into a shell script; they are passed
+#     through `env:` and validated.
+#   * The workflow reads no secrets: /opt/pos/.env is placed by provision.yml, which a person runs.
+
+on:
+  workflow_run:
+    # Both release images must exist for one SHA. Each CI workflow's completion fires this once;
+    # the first normally finds only its own image and ends quietly, the second deploys (07 §6.1).
+    workflows: ["Server CI", "Flutter CI"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Commit on main to deploy (full or short SHA). Empty = the head of main. An earlier SHA is a rollback; the schema never moves backwards."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: resolve release
+    # GitHub-hosted: the registry check and the ancestry check need nothing from the VM, so a run
+    # that is not going to deploy never occupies (or even reaches) the self-hosted runner.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: >-
+      github.repository == 'NuimanLP/srisurart-pos-flutter' && (
+        (github.event_name == 'workflow_run'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.head_branch == 'main'
+          && github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.head_repository.full_name == github.repository)
+        || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'))
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+      ready: ${{ steps.images.outputs.ready }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: resolve the commit to deploy
+        id: sha
+        env:
+          EVENT: ${{ github.event_name }}
+          # In a workflow_run, github.sha is the head of main *now*, not the commit whose CI
+          # finished — after two quick merges that is a different release (07 §6.1).
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT: ${{ inputs.image_tag }}
+        run: |
+          if [[ "$EVENT" == "workflow_run" ]]; then
+            want="$RUN_SHA"
+          elif [[ -z "$INPUT" ]]; then
+            want="origin/main"
+          elif [[ "$INPUT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            want="$INPUT"
+          else
+            echo "::error::image_tag must be a commit SHA (7-40 hex characters)"
+            exit 1
+          fi
+          if ! sha=$(git rev-parse --verify --quiet "${want}^{commit}"); then
+            echo "::error::$want is not a commit in this repository"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::$sha is not on main; only commits on main are deployed"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Release to deploy: $sha"
+
+      - name: both release images on GHCR?
+        id: images
+        env:
+          EVENT: ${{ github.event_name }}
+          SHA: ${{ steps.sha.outputs.sha }}
+        run: |
+          if deploy/scripts/verify-ghcr-tags.sh "$SHA"; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT" == "workflow_run" ]]; then
+            # The expected path for the first of the two CI completions — not an error.
+            echo "::notice::Not deploying $SHA: GHCR does not have both images yet. The other CI workflow's completion triggers the deploy."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::GHCR does not have both release images for $SHA; nothing to deploy"
+            exit 1
+          fi
+
+  deploy:
+    name: deploy to demo
+    needs: resolve
+    if: >-
+      needs.resolve.outputs.ready == 'true'
+      && github.repository == 'NuimanLP/srisurart-pos-flutter'
+      && (github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, srisurart-demo-deploy]
+    environment: demo
+    # Serialised and never cancelled mid-flight: cancelling between two API restarts leaves the VM
+    # running two versions (07 §6.1). GitHub keeps one *pending* run per group, so a newer run
+    # replaces a pending one (never the running one) — see 07 §6.2.
+    concurrency:
+      group: deploy-demo
+      cancel-in-progress: false
+    # A hard bound so a hung compose command cannot hold the runner for GitHub's 6-hour default.
+    # The playbook's own waits total well under this (3 × 75 s health waits + 45 s readiness).
+    timeout-minutes: 45
+    env:
+      APP_DIR: /opt/pos
+      SHA: ${{ needs.resolve.outputs.sha }}
+      EVENT: ${{ github.event_name }}
+    steps:
+      # The compose files, nginx.conf and playbook come from the release being deployed, so a
+      # rollback puts back the files that match its images, not today's.
+      - name: check out the release
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: release
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: read the running release
+        id: current
+        run: |
+          previous=""
+          if [[ -r "$APP_DIR/.current_sha" ]]; then
+            previous=$(tr -d '[:space:]' < "$APP_DIR/.current_sha")
+          fi
+          if [[ -n "$previous" && ! "$previous" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::warning::$APP_DIR/.current_sha does not hold a commit SHA; automatic rollback is off for this run"
+            previous=""
+          fi
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+          echo "Running on the VM: ${previous:-<none>}"
+
+          # An automatic run must not move the VM backwards: a slow or re-run CI workflow for an
+          # older commit can complete after a newer release is already live. A manual run is
+          # allowed to go back — that is how rollback works.
+          skip=false
+          if [[ "$EVENT" == "workflow_run" && -n "$previous" && "$previous" != "$SHA" ]] \
+             && git -C release merge-base --is-ancestor "$SHA" "$previous" 2>/dev/null; then
+            echo "::notice::Not deploying $SHA: the VM already runs $previous, which is newer."
+            skip=true
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
+      # The playbook itself ends early when .current_sha already names this SHA (07 §6 step 1),
+      # which is what makes a double trigger harmless.
+      - name: ansible-playbook deploy.yml (local connection)
+        id: deploy
+        if: steps.current.outputs.skip != 'true'
+        working-directory: release/deploy/ansible
+        env:
+          IMAGE_TAG: ${{ needs.resolve.outputs.sha }}
+        # </dev/null: ansible-core refuses non-blocking stdio (handoff 2026-09-15 §4). bash runs
+        # with pipefail, so `| cat` keeps the playbook's exit code.
+        shell: bash
+        run: |
+          ansible-playbook -i 'vm-demo,' \
+            -e ansible_connection=local \
+            -e ansible_python_interpreter=/usr/bin/python3 \
+            deploy.yml </dev/null 2>&1 | cat
+
+      # Automatic rollback. deploy.yml writes .current_sha only after /health/ready returned 200
+      # through Nginx, so after a failed run it still names the release that was live before.
+      - name: roll back — check out the previous release
+        id: rollback-checkout
+        if: >-
+          failure() && steps.deploy.outcome == 'failure'
+          && steps.current.outputs.previous != ''
+          && steps.current.outputs.previous != needs.resolve.outputs.sha
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.current.outputs.previous }}
+          path: rollback
+          persist-credentials: false
+
+      - name: roll back — redeploy the previous release
+        if: failure() && steps.rollback-checkout.outcome == 'success'
+        working-directory: rollback/deploy/ansible
+        env:
+          IMAGE_TAG: ${{ steps.current.outputs.previous }}
+        shell: bash
+        run: |
+          echo "::error::Release $SHA failed to deploy; redeploying the previous release $IMAGE_TAG. This run stays red."
+          # .current_sha still names $IMAGE_TAG, so the playbook's duplicate-release check would end
+          # the play without touching the half-rolled VM. Removing it is the playbook's own
+          # documented way to force a same-SHA redeploy; the successful run writes it back.
+          rm -f "$APP_DIR/.current_sha"
+          ansible-playbook -i 'vm-demo,' \
+            -e ansible_connection=local \
+            -e ansible_python_interpreter=/usr/bin/python3 \
+            deploy.yml </dev/null 2>&1 | cat
+          echo "::warning::Rolled back to $IMAGE_TAG. The schema was not rolled back (there are no down-migrations)."

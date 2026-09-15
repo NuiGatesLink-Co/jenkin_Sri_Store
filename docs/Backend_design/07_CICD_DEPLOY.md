@@ -16,6 +16,12 @@ workflow ใน git history (branch `feat/67-auto-deploy` ก็ไม่มี)
 ตั้งแต่ #147 ขั้น POS ใน `deploy.yml` (playbook) ใช้ `pos_compose_files` ไม่มี `monitoring.yml` ส่วน overlay อยู่ใน
 `block`/`rescue` ทั้งหมด · ยังไม่เคยรันบน VM จริง
 
+สถานะ 2026-09-15 (**#67** `cd.2`): **`.github/workflows/deploy.yml` มีแล้ว** แต่รันไม่ได้จนกว่าเจ้าของจะทำ §6.2 ครบ ·
+VM `demo` อยู่ในเครือข่ายมหาวิทยาลัย GitHub-hosted runner ต่อไม่ถึง → เจ้าของเลือก **self-hosted runner บน VM**
+([ADR-0013 addendum 2026-09-15](adr/0013-cicd-toolchain.md)) · job `deploy` รัน `deploy/ansible/deploy.yml` ตัวเดิมแบบ
+`ansible_connection=local` บน VM, rollback อัตโนมัติเมื่อ playbook fail · ส่วนใดของ §2/§5/§6 ที่พูดถึง "SSH จาก Actions"
+ให้อ่านตาม addendum
+
 สถานะ 2026-09-14 (**#39** `ci.2`): §2 กติกา 4 ข้อและ §4 ทำจริงแล้วใน
 `.github/workflows/flutter.yml` / `server.yml` — job `changes` (`dorny/paths-filter@v4`,
 ทำงานเฉพาะ `pull_request`, มี `permissions: pull-requests: read` เพราะเรียก PR-files API) กรอง
@@ -39,7 +45,7 @@ GitHub ตั้งแล้ว 2026-09-15** (#186) — ค่าอยู่ใ
 | Build & Test (CI) | GitHub Actions · vitest (server) · `flutter test` (client) | `.github/workflows/server.yml`, `flutter.yml` | ✅ |
 | Security Scan | Trivy (fs + **image**) · `pnpm audit` · OSV-Scanner | job `audit`, `deps-audit`, และ scan ใน job build image | fs ✅ · image ฝั่ง server: PR #70 (#61) |
 | Package / Storage | Docker + **GHCR** (public) | job build image ทั้งสอง workflow → `ghcr.io/nuimanlp/srisurart-pos-server`, `…-web` | server: PR #70 (#61, tarball artefact ถูกยกเลิก) · web: PR #69 (#62) |
-| Config & Deploy (CD) | **Ansible** ผ่าน SSH | `deploy/ansible/`, `.github/workflows/deploy.yml` | ยังไม่มี |
+| Config & Deploy (CD) | **Ansible** — รันโดย self-hosted runner บน VM (local, addendum ADR-0013 2026-09-15) · มือ: ผ่าน SSH | `deploy/ansible/`, `.github/workflows/deploy.yml` | playbook ✅ · workflow มีแล้ว (#67) รอเจ้าของตั้ง runner (§6.2) |
 | KV Storage | **etcd** | service ใน compose + `RuntimeConfigService` ฝั่ง NestJS | ✅ service etcd + auth (#64) · `RuntimeConfigService` merge มาก่อนแล้ว (#66, PR #109; watch แก้ใน #120, PR #129) |
 | Monitoring & Operate | **Node Exporter + Prometheus + Grafana (Monitoring)** | `deploy/compose/monitoring.yml`, `deploy/prometheus/`, `deploy/grafana/` | overlay #63 `ops.1` · ต่อเข้า `deploy/ansible/deploy.yml` แล้วใน #121 `ops.5` (ยังไม่ได้รันจริงบน VM) · ปฏิเสธ Wazuh/ELK เพราะกิน RAM 4–5 GB เกินงบ 6 GB |
 
@@ -156,7 +162,7 @@ GitHub Environment `demo` ถือ secret ทั้งหมด (ไม่ม�
 
 | secret | ใช้ทำอะไร |
 |---|---|
-| `DEMO_SSH_HOST`, `DEMO_SSH_USER`, `DEMO_SSH_KEY` | Ansible เข้าเครื่อง (user แรกต้องมี sudo — เจ้าของโปรเจกต์ใส่เอง) |
+| `DEMO_SSH_HOST`, `DEMO_SSH_USER`, `DEMO_SSH_KEY` | Ansible เข้าเครื่อง (user แรกต้องมี sudo — เจ้าของโปรเจกต์ใส่เอง) · **addendum 2026-09-15: `deploy.yml` (workflow) ไม่ใช้ตัวไหนเลย** — runner อยู่บน VM แล้ว จึงไม่ต้องเก็บ key ของ VM ใน GitHub; ใช้แค่ตอนรัน playbook ด้วยมือจากเครื่องคน |
 | `DEMO_ENV_FILE` | เนื้อหา `server/.env` ทั้งไฟล์ (Postgres/Redis password, JWT keys, `CORS_ORIGINS`, Grafana admin, `ETCD_ROOT_PASSWORD`) — Ansible template ลง VM ด้วย mode 0600. 🔴 **#64 merge แล้ว (PR #113) — ก่อน deploy ครั้งถัดไปต้องเพิ่ม `ETCD_ROOT_PASSWORD` และ `GRAFANA_ADMIN_PASSWORD` เข้าไปในค่านี้ แล้วรัน `provision.yml` ใหม่** — ไม่มี `ETCD_ROOT_PASSWORD` = ทุกคำสั่ง `docker compose` บน VM (รวม `deploy.yml` เอง) fail ตั้งแต่ interpolation · ไม่มี `GRAFANA_ADMIN_PASSWORD` = monitoring ขึ้นไม่ได้ (WARNING, §6 ข้อ 9) |
 
 **งบ RAM บน VM** (mem_limit ปัจจุบันรวม 3,392 MB — รวม etcd 256m แล้ว, #64): เพิ่ม Prometheus 512m
@@ -232,7 +238,79 @@ on:
   ถ้ายังไม่ครบ → จบเฉย ๆ (neutral) — workflow อีกตัวที่จบทีหลังจะยิงมาอีกรอบแล้วเจอครบ
 * `concurrency: { group: deploy-demo, cancel-in-progress: false }` — **ห้าม** cancel กลาง rolling restart ·
   กรณีสอง run เห็นครบพร้อมกัน ข้อ 1 ของ playbook กันไว้อีกชั้น
-* PR ที่แตะ `deploy/**` มี gate เล็ก: `ansible-lint` + `docker compose config` ของ override
+* PR ที่แตะ `deploy/**` มี gate เล็ก: `ansible-lint` + `docker compose config` ของ override — **ยังไม่ได้ทำ**
+  (ไม่อยู่ใน #67; ตอนนี้มีแค่ `deploy/scripts/validate.sh` ที่รันด้วยมือ)
+
+**ของจริงใน `.github/workflows/deploy.yml` (#67) — ตรงกับข้างบน บวกสิ่งที่ addendum ADR-0013 เพิ่ม:**
+
+* 2 job · `resolve` (GitHub-hosted): หา SHA (`workflow_run.head_sha` หรือ input ของ `workflow_dispatch`, ว่าง = head
+  ของ `main`), **ต้องเป็น commit บนประวัติของ `main`**, แล้วเรียก `deploy/scripts/verify-ghcr-tags.sh` · ยังไม่ครบใน
+  `workflow_run` → `::notice` แล้วจบเขียว; ใน `workflow_dispatch` → แดง
+* `deploy` (`runs-on: [self-hosted, srisurart-demo-deploy]`, `environment: demo`, concurrency `deploy-demo` ระดับ job):
+  checkout **SHA ที่จะ deploy** (compose/nginx.conf/playbook ต้องตรงกับ image ของ release นั้น — rollback จึงได้ไฟล์ของ
+  release เก่ากลับมาด้วย) → อ่าน `/opt/pos/.current_sha` → ถ้าเป็น `workflow_run` และ SHA นี้**เก่ากว่า**ที่รันอยู่
+  (เป็น ancestor) → ไม่ deploy (CI ของ commit เก่าที่จบช้าหรือถูก re-run ต้องไม่ดึง VM ถอยหลัง) → `ansible-playbook -i 'vm-demo,'
+  -e ansible_connection=local deploy.yml`
+* **rollback อัตโนมัติ:** playbook fail และ `.current_sha` เดิมมีค่า (ไม่ใช่ SHA เดียวกัน) → checkout release นั้น →
+  ลบ `.current_sha` (ไม่งั้นข้อ 1 ของ §6 จบ play ทันทีเพราะไฟล์ยังชี้ release นั้นอยู่ — วิธีเดียวกับที่ rescue ของ playbook
+  แนะนำ) → รัน playbook ด้วย SHA นั้น · run ยังคง**แดง** · rollback ทำงานกับ fail **ทุกจุด** ของ playbook รวมถึงก่อนแตะ
+  container (เช่น pull ไม่ได้) ซึ่งทำให้ rolling restart release เดิมซ้ำหนึ่งรอบโดยไม่จำเป็น — ยอมรับเพื่อความเรียบง่าย
+* **concurrency ของ GitHub เก็บ run ที่*รอ*ได้แค่ตัวเดียวต่อ group:** ถ้ามี deploy กำลังรันและมี A รออยู่ แล้ว B มา → A ถูก
+  cancel (ตัวที่*กำลังรัน*ไม่ถูกแตะ) · อัตโนมัติไม่เป็นไร (B ใหม่กว่า) แต่ **rollback ด้วยมือที่รออยู่อาจถูก deploy
+  อัตโนมัติแซง** — ดูว่า run ของตัวเองขึ้น cancelled หรือไม่ แล้วสั่งใหม่
+* ยังไม่ทำใน #67 ฉบับนี้: seed `/pos/config/log_level` ใน etcd (§6 ข้อ 7) — playbook ยังไม่มีขั้นนี้
+
+### 6.2 self-hosted runner บน VM `demo` — ติดตั้งครั้งเดียว (เจ้าของโปรเจกต์)
+
+ทำตามลำดับ **ข้อ 1 ต้องเสร็จก่อนข้อ 4** (repo public — ADR-0013 addendum 2026-09-15 ข้อบังคับความปลอดภัย)
+
+1. **กัน fork PR ไม่ให้รันเองได้** — Settings → Actions → General → *Approval for running fork pull request workflows
+   from contributors* = **Require approval for all external contributors** หรือ:
+   ```bash
+   gh api -X PUT repos/NuimanLP/srisurart-pos-flutter/actions/permissions/fork-pr-contributor-approval \
+     -f approval_policy=all_external_contributors
+   ```
+2. **Environment `demo` + deployment branch `main`** (ไม่มี required reviewer — ADR-0013: `demo` deploy อัตโนมัติ):
+   ```bash
+   gh api -X PUT repos/NuimanLP/srisurart-pos-flutter/environments/demo --input - <<'JSON'
+   { "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true } }
+   JSON
+   gh api -X POST repos/NuimanLP/srisurart-pos-flutter/environments/demo/deployment-branch-policies \
+     -f name=main -f type=branch
+   ```
+   workflow **ไม่ต้องใช้ secret** — ไม่ต้องใส่ `DEMO_SSH_*` ลง GitHub (addendum) · `DEMO_ENV_FILE` ยังเป็นค่าที่
+   `provision.yml` ใช้ตอนรันด้วยมือ
+3. **ของที่ VM ต้องมี** (ในฐานะ user ที่มี sudo เช่น `cloud`): `sudo apt-get install -y ansible-core git` ·
+   `.env` ต้องครบตาม §5 และ handoff 2026-09-15 §5 (รวม `JWT_PLATFORM_SECRET`) — ไม่งั้น deploy แรกจะ fail แล้ว rollback
+   ไม่มีที่ไป (ยังไม่มี `.current_sha`)
+4. **ติดตั้ง runner เป็น user `deploy`** (ไม่มี sudo, อยู่ใน group `docker`, เป็นเจ้าของ `/opt/pos` — เหตุผลที่ไม่แยก user อยู่ใน addendum):
+   ```bash
+   # เครื่องเจ้าของ: token ลงทะเบียน (อายุ 1 ชั่วโมง, ใช้ครั้งเดียว) — อย่าวางลง chat/issue/commit
+   gh api -X POST repos/NuimanLP/srisurart-pos-flutter/actions/runners/registration-token --jq .token
+
+   # บน VM
+   sudo -iu deploy
+   mkdir -p ~/actions-runner && cd ~/actions-runner
+   # ดาวน์โหลด + ตรวจ sha256 ตามเวอร์ชันที่หน้า Settings → Actions → Runners → New self-hosted runner (Linux x64) แสดง
+   curl -fsSLo runner.tar.gz https://github.com/actions/runner/releases/download/v<VER>/actions-runner-linux-x64-<VER>.tar.gz
+   echo "<SHA256 จากหน้านั้น>  runner.tar.gz" | sha256sum -c
+   tar xzf runner.tar.gz && rm runner.tar.gz
+   ./config.sh --unattended --url https://github.com/NuimanLP/srisurart-pos-flutter \
+     --token <TOKEN> --name mob04-demo --labels srisurart-demo-deploy --work _work
+   exit
+
+   # กลับเป็น user ที่มี sudo: ติดตั้งเป็น systemd service ที่รันในนาม deploy
+   cd /home/deploy/actions-runner
+   sudo ./svc.sh install deploy && sudo ./svc.sh start && sudo ./svc.sh status
+   ```
+   ลงทะเบียนกับ **repo** (URL ข้างบน) ไม่ใช่ระดับ account · ไม่เปิด port ใดเพิ่ม — runner ต่อขาออก 443 ไป `github.com`,
+   `api.github.com`, `*.actions.githubusercontent.com` (ufw `default allow outgoing` อยู่แล้ว) · ห้ามใส่ label นี้ให้ runner อื่น
+5. **ตรวจ:** `gh api repos/NuimanLP/srisurart-pos-flutter/actions/runners --jq '.runners[] | {name,status,labels:[.labels[].name]}'`
+   ต้องเห็น `online` + `srisurart-demo-deploy` → Actions → *Deploy (demo)* → Run workflow (ว่าง = head ของ `main`)
+6. **พิสูจน์ AC ของ #67** ด้วย run จริง: merge หนึ่งครั้ง = run แรกจบ notice "not deploying", run ที่สอง deploy · run ซ้ำ SHA
+   เดิม = playbook จบที่ข้อ 1 · manual run SHA เก่า = rollback · แนบลิงก์ run ใน #67
+
+ถอด runner: `sudo ./svc.sh stop && sudo ./svc.sh uninstall` แล้ว `./config.sh remove --token <token จาก .../runners/remove-token>` ในนาม `deploy`
 
 ---
 
@@ -242,7 +320,8 @@ on:
 |---|---|
 | ครั้งแรก | สร้าง Environment `demo` + secret 4 ตัว (§5) → รัน `provision.yml` ด้วยมือครั้งเดียว → merge อะไรก็ได้ขึ้น main → image ทั้งสองอยู่บน GHCR และ **public อยู่แล้ว** (ไม่ต้องสลับด้วยมือ — ตรวจแล้ว 2026-09-10) → deploy ถัดไป pull ได้เลย |
 | ดู Grafana / Prometheus / Bull-Board | `ssh -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 -L 3100:127.0.0.1:3100 deploy@<vm>` |
-| rollback | Actions → Deploy → Run workflow → `image_tag` = SHA ก่อนหน้า |
+| rollback | **อัตโนมัติ** เมื่อ playbook fail (deploy SHA ใน `.current_sha` ซ้ำ, run ยังแดง — §6.1) · **มือ:** Actions → *Deploy (demo)* → Run workflow (branch `main`) → `image_tag` = SHA ก่อนหน้า (ต้องอยู่บน `main` และมี image ครบทั้งสองบน GHCR) · schema ไม่ถอย · ถ้า runner offline: รัน playbook ด้วยมือตาม handoff 2026-09-15 §5 |
+| runner ของ deploy offline / ต้องลงใหม่ | §6.2 ข้อ 4–5 · job ที่รอ runner ค้างในคิว (ไม่ fail ทันที) — ดูใน Actions |
 | 🔴 **ครั้งเดียว: network สร้างก่อน `ip_range` (#148)** | `docker-compose.yml` เพิ่ม `ip_range: 172.30.0.128/25` + `gateway: 172.30.0.1` ให้ network `default` (IP คงที่ `.11–.13` อยู่นอกช่วง dynamic) · Docker เปลี่ยน IPAM ของ network ที่มี container ต่ออยู่ไม่ได้ — วัดกับ compose v5.0.2: `run --rm` สลับ network ใต้ container ที่รันอยู่แล้วต่อกลับ**โดยไม่มี `ipv4_address`** (api-N เสีย `.11–.13` → Nginx ไม่มี upstream) ส่วน `up -d <บาง service>` หยุด service นั้นแล้ว error · `deploy.yml` จึงเช็ค `srisurart-pos_default` ก่อนแตะอะไรและ **fail ทันที**ถ้ายังไม่มี `ip_range` · ทางแก้ (POS ดับสั้น ๆ, volume ไม่หาย — **ห้าม `-v`**): บน VM `cd /opt/pos && IMAGE_TAG=$(cat .current_sha) docker compose -f docker-compose.yml -f vm.override.yml down --remove-orphans` (orphans = container monitoring) แล้วรัน `deploy.yml` ด้วย **SHA ใหม่** ทันที — SHA เดิมจบที่ข้อ 1 ของ §6 และไม่ start อะไรเลย (ถ้าจำเป็นต้องใช้ SHA เดิม ลบ `.current_sha` ก่อน) · เครื่อง dev ที่รัน stack อยู่: `docker compose down` (ไม่ใส่ `-v`) ครั้งเดียวใน `server/` · VM ที่ยังไม่เคยมี network นี้ผ่านเช็คเอง |
 | VM พัง/ย้ายเครื่อง | เครื่องใหม่ + `provision.yml` + `deploy.yml` — ข้อมูลใน volume ของ Postgres **ไม่ได้ย้ายตาม** (demo ไม่มีข้อมูลจริง; production ต้องมีแผน backup ก่อน — ยังไม่มีเอกสาร) |
 | เพิ่ม required check | **อย่า** — ต่อ job ใหม่เป็น `needs:` ของ status job แทน (§4) |
