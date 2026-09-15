@@ -10,7 +10,8 @@
 #
 # Memory budget (faculty VM 4 vCPU / 6 GB): 1024 + 2×256 + 3×384 + 256 + 128 + 64 + 256 (etcd)
 # ≈ 3.3 GB.
-# Connections: max_connections=100 → 3 api × 15 + worker × 5 = 50 ≤ 80 (80%).
+# Connections: max_connections=100 → 3 api × (15 request + 2 audit + 1 health) + worker ×
+# (5 + 2 + 1) = 62 ≤ 80 (80%). The admin pool is platform-plane only (server/README.md *Invariants this stack enforces*).
 
 name: srisurart-pos
 
@@ -281,11 +282,13 @@ services:
       start_period: 10s
 
   # One-shot: creates the etcd root user and enables RBAC auth on first boot, then asserts it
-  # (root authenticates, an anonymous request is refused) — see `docker/etcd/etcd-init.sh`.
+  # (root authenticates, an anonymous request is refused), then seeds `/pos/config/log_level`
+  # from LOG_LEVEL if the key has never existed — see `docker/etcd/etcd-init.sh`.
   # Idempotent: a re-run against an already-bootstrapped volume short-circuits immediately.
-  # Nothing depends on this succeeding (`condition: service_completed_successfully` is
+  # No service depends on this succeeding (`condition: service_completed_successfully` is
   # deliberately not used anywhere) — the whole point of RuntimeConfigService's fail-open
-  # design is that the API must boot with no working etcd at all.
+  # design is that the API must boot with no working etcd at all. The VM deploy
+  # (deploy/ansible/deploy.yml) runs it with `run --rm` instead, so a failure fails the deploy.
   etcd-init:
     image: curlimages/curl:8.16.0
     restart: "no"
@@ -294,6 +297,7 @@ services:
     command: ["/etcd-init.sh"]
     environment:
       ETCD_ROOT_PASSWORD: ${ETCD_ROOT_PASSWORD:?ETCD_ROOT_PASSWORD is required}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     volumes:
       - ./docker/etcd/etcd-init.sh:/etcd-init.sh:ro
     depends_on:
