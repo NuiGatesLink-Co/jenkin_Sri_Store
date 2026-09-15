@@ -679,7 +679,7 @@ void main() {
   });
 
   group('#200 AbortableRequest on timeout', () {
-    const short = Duration(milliseconds: 100);
+    const short = Duration(milliseconds: 200);
 
     test('after timeout the underlying request is aborted (#200)', () async {
       final abortedCompleter = Completer<void>();
@@ -719,12 +719,14 @@ void main() {
     });
 
     test('when client completes with RequestAbortedException, ApiTimeoutException still surfaces (#200)', () async {
+      final aborted = Completer<void>();
       final client = ApiClient(
         baseUrl: 'http://server.test',
         httpClient: MockClient.streaming((req, bodyStream) async {
           final completer = Completer<http.StreamedResponse>();
           if (req case http.Abortable(:final abortTrigger?)) {
             abortTrigger.then((_) {
+              if (!aborted.isCompleted) aborted.complete();
               completer.completeError(http.RequestAbortedException(req.url));
             });
           }
@@ -740,6 +742,11 @@ void main() {
           isA<http.ClientException>(),
           isNot(isA<ApiException>()),
         )),
+      );
+      await expectLater(
+        aborted.future.timeout(const Duration(seconds: 1)),
+        completes,
+        reason: 'abortTrigger must have been triggered',
       );
     });
 

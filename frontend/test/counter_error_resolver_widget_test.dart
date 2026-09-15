@@ -159,7 +159,7 @@ void main() {
             ),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         // Switch to QR transfer so cash entry is not needed
         await tester.tap(find.text('โอน/QR'));
@@ -221,7 +221,7 @@ void main() {
             ),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         await tester.tap(find.text('โอน/QR'));
         await tester.pumpAndSettle();
@@ -274,7 +274,7 @@ void main() {
             ),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         await tester.tap(find.text('โอน/QR'));
         await tester.pumpAndSettle();
@@ -334,7 +334,7 @@ void main() {
             ),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         await tester.tap(find.text('โอน/QR'));
         await tester.pumpAndSettle();
@@ -398,7 +398,7 @@ void main() {
             child: const MaterialApp(home: Scaffold(body: ReturnsScreen())),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         // Select the bill
         await tester.tap(find.text('RC-001'));
@@ -463,7 +463,7 @@ void main() {
             child: const MaterialApp(home: Scaffold(body: ReturnsScreen())),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         await tester.tap(find.text('RC-002'));
         await tester.pumpAndSettle();
@@ -501,7 +501,7 @@ void main() {
             child: const MaterialApp(home: Scaffold(body: CashDrawerScreen())),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         // Tap quick amount chip '฿1,000'
         await tester.tap(find.text('฿1,000'));
@@ -551,7 +551,7 @@ void main() {
             child: const MaterialApp(home: Scaffold(body: CashDrawerScreen())),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         // Enter entry amount
         await tester.enterText(
@@ -606,7 +606,7 @@ void main() {
             child: const MaterialApp(home: Scaffold(body: MechanicsScreen())),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         // Select mechanic
         await tester.tap(find.textContaining('ช่างผิดพลาด', findRichText: true).first);
@@ -666,7 +666,7 @@ void main() {
             child: const MaterialApp(home: Scaffold(body: MechanicsScreen())),
           ),
         );
-        await tester.pumpAndSettle(const Duration(milliseconds: 100));
+        await tester.pumpAndSettle(const Duration(milliseconds: 200));
 
         await tester.tap(find.textContaining('ช่างผิดพลาดสอง', findRichText: true).first);
         await tester.pumpAndSettle();
