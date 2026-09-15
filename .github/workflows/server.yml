@@ -70,6 +70,8 @@ jobs:
             server:
               - 'server/**'
               - '.github/workflows/server.yml'
+              # #185: test/synthetic-snapshot.spec.ts pins this committed sample to the generator.
+              - 'frontend/test/fixtures/synthetic_snapshot_*.json'
 
   lint:
     name: lint + typecheck

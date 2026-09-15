@@ -1090,6 +1090,31 @@ flowchart LR
 * float → NUMERIC: ค่าอย่าง `123.45000000000002` ต้อง `round2` ก่อนใส่
 * `categories` ที่มีสินค้าอ้างถึงแต่ไม่มีในตาราง (ข้อมูลเก่าไม่ clean) → สร้าง category ให้อัตโนมัติ
   **แต่ห้ามใส่ FK `products.category → categories`** — ดู §10 (ของเดิมตั้งใจให้เป็น orphan ได้)
+* **ประวัติอ้างถึงแถวที่ร้านลบทิ้งไปแล้ว (#238 — เจ้าของโปรเจกต์เคาะ 2026-09-15: ตัวเลือก (a) tombstone)**
+  Drift ไม่มี FK และลบแบบ hard delete ทุกที่ ไฟล์จริงจึงมี `movements` ที่อ้างสินค้าที่หายไปแล้ว
+  มี `sales` ที่อ้างลูกค้า/ช่างที่หายไป และมี `credit_payments` ที่อ้างช่างที่หายไป ถ้าไม่จัดการ Postgres จะชน FK → 500 ทั้งร้าน
+  → import สร้าง **แถว soft-deleted หนึ่งแถวต่อ id ที่หายไป** ดังนี้
+  - `deleted_at` = เวลา import
+  - ชื่อเอามาจากชื่อที่ประวัติคัดลอกเก็บไว้ (`movements.name/part_no`, `sale_items.name/part_no`, `sales.customer_name`,
+    `sales.mechanic_name`, `returns.mechanic_name`)
+  - ยอดสะสมเป็นศูนย์
+  - ติดป้าย `import-tombstone` (`products.brand`, และ `customers.code`/`mechanics.code` = `import-tombstone:<id>`)
+  - นับจำนวนต่อตารางลง `audit_log.after` ใน transaction เดียวกับ import
+
+  tombstone ไม่ชน `uq_products_partno(_ci)` เพราะทั้งสอง index เป็น partial `WHERE deleted_at IS NULL`
+  และไม่คืนชีพเป็นแถว live
+  **อ้างถึงแต่ไม่มีชื่อให้เก็บเลย** → pre-flight ตอบ 400 พร้อมรายการ id (ห้ามสร้างบิลปลอม เพราะเท่ากับสร้างเงิน —
+  เหตุผลนี้ของผู้ทำ ไม่ใช่สิ่งที่เจ้าของโปรเจกต์เคาะไว้ตรง ๆ ใน #238 แต่เป็นข้อสรุปที่จำเป็นเพื่อให้ "ใบลดหนี้ที่บิลต้นทางหายไป"
+  ก็ต้องตอบ 400 ด้วยเหตุผลเดียวกัน) — `server/src/platform/snapshot-tombstones.ts`
+
+* **`suppliers.product_id` เป็น FK เหมือนกัน แต่ราคาซัพพลายเออร์ไม่ใช่ "ประวัติ" (#252 — เจ้าของโปรเจกต์เคาะ 2026-09-15)**
+  รอบตรวจ PR #252 พบว่าสินค้าที่ถูกเพิ่มพร้อมราคาซัพพลายเออร์ (`SuppliersRepository`) แล้วลบทิ้งทันที
+  **ก่อนเคยลงสต็อกหรือขาย** จะไม่มี `movements`/`sale_items` อ้างถึงเลย — ไม่มีชื่อให้ตั้ง tombstone จากที่ไหนเลย
+  เดิมโค้ดจะปฏิเสธไฟล์ทั้งไฟล์ด้วย 400 `unnamed` แม้ราคาซัพพลายเออร์ไม่ใช่สิ่งที่ต้องกู้คืน
+  → ตัดสินใจใหม่: แถว `sa_suppliers` ที่อ้าง `product_id` ที่ไม่อยู่ในไฟล์ **และ**ไม่ถูก tombstone ด้วยเหตุอื่น
+  (เช่นมี `movements` อ้างสินค้าเดียวกันอยู่) → **ทิ้งแถวนั้น** ไม่ import ไม่ปฏิเสธทั้งไฟล์
+  นับจำนวนลง `droppedSuppliers` ทั้งใน `audit_log.after`, response ของ import และรายงาน pre-flight
+  ถ้าสินค้าตัวนั้นถูก tombstone อยู่แล้ว (มีประวัติอื่นอ้างถึงจริง) แถวซัพพลายเออร์จะถูกเก็บไว้ตามเดิม
 
 ---
 

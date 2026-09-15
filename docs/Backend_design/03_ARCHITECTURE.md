@@ -503,7 +503,7 @@ gantt
 **เกณฑ์ปิดเฟส 1 (definition of done):**
 - [x] `docker compose up` ครั้งเดียวได้ครบ Nginx + NestJS×3 + Postgres + Redis + worker + Bull-Board — **#14 `p1` 2026-09-06**
 - [ ] k6 ผ่านเกณฑ์ใน [`02_API_SCREENS.md §9`](02_API_SCREENS.md#9-เป้าหมาย-load-test-k6--ผูกกับเกณฑ์ในคอร์ส)
-- [ ] ยิง `POST /sales` พร้อมกัน 200 ครั้งบนสินค้าที่มี 50 ชิ้น → ขายได้ 50 บิลพอดี **สต็อกเหลือ 0 ไม่ติดลบ**
+- [x] ยิง `POST /sales` พร้อมกัน 200 ครั้งบนสินค้าที่มี 50 ชิ้น → ขายได้ 50 บิลพอดี **สต็อกเหลือ 0 ไม่ติดลบ** — **#184 `close.3` 2026-09-15 บน demo VM** (201×50 / 409×150 / 5xx 0, `k6:verify` ผ่าน — [handoff §4.2](../handoff_log/close3-demo-deploy-2026-09-15.md)); ข้อ k6 §9 ด้านบนยังเปิด: latency วัดผ่าน nginx จากเครื่องเดียวไม่ได้ (§4.1)
 - [ ] Integration test "อ่านข้ามร้าน" ได้ 0 แถวทุกเคส
 - [x] `/health/live` ไม่แตะ DB, `/health/ready` แตะ DB+Redis (แยกกันจริง) — **#14 `p1` 2026-09-06** (ดับ Postgres/Redis แล้ว ready = 503, live = 200, ไม่มี container restart)
 - [ ] import snapshot ของร้านจริงเข้ามาแล้ว **ผ่าน checklist 6 ข้อ** ใน `01_DATABASE.md §9` ทุกข้อ
@@ -561,6 +561,36 @@ gantt
   **cutover ร้านจริงจากนอกมหาวิทยาลัยย้ายไปเฟสถัดไป** (#231) · เหตุผลเดิมข้างบนยังจริงสำหรับเฟสนั้น · ดู [`08 §17`](08_PHASE2_SPEC.md)
 * ตรวจตั้งแต่สัปดาห์แรก: **VM คณะรับ inbound จากนอกมหาวิทยาลัยได้ไหม** ถ้าไม่ได้ k6 จาก
   เครื่องตัวเองก็ยิงไม่ถึง
+
+### 8.1 k6 §9 latency — วิธีวัดที่ไม่ปนเปื้อน (owner decision, issue #251, 2026-09-15)
+
+"ห้ามรัน k6 บน VM นี้" ด้านบนยังจริงอยู่ — แต่การยิงจาก**เครื่องเดียว**ผ่าน Nginx ก็วัด latency
+สะอาดไม่ได้เหมือนกัน เพราะ k6 VU ทุกตัวใช้ IP เดียวกันของเครื่องนั้น แล้ว
+`limit_req zone=perip rate=30r/s burst=60` (`server/docker/nginx/nginx.conf`) จะเริ่มตอบ `429`
+ก่อน NestJS/PostgreSQL/Redis จะเข้าใกล้ขีดจำกัดจริง — วัดตัวจำกัดของ Nginx เอง ไม่ใช่วัดระบบ
+(เหมือนปัญหาเดียวกับ rate limiter ระดับ tenant ที่ §9 เตือนไว้ ห่างออกไปอีกชั้น) การยิงผ่าน SSH
+tunnel ก็วัดได้แค่ tunnel; หลักฐานทั้งหมดอยู่ที่
+`docs/handoff_log/close3-demo-deploy-2026-09-15.md` §4.1.
+
+**เคาะแล้ว:** ยิงจาก**หลายเครื่องพร้อมกัน** (สามเครื่องทีมบน campus network) แต่ละเครื่องอยู่ใต้
+`perip` ของตัวเอง **ไม่มีข้อยกเว้นให้ `perip`** — ผลรวมสตรีมเข้า Prometheus ของ VM ผ่าน
+`--web.enable-remote-write-receiver` แล้วดูรวมกันใน Grafana:
+* `deploy/compose/monitoring.yml`: `prometheus` เปิด `--web.enable-remote-write-receiver`
+* `server/docker/nginx/nginx.conf`: `location /prometheus-remote-write/` — allowlist (RFC1918 +
+  campus CIDR ที่ owner ต้องเติม) **และ** HTTP Basic Auth (`satisfy all` ของ Nginx โดย default)
+  proxy ไปที่ `prometheus:9090` แบบ resolve เฉพาะตอนมี request (`resolver` + ตัวแปร) ไม่ใช่ที่
+  startup — Nginx เองจึงยัง start ได้ปกติแม้ไม่มี monitoring overlay (dev/CI)
+* `server/docker-compose.yml`: `htpasswd-gen` (one-shot, เหมือน `certgen`) สร้าง htpasswd จาก
+  `K6_REMOTE_WRITE_BASIC_AUTH_USER`/`_PASSWORD` ใน `.env` (`.env.example` มีค่า dev-only; บน VM
+  ต้องเติมใน `DEMO_ENV_FILE`, `07_CICD_DEPLOY.md` §10.3) — ไม่มี port ใหม่เปิด, ไม่แตะ ufw
+  (ยังแค่ 22/80/443)
+* สูตรแบ่งโหลดต่อเครื่อง + ขั้นตอนรันเต็ม: `server/test/k6/README.md`
+
+ผลลัพธ์ที่ได้คือ throughput รวมที่ "3 IP จริงยิงผ่าน edge จริงแบบสะอาด" รับไหว
+(`N × SAFE_RATE_PER_SHARD` ที่ N=3 คือ ~72 r/s) ซึ่งต่ำกว่า "1,000 VU ยิงพร้อมกันจริง ๆ" มาก — นั่น
+คือราคาที่ต้องจ่ายเพื่อให้วัดผ่าน Nginx จริงโดยไม่ปนเปื้อน ไม่ใช่บั๊ก; ตัวเลข p95/error/cache-hit
+ที่ได้จึงเป็นหลักฐานเรื่อง tail latency ที่โหลดซึ่งวัดได้สะอาดจริง ไม่ใช่หลักฐานว่าระบบรับ 1,000
+concurrent user พร้อมกันได้ (ข้อนั้นยังไม่มีวิธีวัดสะอาดภายใต้ข้อจำกัดโครงสร้างพื้นฐานปัจจุบัน).
 
 ---
 

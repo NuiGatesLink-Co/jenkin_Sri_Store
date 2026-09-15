@@ -8,28 +8,38 @@ import { DataSource } from 'typeorm';
 import { ADMIN_DATA_SOURCE } from '../infra/db.module.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { AuditService } from './audit.service.js';
+import { snapshotProductCategory } from './snapshot-category.js';
+import { countTombstones, fieldId, planTombstones, TOMBSTONE_MARK } from './snapshot-tombstones.js';
 
+/**
+ * The shop's backup file: the store keys `SnapshotRepository.exportSnapshot()` (a port of
+ * db.js) writes and `BackupProcessor` exports — the only shape a real file has. #185 found
+ * this class had been written against invented keys (`sa_purchase_orders`, `sa_shifts`,
+ * `sa_parked_sales`, category objects), so a real file lost every PO, shift, drawer entry
+ * and parked bill and renamed every category to `Cat-<n>` while answering 201.
+ */
 export class SnapshotPayload {
   sa_products?: Array<Record<string, unknown>>;
-  sa_categories?: Array<Record<string, unknown>>;
+  /** An array of names ordered by position; `{ name, position }` objects are tolerated. */
+  sa_categories?: Array<string | Record<string, unknown>>;
   sa_customers?: Array<Record<string, unknown>>;
   sa_mechanics?: Array<Record<string, unknown>>;
   sa_sales?: Array<Record<string, unknown>>;
   sa_returns?: Array<Record<string, unknown>>;
-  sa_purchase_orders?: Array<Record<string, unknown>>;
+  sa_pos?: Array<Record<string, unknown>>;
   sa_quotes?: Array<Record<string, unknown>>;
   sa_movements?: Array<Record<string, unknown>>;
   sa_suppliers?: Array<Record<string, unknown>>;
   sa_credit_payments?: Array<Record<string, unknown>>;
-  sa_shifts?: Array<Record<string, unknown>>;
-  sa_drawer_entries?: Array<Record<string, unknown>>;
-  sa_parked_sales?: Array<Record<string, unknown>>;
+  /** The one active shift (with nested `entries`), or null. JS shifts carry no `id`. */
+  sa_cash_drawer?: Record<string, unknown> | null;
+  sa_shift_history?: Array<Record<string, unknown>>;
+  /** Parked bills: each element is the cart blob itself. */
+  sa_parked?: Array<Record<string, unknown>>;
   sa_settings?: Record<string, unknown>;
-  sa_tenant_meta?: Array<Record<string, unknown>>;
   __meta?: Record<string, unknown>;
   [key: string]: unknown;
 }
-
 
 function round2(v: unknown): number {
   const num = typeof v === 'number' ? v : parseFloat(String(v ?? '0'));
@@ -112,19 +122,70 @@ export class TenantImportService {
       }
     }
 
+    const categories = snapshot.sa_categories || [];
+    for (let i = 0; i < categories.length; i++) {
+      const cat = categories[i];
+      if (cat && typeof cat === 'object' && cat.position != null && !Number.isFinite(Number(cat.position))) {
+        throw new BadRequestException(
+          `Pre-flight failed: category '${String(cat.name)}' has a non-numeric position (${String(cat.position)})`,
+        );
+      }
+    }
+
+    // #238: references to rows the shop hard-deleted become soft-deleted tombstones. A
+    // reference no tombstone can be named for — or a credit note with no bill — is refused
+    // here, with the ids, instead of dying on a foreign key mid-transaction as a 500.
+    const tombstones = planTombstones(snapshot);
+    // #252 review: a row missing its own required reference id entirely (never `String(undefined)`).
+    if (tombstones.missingRefs.length > 0) {
+      throw new BadRequestException(
+        `Pre-flight failed: rows are missing a required reference id: ${tombstones.missingRefs.join(', ')}`,
+      );
+    }
+    if (tombstones.unnamed.length > 0) {
+      throw new BadRequestException(
+        `Pre-flight failed: history references rows missing from the file with no name to keep: ${tombstones.unnamed.join(', ')}`,
+      );
+    }
+    if (tombstones.returnsWithoutSale.length > 0) {
+      throw new BadRequestException(
+        `Pre-flight failed: credit notes reference bills missing from the file: ${tombstones.returnsWithoutSale.join(', ')}`,
+      );
+    }
+    const tombstoneCounts = countTombstones(tombstones);
+    // #252 (owner, 2026-09-15): a supplier row for a product neither live nor tombstoned is
+    // dropped rather than refused — counted here, never silently lost.
+    const droppedSuppliers = tombstones.droppedSuppliers.length;
+    const droppedSupplierIds = new Set(tombstones.droppedSuppliers);
+
     // 3. Single-transaction import
     await this.adminDs.transaction(async (manager) => {
       // 3.1 Categories
-      const categories = snapshot.sa_categories || [];
+      const categoryNames = new Set<string>();
       for (let i = 0; i < categories.length; i++) {
         const cat = categories[i];
-        const name = String(cat.name || `Cat-${i}`);
-        const pos = Number(cat.position ?? i);
+        const entry = typeof cat === 'string' ? { name: cat } : (cat ?? {});
+        if (entry.name == null) continue;
+        const name = String(entry.name);
+        const pos = Number(entry.position ?? i);
+        categoryNames.add(name);
         await manager.query(
           `INSERT INTO categories (tenant_id, name, position)
            VALUES ($1, $2, $3)
            ON CONFLICT (tenant_id, name) DO UPDATE SET position = EXCLUDED.position`,
           [tenantId, name, pos],
+        );
+      }
+      // 01 §9: a category products still name but the list lost is created (after the
+      // listed ones), never left as an orphan — Drift's deleteCategory never touched products.
+      let nextPosition = categories.length;
+      for (const name of new Set(products.map(snapshotProductCategory))) {
+        if (categoryNames.has(name)) continue;
+        await manager.query(
+          `INSERT INTO categories (tenant_id, name, position)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, name) DO NOTHING`,
+          [tenantId, name, nextPosition++],
         );
       }
 
@@ -134,7 +195,7 @@ export class TenantImportService {
         const partNo = String(p.partNo || p.part_no || id);
         const name = String(p.name || '');
         const nameTh = String(p.nameTH || p.name_th || name);
-        const category = String(p.category || p.zone || 'ทั่วไป');
+        const category = snapshotProductCategory(p);
         const brand = String(p.brand || 'ทั่วไป');
         const price = round2(p.price);
         const cost = round2(p.cost);
@@ -163,11 +224,27 @@ export class TenantImportService {
         );
       }
 
-      // 3.3 Suppliers
+      // 3.2b Product tombstones (#238): soft-deleted, so `uq_products_partno(_ci)` — both
+      // partial on `deleted_at IS NULL` — never compare them with a live part number.
+      // #252 review: no `ON CONFLICT DO NOTHING` — the plan guarantees a tombstone id is
+      // never a live product id, so a conflict here means the plan is wrong and must fail
+      // loudly, not silently keep whichever row got there first.
+      for (const t of tombstones.products) {
+        await manager.query(
+          `INSERT INTO products (tenant_id, id, part_no, name, name_th, category, brand, price, cost, stock, min_stock, updated_at, deleted_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 0, clock_timestamp(), clock_timestamp())`,
+          [tenantId, t.id, t.partNo, t.name, t.nameTh, snapshotProductCategory({}), TOMBSTONE_MARK],
+        );
+      }
+
+      // 3.3 Suppliers. #252 (owner, 2026-09-15): a row whose product is gone and not
+      // otherwise tombstoned (`tombstones.droppedSuppliers`) is skipped, not inserted — see
+      // snapshot-tombstones.ts.
       const suppliers = snapshot.sa_suppliers || [];
       for (const sup of suppliers) {
         const id = String(sup.id);
-        const productId = String(sup.productId || sup.product_id);
+        if (droppedSupplierIds.has(id)) continue;
+        const productId = fieldId(sup, 'productId', 'product_id')!;
         const name = String(sup.name || '');
         const unitCost = round2(sup.unitCost || sup.unit_cost);
         const freight = round2(sup.freight);
@@ -197,6 +274,16 @@ export class TenantImportService {
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            ON CONFLICT (tenant_id, id) DO NOTHING`,
           [tenantId, id, code, name, nameTh, phone, address, points, totalSpend, createdAt],
+        );
+      }
+
+      // 3.4b Customer tombstones (#238): zero points/spend, code `import-tombstone:<id>`.
+      // #252 review: no `ON CONFLICT DO NOTHING` — see the product tombstone note above.
+      for (const t of tombstones.customers) {
+        await manager.query(
+          `INSERT INTO customers (tenant_id, id, code, name, name_th, points, total_spend, deleted_at)
+           VALUES ($1, $2, $3, $4, $4, 0, 0, clock_timestamp())`,
+          [tenantId, t.id, t.code, t.name],
         );
       }
 
@@ -230,6 +317,17 @@ export class TenantImportService {
         );
       }
 
+      // 3.5b Mechanic tombstones (#238): zero balance and totals, code `import-tombstone:<id>`,
+      // written explicitly (like the customer tombstone above) rather than left to the
+      // column defaults. #252 review: no `ON CONFLICT DO NOTHING` — see the product note above.
+      for (const t of tombstones.mechanics) {
+        await manager.query(
+          `INSERT INTO mechanics (tenant_id, id, code, name, credit_limit, credit_balance, total_sales, total_credit, total_discount, total_markup, deleted_at)
+           VALUES ($1, $2, $3, $4, 0, 0, 0, 0, 0, 0, clock_timestamp())`,
+          [tenantId, t.id, t.code, t.name],
+        );
+      }
+
       // 3.6 Sales & SaleItems
       const sales = snapshot.sa_sales || [];
       for (const s of sales) {
@@ -239,9 +337,9 @@ export class TenantImportService {
         const discount = round2(s.discount);
         const total = round2(s.total);
         const paymentMethod = String(s.paymentMethod || s.payment_method || 'เงินสด');
-        const customerId = s.customerId || s.customer_id ? String(s.customerId || s.customer_id) : null;
+        const customerId = fieldId(s, 'customerId', 'customer_id');
         const customerName = s.customerName || s.customer_name ? String(s.customerName || s.customer_name) : null;
-        const mechanicId = s.mechanicId || s.mechanic_id ? String(s.mechanicId || s.mechanic_id) : null;
+        const mechanicId = fieldId(s, 'mechanicId', 'mechanic_id');
         const mechanicName = s.mechanicName || s.mechanic_name ? String(s.mechanicName || s.mechanic_name) : null;
         const mechanicDelta = s.mechanicDelta != null ? round2(s.mechanicDelta) : null;
         const pointsGranted = Math.max(0, Math.floor(Number(s.pointsGranted ?? s.points_granted ?? 0)));
@@ -270,7 +368,9 @@ export class TenantImportService {
           const nameTh = item.nameTH || item.name_th ? String(item.nameTH || item.name_th) : null;
           const qty = Math.max(1, Math.floor(Number(item.qty ?? 1)));
           const price = round2(item.price);
-          const costAtSale = item.costAtSale != null ? round2(item.costAtSale) : null;
+          // The file carries the cost at sale as `cost` (exportSnapshot, ADR-0008).
+          const costRaw = item.costAtSale ?? item.cost;
+          const costAtSale = costRaw != null ? round2(costRaw) : null;
 
           await manager.query(
             `INSERT INTO sale_items (tenant_id, sale_id, line_no, product_id, part_no, name, name_th, qty, price, cost_at_sale)
@@ -286,15 +386,17 @@ export class TenantImportService {
       for (const r of returns) {
         const id = String(r.id);
         const cnNo = String(r.cnNo || r.cn_no || `CN-${id}`);
-        const saleId = String(r.saleId || r.sale_id);
+        // Non-null: every return whose sale is absent or unnamed is in `returnsWithoutSale`,
+        // refused in pre-flight above.
+        const saleId = fieldId(r, 'saleId', 'sale_id')!;
         const receiptNo = String(r.receiptNo || r.receipt_no || '');
         const refundSubtotal = round2(r.refundSubtotal || r.refund_subtotal);
         const refundDiscount = round2(r.refundDiscount || r.refund_discount);
         const refundTotal = round2(r.refundTotal || r.refund_total);
         const refundMethod = String(r.refundMethod || r.refund_method || 'เงินสด');
         const reason = String(r.reason || '');
-        const customerId = r.customerId || r.customer_id ? String(r.customerId || r.customer_id) : null;
-        const mechanicId = r.mechanicId || r.mechanic_id ? String(r.mechanicId || r.mechanic_id) : null;
+        const customerId = fieldId(r, 'customerId', 'customer_id');
+        const mechanicId = fieldId(r, 'mechanicId', 'mechanic_id');
         const mechanicName = r.mechanicName || r.mechanic_name ? String(r.mechanicName || r.mechanic_name) : null;
         const date = parseDate(r.date);
 
@@ -332,7 +434,8 @@ export class TenantImportService {
       for (const cp of creditPayments) {
         const id = String(cp.id);
         const receiptNo = String(cp.receiptNo || cp.receipt_no || `CP-${id}`);
-        const mechanicId = String(cp.mechanicId || cp.mechanic_id);
+        // Non-null: a row with no mechanic id at all is in `missingRefs`, refused above.
+        const mechanicId = fieldId(cp, 'mechanicId', 'mechanic_id')!;
         const amount = round2(cp.amount);
         const note = cp.note ? String(cp.note) : null;
         const date = parseDate(cp.date);
@@ -351,7 +454,7 @@ export class TenantImportService {
       }
 
       // 3.9 PurchaseOrders & PoItems
-      const pos = snapshot.sa_purchase_orders || [];
+      const pos = snapshot.sa_pos || [];
       for (const po of pos) {
         const id = String(po.id);
         const poNo = String(po.poNo || po.po_no || `PO-${id}`);
@@ -436,7 +539,8 @@ export class TenantImportService {
       const movements = snapshot.sa_movements || [];
       for (const m of movements) {
         const id = String(m.id);
-        const productId = String(m.productId || m.product_id);
+        // Non-null: a movement with no product id at all is in `missingRefs`, refused above.
+        const productId = fieldId(m, 'productId', 'product_id')!;
         const partNo = String(m.partNo || m.part_no || '');
         const name = String(m.name || '');
         const delta = Math.floor(Number(m.delta ?? 0));
@@ -454,33 +558,50 @@ export class TenantImportService {
         );
       }
 
-      // 3.12 Shifts & Nested DrawerEntries
-      const shifts = snapshot.sa_shifts || [];
-      for (let i = 0; i < shifts.length; i++) {
-        const sh = shifts[i];
-        const shiftId = String(sh.id || `sh_${i + 1}`);
-        const dateStr = String(sh.dateStr || sh.date_str || new Date().toISOString().slice(0, 10));
-        const startingCash = round2(sh.startingCash || sh.starting_cash);
+      // 3.12 Shifts & nested drawer entries: sa_cash_drawer (the active shift) + sa_shift_history.
+      // A JS/Drift shift carries no id (01 §9), so one is issued as sh_{date}_{n}; a server
+      // export (BackupProcessor) keeps its own.
+      //
+      // 🔴 Every imported shift is archived (`is_active = false`), the file's drawer included.
+      // An active drawer belongs to a device (`device_id`), and every close/entry/archive path
+      // filters by it, so an imported `is_active = true, device_id = NULL` row could never be
+      // closed: `GET /shifts/current` (tenant-wide) showed it until a device opened a drawer,
+      // then it and that day's entries fell out of both current and history for good. The
+      // file's drawer is archived the way `openShift` archives yesterday's: auto-archived when
+      // it was never closed, stamped now.
+      const drawer = snapshot.sa_cash_drawer;
+      const shifts: Array<{ sh: Record<string, unknown>; fromDrawer: boolean }> = [
+        ...(drawer && typeof drawer === 'object' ? [{ sh: drawer, fromDrawer: true }] : []),
+        ...(snapshot.sa_shift_history || []).map((sh) => ({ sh, fromDrawer: false })),
+      ];
+      const shiftsPerDate = new Map<string, number>();
+      for (const { sh, fromDrawer } of shifts) {
         const openedAt = parseDate(sh.openedAt || sh.opened_at);
+        const dateStr = String(sh.date || sh.dateStr || sh.date_str || openedAt.toISOString().slice(0, 10));
+        const n = (shiftsPerDate.get(dateStr) ?? 0) + 1;
+        shiftsPerDate.set(dateStr, n);
+        const shiftId = String(sh.id || `sh_${dateStr}_${n}`);
+        const startingCash = round2(sh.startingCash || sh.starting_cash);
         const closedAt = sh.closedAt || sh.closed_at ? parseDate(sh.closedAt || sh.closed_at) : null;
         const physicalCash = sh.physicalCash != null || sh.physical_cash != null ? round2(sh.physicalCash ?? sh.physical_cash) : null;
-        const isActive = Boolean(sh.isActive ?? sh.is_active);
+        const autoArchived = fromDrawer ? closedAt == null : Boolean(sh.autoArchived ?? sh.auto_archived);
+        const archivedAt = sh.archivedAt || sh.archived_at ? parseDate(sh.archivedAt || sh.archived_at) : null;
 
         await manager.query(
-          `INSERT INTO shifts (tenant_id, id, date_str, starting_cash, opened_at, closed_at, physical_cash, is_active)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          `INSERT INTO shifts (tenant_id, id, date_str, starting_cash, opened_at, closed_at, physical_cash, is_active, auto_archived, archived_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8, CASE WHEN $9 THEN clock_timestamp() ELSE $10::timestamptz END)
            ON CONFLICT (tenant_id, id) DO NOTHING`,
-          [tenantId, shiftId, dateStr, startingCash, openedAt, closedAt, physicalCash, isActive],
+          [tenantId, shiftId, dateStr, startingCash, openedAt, closedAt, physicalCash, autoArchived, fromDrawer, archivedAt],
         );
 
-        // Nested drawer entries inside shift object or top-level list
         const entries = (sh.entries as Array<Record<string, unknown>>) || [];
         for (let j = 0; j < entries.length; j++) {
           const entry = entries[j];
           const entryId = String(entry.id || `de_${shiftId}_${j + 1}`);
           const type = String(entry.type || 'in');
           const amount = round2(entry.amount);
-          const note = entry.note ? String(entry.note) : null;
+          // exportSnapshot() writes `note ?? ''`: an empty note stays empty, only absent is null.
+          const note = entry.note != null ? String(entry.note) : null;
           const createdAt = parseDate(entry.createdAt || entry.created_at);
 
           await manager.query(
@@ -492,28 +613,11 @@ export class TenantImportService {
         }
       }
 
-      // Top-level drawer entries if any
-      const topEntries = snapshot.sa_drawer_entries || [];
-      for (const entry of topEntries) {
-        const entryId = String(entry.id);
-        const shiftId = String(entry.shiftId || entry.shift_id);
-        const type = String(entry.type || 'in');
-        const amount = round2(entry.amount);
-        const note = entry.note ? String(entry.note) : null;
-        const createdAt = parseDate(entry.createdAt || entry.created_at);
-
-        await manager.query(
-          `INSERT INTO drawer_entries (tenant_id, id, shift_id, type, amount, note, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           ON CONFLICT (tenant_id, id) DO NOTHING`,
-          [tenantId, entryId, shiftId, type, amount, note, createdAt],
-        );
-      }
-
-      // 3.13 Parked Sales
-      const parked = snapshot.sa_parked_sales || [];
-      for (const ps of parked) {
-        const id = String(ps.id);
+      // 3.13 Parked Sales (sa_parked: each element is the cart blob, carrying id + parkedAt)
+      const parked = snapshot.sa_parked || [];
+      for (let i = 0; i < parked.length; i++) {
+        const ps = parked[i];
+        const id = String(ps.id || `pk_import_${i + 1}`);
         const parkedAt = parseDate(ps.parkedAt || ps.parked_at);
         const payload = ps.payload ? (typeof ps.payload === 'string' ? JSON.parse(ps.payload) : ps.payload) : ps;
 
@@ -560,8 +664,22 @@ export class TenantImportService {
         tenantId,
         platformAdminId: adminId,
         action: 'platform.tenant.import',
+        // #238: how many soft-deleted rows the import invented, per table.
+        // #252: how many orphaned supplier rows it dropped instead.
+        after: { tombstones: tombstoneCounts, droppedSuppliers },
         ip,
       });
+
+      // Last statement before COMMIT: re-stamp every row a device pulls by `updated_at`
+      // (ADR-0010 keyset cursor, 30 s rewind). A row stamped at the start of a long import —
+      // `now()` defaults on customers/mechanics, or an early product's clock_timestamp() —
+      // commits later than its stamp and could land behind an already-advanced cursor (#217).
+      for (const table of ['products', 'customers', 'mechanics'] as const) {
+        await manager.query(
+          `UPDATE ${table} SET updated_at = clock_timestamp() WHERE tenant_id = $1`,
+          [tenantId],
+        );
+      }
     });
 
     // #32: the transaction above has committed (it is the admin data source's own, not
@@ -572,6 +690,6 @@ export class TenantImportService {
       await this.cache.invalidate(tenantId, ns);
     }
 
-    return { status: 'success', tenantId };
+    return { status: 'success', tenantId, tombstones: tombstoneCounts, droppedSuppliers };
   }
 }

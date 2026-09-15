@@ -137,7 +137,10 @@ is the consumer that reads it at boot and watches it live.
   `/v3/auth/role/add`, `/v3/auth/user/grant`, `/v3/auth/enable`), then **asserts** the result —
   root authenticates, an anonymous request is refused — rather than trusting the bootstrap
   calls succeeded. It is idempotent: re-run against an already-bootstrapped volume (a restart,
-  not a fresh one) short-circuits at the first authenticate call.
+  not a fresh one) short-circuits at the first authenticate call. It then seeds
+  `/pos/config/log_level` with `LOG_LEVEL` (default `info`) in a txn guarded by
+  `create_revision == 0`, so a value changed later is never overwritten (#67). Locally it still
+  runs from `up`; the VM deploy runs it with `run --rm`, so there a failure fails the deploy.
 - `etcdctl endpoint health` needs credentials once auth is enabled (it performs a linearizable
   read) — the healthcheck sets `ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD` as an environment
   variable so the password never lands in a process argument, same reasoning as
@@ -189,6 +192,7 @@ src/common/              response envelope, error envelope, pino logger + correl
                          request-context.ts (the per-request tenant + transaction seam)
 src/infra/               DataSource (pos_app role, synchronize=false), ADMIN_DATA_SOURCE (owner),
                          AUDIT_DATA_SOURCE (pos_app, pool of 2, off the request pool),
+                         HEALTH_DATA_SOURCE (pos_app, pool of 1, /health/ready only — #248),
                          REDIS_CACHE / REDIS_QUEUE
 src/idempotency/         Idempotency-Key: claim, replay, 409 on a changed request (#18)
 src/documents/           document numbers: RC01-2569-08-0042, per device per month (#19)
@@ -374,7 +378,8 @@ its last slice, `tx.5` (#154), moved the void's manager-PIN check ahead of the t
   connection at all. A 403 on a cold cache takes at most two short pool reads (the rate
   limiter's `SELECT plan`, the guard's `SELECT status`), each returned at once, and never a
   `runTx` or a `set_config` (`test/tenant-scope.e2e-spec.ts` counts them exactly).
-  `/health/live` takes no connection and `/health/ready` one (`SELECT 1`).
+  `/health/live` takes no connection and `/health/ready` one (`SELECT 1`) — from
+  `HEALTH_DATA_SOURCE`, never the request pool (#248).
 - **The footgun that is easier to reach for is an injected `DataSource`.** Forgetting `runTx`
   and calling `currentRequestContext()` throws (a loud 500). Querying through a bare
   `DataSource` answers **200 with zero rows**, and an `UPDATE` reports success having changed
@@ -509,6 +514,14 @@ between `now()` and `COMMIT`, since `now()` is wall-clock time and the mark is m
       not write the snapshot's historic `products.updated_at`. A device that pulled before
       the import (cursor T1) sees imported products because their `updated_at` is stamped
       at import time (> T1).
+    - **…and re-stamps them as its last statements before COMMIT** (#185, review of #244).
+      The import is one long transaction: 6.4 s for a 2.0 MiB file (4 months, 2,043 bills,
+      local dev, `test/import-snapshot.e2e-spec.ts`), and nginx allows 10 MiB. A product
+      stamped at the start, or a customer/mechanic defaulting to `now()` (transaction start),
+      could therefore commit more than ADR-0010's 30 s rewind behind its stamp. The final
+      `UPDATE products|customers|mechanics SET updated_at = clock_timestamp()` puts every
+      pulled row's stamp within milliseconds of the commit. `settings` is not re-stamped: it
+      is read whole (ETag), not by cursor.
   - `pos_app` writes that do not go through either door, where the role timeouts still apply:
     - `AuthService`'s login, refresh and enrolment audit writes, on the default pool with their own
       transactions. They write only `audit_log`, which no client pulls.
@@ -1489,12 +1502,27 @@ Redis, mints access tokens from a per-run RSA key pair, and resets one tenant pe
   the whole point of `RuntimeConfigService`'s fail-open design (#66) is that an unreachable
   store degrades logging, not availability, and health/readiness must not say otherwise.
   Nginx fails over only on connection errors, never on the app's own 5xx.
+- 🔴 **Readiness means "Postgres answers", not "the request pool has a free slot" (#248).**
+  The probe's `SELECT 1` runs on `HEALTH_DATA_SOURCE` — `pos_app`, a pool of **one**,
+  `connectionTimeoutMillis` 2000 and `statement_timeout` 2 s, matching the probe's own 2 s.
+  On the request pool, a burst holding every `DB_POOL_SIZE` slot queued the probe past that
+  timeout and a healthy, busy Postgres answered `503 {postgres: down}` — to Prometheus during
+  the 500-VU demo run, and potentially to `deploy.yml`'s readiness gate after a rolling
+  restart under traffic, rolling back a good release. A longer timeout only delays the same
+  false positive; reporting saturation as `busy` would still share the pool. A saturated
+  instance is visible in latency, not here. `test/health-pool.e2e-spec.ts` holds every
+  request-pool connection at pool 2 (before: `503` at 2031 ms; after: `200`) and still gets
+  `503` when the probe cannot connect or its query fails. Never point the probe at
+  `ADMIN_DATA_SOURCE` (it would pass while `pos_app` cannot log in) or back at the request pool.
 - `SIGTERM` drains: Nest closes the listener, in-flight requests finish, then pools close.
   Nginx retries idempotent requests on the next instance (`proxy_next_upstream error timeout`).
 - Every request carries `X-Correlation-ID` (client's, else Nginx `$request_id`) into the JSON
   log line and back out in the response. Request bodies are never logged.
 - `mem_limit` per container totals ≈ 3.3 GB (includes `etcd`'s 256m); `max_connections=100`,
-  pools 3×15 + 5 = 50.
+  steady-state pools 3 api × (15 request + 2 audit + 1 health) + worker (5 + 2 + 1) = 62 ≤ 80
+  (80%). `ADMIN_DATA_SOURCE` (sized `DB_POOL_SIZE`, owner role) is outside that figure: it is
+  touched only by the platform plane and at boot, and its idle connections close after 30 s —
+  a burst of platform calls on all three instances at once is the one way past 80.
 - The app connects as `pos_app` (`NOSUPERUSER NOBYPASSRLS`, not the table owner) so RLS
   cannot be bypassed by accident. Migrations run as `postgres`, once, before the app starts.
 

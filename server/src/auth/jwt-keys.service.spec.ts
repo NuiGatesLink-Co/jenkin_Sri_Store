@@ -33,7 +33,6 @@ describe('JwtSigner & JwtVerifier', () => {
       redisQueueUrl: 'redis://dummy',
       redisCommandTimeoutMs: 200,
       jwtPlatformSecret: 'dummy-platform-secret',
-      jwtTenantSecret: 'dummy-tenant-secret',
       jwtPrivateKey: privateKeyPem,
       jwtPublicKeys: [publicKeyPem],
       jwtKeyId: 'key-1',

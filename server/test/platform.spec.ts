@@ -19,7 +19,6 @@ const mockConfig = {
   redisQueueUrl: 'redis://localhost:6379',
   redisCommandTimeoutMs: 200,
   jwtPlatformSecret: 'test-platform-secret',
-  jwtTenantSecret: 'test-tenant-secret',
 };
 
 describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
@@ -428,6 +427,143 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
       expect(sql).toContain('clock_timestamp()');
       expect(params).not.toContain('2020-01-01T00:00:00.000Z');
       expect(params).not.toContain(new Date('2020-01-01T00:00:00.000Z'));
+    });
+
+    // #185: the file's real store keys. The first version read `sa_purchase_orders`,
+    // `sa_shifts`, `sa_parked_sales` and `{ name }` categories, so a real backup lost every
+    // PO, shift, drawer entry and parked bill and renamed its categories `Cat-<n>`.
+    it('reads the store keys exportSnapshot() writes (#185)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      await importService.importSnapshot(
+        't1',
+        {
+          __meta: { version: 2 },
+          sa_categories: ['เบรก', 'ช่วงล่าง'],
+          sa_products: [
+            { id: 'p1', partNo: 'BP-1', stock: 1, zone: 'Electrical' },
+            { id: 'p2', partNo: 'BP-2', stock: 1, category: 'ยาง' },
+          ],
+          sa_sales: [{ id: 's1', receiptNo: 'RC1', total: 85, items: [{ productId: 'p1', qty: 1, price: 85, cost: 45 }] }],
+          sa_pos: [{ id: 'po1', poNo: 'PO1', supplier: 'x', status: 'received', items: [{ partNo: 'BP-1', name: 'n', qty: 2, cost: 40 }] }],
+          sa_cash_drawer: { date: '2026-08-28', startingCash: 1000, openedAt: '2026-08-28T01:00:00.000Z', closedAt: null, entries: [{ id: 'de1', type: 'out', amount: 50, createdAt: '2026-08-28T02:00:00.000Z' }] },
+          sa_shift_history: [
+            { date: '2026-08-27', startingCash: 1000, openedAt: '2026-08-27T01:00:00.000Z', closedAt: '2026-08-27T11:00:00.000Z', physicalCash: 5000, entries: [] },
+            { date: '2026-08-27', startingCash: 500, openedAt: '2026-08-27T00:00:00.000Z', autoArchived: true, entries: [] },
+          ],
+          sa_parked: [{ id: 'pk1', parkedAt: '2026-08-28T03:00:00.000Z', items: [], discount: 0 }],
+        },
+        'adm1',
+      );
+
+      const inserts = (table: string) =>
+        mockAdminDs.query.mock.calls.filter((c: any) => c[0].includes(`INSERT INTO ${table} `)).map((c: any) => c[1]);
+      expect(inserts('categories').map((p: any) => p[1])).toEqual(['เบรก', 'ช่วงล่าง', 'ไฟฟ้า', 'ยาง']);
+      expect(inserts('products').map((p: any) => p[5])).toEqual(['ไฟฟ้า', 'ยาง']);
+      expect(inserts('sale_items')[0][9]).toBe(45);
+      expect(inserts('purchase_orders')).toHaveLength(1);
+      expect(inserts('po_items')).toHaveLength(1);
+      // [id, auto_archived, archived-now]. No imported shift is active: an active drawer with
+      // no device could never be closed (review of #244). The file's open drawer is archived
+      // the way openShift archives yesterday's.
+      expect(inserts('shifts').map((p: any) => [p[1], p[7], p[8]])).toEqual([
+        ['sh_2026-08-28_1', true, true],
+        ['sh_2026-08-27_1', false, false],
+        ['sh_2026-08-27_2', true, false],
+      ]);
+      const shiftSql = mockAdminDs.query.mock.calls.find((c: any) => c[0].includes('INSERT INTO shifts '))[0];
+      expect(shiftSql).toMatch(/\$7, FALSE,/);
+      // The pulled tables are re-stamped as the last statements before COMMIT.
+      const sqls = mockAdminDs.query.mock.calls.map((c: any) => c[0] as string);
+      const tail = sqls.slice(-3);
+      expect(tail.map((s: string) => s.match(/UPDATE (\w+) SET updated_at = clock_timestamp\(\)/)?.[1])).toEqual(['products', 'customers', 'mechanics']);
+      expect(inserts('drawer_entries').map((p: any) => p[2])).toEqual(['sh_2026-08-28_1']);
+      expect(inserts('parked_sales').map((p: any) => p[1])).toEqual(['pk1']);
+    });
+
+    // #238: history naming hard-deleted rows becomes soft-deleted, marked tombstones.
+    it('writes one soft-deleted, marked tombstone per missing reference and audits the counts (#238)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const res = await importService.importSnapshot(
+        't1',
+        {
+          __meta: { version: 2 },
+          sa_movements: [{ id: 'mv1', productId: 'p-gone', partNo: 'BP-9', name: 'Brake Pad', delta: 1, type: 'adjustment-in', stockAfter: 1 }],
+          sa_sales: [{ id: 's1', receiptNo: 'RC1', total: 0, customerId: 'c-gone', customerName: 'Test Customer', mechanicId: 'm-gone', mechanicName: 'Test Mechanic', items: [] }],
+        },
+        'adm1',
+      );
+
+      expect(res.tombstones).toEqual({ products: 1, customers: 1, mechanics: 1 });
+      expect(res.droppedSuppliers).toBe(0);
+      const insert = (table: string) =>
+        mockAdminDs.query.mock.calls.filter((c: any) => c[0].includes(`INSERT INTO ${table} `));
+      const [productSql, productParams] = insert('products')[0];
+      expect(productSql).toContain('deleted_at');
+      expect(productSql).not.toContain('ON CONFLICT');
+      expect(productParams).toEqual(expect.arrayContaining(['p-gone', 'BP-9', 'Brake Pad', 'import-tombstone']));
+      expect(insert('customers')[0][1]).toEqual(['t1', 'c-gone', 'import-tombstone:c-gone', 'Test Customer']);
+      expect(insert('mechanics')[0][1]).toEqual(['t1', 'm-gone', 'import-tombstone:m-gone', 'Test Mechanic']);
+      const audit = mockAdminDs.query.mock.calls.find((c: any) => c[0].includes('INSERT INTO audit_log'));
+      expect(audit[1]).toContain(JSON.stringify({ tombstones: { products: 1, customers: 1, mechanics: 1 }, droppedSuppliers: 0 }));
+    });
+
+    it('refuses in pre-flight a reference no tombstone can be named for, listing the ids (#238)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      await expect(
+        importService.importSnapshot(
+          't1',
+          { __meta: { version: 2 }, sa_credit_payments: [{ id: 'cp1', receiptNo: 'CP1', mechanicId: 'm-nameless', amount: 100 }] },
+          'adm1',
+        ),
+      ).rejects.toThrow('mechanics:m-nameless');
+      expect(mockAdminDs.transaction).not.toHaveBeenCalled();
+    });
+
+    // #252 review: a row missing its own required reference id entirely is refused in
+    // pre-flight, listing the row id — never `String(undefined)` reaching an INSERT.
+    it('refuses in pre-flight a row with no required reference id at all', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      await expect(
+        importService.importSnapshot(
+          't1',
+          { __meta: { version: 2 }, sa_movements: [{ id: 'mv-bad', name: 'x', delta: 1, type: 'adjustment-in', stockAfter: 1 }] },
+          'adm1',
+        ),
+      ).rejects.toThrow('movements:mv-bad');
+      expect(mockAdminDs.transaction).not.toHaveBeenCalled();
+    });
+
+    // #252 (owner, 2026-09-15): a supplier row for a product that is gone and unreferenced
+    // elsewhere is dropped rather than forcing the whole import through the 400 refusal.
+    it('drops an orphaned supplier row instead of refusing the import, and counts it', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const res = await importService.importSnapshot(
+        't1',
+        {
+          __meta: { version: 2 },
+          sa_products: [{ id: 'p-live', partNo: 'BP-1', stock: 1 }],
+          sa_suppliers: [{ id: 'sp-orphan', productId: 'p-orphan', name: 'Test Supplier', unitCost: 10 }],
+        },
+        'adm1',
+      );
+
+      expect(res.droppedSuppliers).toBe(1);
+      expect(res.tombstones).toEqual({ products: 0, customers: 0, mechanics: 0 });
+      const insert = (table: string) =>
+        mockAdminDs.query.mock.calls.filter((c: any) => c[0].includes(`INSERT INTO ${table} `));
+      expect(insert('suppliers')).toHaveLength(0);
+      const audit = mockAdminDs.query.mock.calls.find((c: any) => c[0].includes('INSERT INTO audit_log'));
+      expect(audit[1]).toContain(JSON.stringify({ tombstones: { products: 0, customers: 0, mechanics: 0 }, droppedSuppliers: 1 }));
     });
 
     it('rolls back and does not invalidate cache if audit log fails during import', async () => {

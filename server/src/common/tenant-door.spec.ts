@@ -109,11 +109,11 @@ const ALLOWED: Record<string, string> = {
   'common/guards/tenant.guard.ts':
     'ADR-0003: reads tenants.status (a GLOBAL_TABLE, no RLS) on a cache miss with a plain pool query before it names the tenant — the request holds no other connection yet (tx.4 #153), so this is never a second one. It never sets app.tenant_id.',
   'infra/db.module.ts':
-    'Builds and destroys the three pools (default pos_app, ADMIN_DATA_SOURCE, AUDIT_DATA_SOURCE).',
+    'Builds and destroys the four pools (default pos_app, ADMIN_DATA_SOURCE, AUDIT_DATA_SOURCE, HEALTH_DATA_SOURCE).',
   'db/data-source.ts':
     'The migration DataSource (#15): connects as the table owner, runs outside the app and any request.',
   'health/health.controller.ts':
-    '/health/ready probes Postgres with SELECT 1: no tenant, no table, deliberately outside any transaction.',
+    '/health/ready probes Postgres with SELECT 1 on HEALTH_DATA_SOURCE only (pos_app, pool of 1, #248): no tenant, no table, deliberately outside any transaction, and never the request pool, whose saturation would read as a dead database.',
   'auth/auth.service.ts':
     'ADR-0009: a failed login must leave its audit_log row, which a rolled-back request transaction would erase, and /auth/token must not hold an idle transaction across its argon2 verify; so /auth/token and /auth/refresh carry no TenantGuard and set app.tenant_id on their own runners.',
   'sales/void.service.ts':
