@@ -1,5 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { currentRequestContext } from '../common/request-context.js';
+import {
+  authorisedTenantId,
+  currentRequestContext,
+} from '../common/request-context.js';
 import { TenantService } from '../common/database/tenant.service.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import type { Customer } from '../customers/customers.service.js';
@@ -112,16 +115,12 @@ export class SettingsService {
    * `getSettings()` stays a plain read: `updateSettings()` reads it inside
    * its write transaction, and `/bootstrap` hashes a fresh body for its ETag,
    * neither of which may touch the cache.
+   *
+   * No transaction until a miss (#173): a hit holds no pooled connection.
+   * `getSettings()` opens its own `runTx`.
    */
-  getSettingsCached(): Promise<{ settings: Settings; fromCache: boolean }> {
-    return this.tenants.runTx(() => this.getSettingsCachedIn());
-  }
-
-  private async getSettingsCachedIn(): Promise<{
-    settings: Settings;
-    fromCache: boolean;
-  }> {
-    const { tenantId } = currentRequestContext();
+  async getSettingsCached(): Promise<{ settings: Settings; fromCache: boolean }> {
+    const tenantId = authorisedTenantId();
     const prefix = await this.cache.prefix(tenantId, 'settings');
     const key = prefix === null ? null : `${prefix}row`;
     if (key !== null) {

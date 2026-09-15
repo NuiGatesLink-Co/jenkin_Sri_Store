@@ -1,5 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import { currentRequestContext } from '../common/request-context.js';
+import {
+  authorisedTenantId,
+  currentRequestContext,
+} from '../common/request-context.js';
 import { TenantService } from '../common/database/tenant.service.js';
 import { SEED_CATEGORIES } from '../db/seed.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
@@ -52,16 +55,12 @@ export class CategoriesService {
    * `GET /categories` through `t:{tid}:categories:g:{token}:list` (§5, 3600 s). `list()`
    * stays a plain read: `create()` calls it inside its write transaction and
    * `/bootstrap` hashes a fresh body, and neither may touch the cache.
+   *
+   * No transaction until a miss (#173): a hit holds no pooled connection. `list()` opens
+   * its own `runTx`.
    */
-  listCached(): Promise<{ categories: Category[]; fromCache: boolean }> {
-    return this.tenants.runTx(() => this.listCachedIn());
-  }
-
-  private async listCachedIn(): Promise<{
-    categories: Category[];
-    fromCache: boolean;
-  }> {
-    const { tenantId } = currentRequestContext();
+  async listCached(): Promise<{ categories: Category[]; fromCache: boolean }> {
+    const tenantId = authorisedTenantId();
     const prefix = await this.cache.prefix(tenantId, 'categories');
     const key = prefix === null ? null : `${prefix}list`;
     if (key !== null) {

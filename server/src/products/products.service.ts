@@ -7,7 +7,10 @@ import {
 import { AuditService } from '../audit/audit.service.js';
 import { newId } from '../common/ids.js';
 import { fromSatang, satangOf } from '../common/money.js';
-import { currentRequestContext } from '../common/request-context.js';
+import {
+  authorisedTenantId,
+  currentRequestContext,
+} from '../common/request-context.js';
 import { TenantService } from '../common/database/tenant.service.js';
 import { returning } from '../common/sql.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
@@ -125,22 +128,18 @@ export class ProductsService {
     );
   }
 
-  list(query: ListQuery): Promise<{
+  /**
+   * Cache first, and no transaction until Postgres is actually needed (#173): a hit, or a
+   * `singleFlight` waiter, holds no pooled connection. The tenant comes from
+   * `authorisedTenantId()` — what `TenantGuard` already put in scope, never an argument.
+   */
+  async list(query: ListQuery): Promise<{
     items: Product[];
     total: number;
     nextCursor?: SyncCursor | null;
     fromCache: boolean;
   }> {
-    return this.tenants.runTx(() => this.listIn(query));
-  }
-
-  private async listIn(query: ListQuery): Promise<{
-    items: Product[];
-    total: number;
-    nextCursor?: SyncCursor | null;
-    fromCache: boolean;
-  }> {
-    const { tenantId, manager } = currentRequestContext();
+    const tenantId = authorisedTenantId();
     // Before the query, always — see `TenantCache.prefix`.
     const prefix = await this.cache.prefix(tenantId, 'products');
     const key = prefix === null ? null : this.cacheKey(prefix, query);
@@ -158,108 +157,109 @@ export class ProductsService {
     }
 
     // `finally`: a loader that throws must free its lock at once, or every concurrent miss
-    // waits out `LOCK_WAIT_MS` holding its pooled connection for a query that failed.
+    // waits out `LOCK_WAIT_MS` for a query that failed.
     try {
-      const params: unknown[] = [tenantId];
-      // `updatedSince` is the sync read (01_DATABASE.md §10): it must see tombstones,
-      // or a product deleted on one device lives forever in every other device's cache.
-      const where = [
-        'tenant_id = $1::uuid',
-        query.updatedSince ? 'TRUE' : 'deleted_at IS NULL',
-      ];
-
-      if (query.search) {
-        params.push(`%${escapeLike(query.search)}%`);
-        const p = `$${params.length}`;
-        // The first test is the trigram index's own expression, so Postgres can answer
-        // it from `idx_products_search` — Thai substring, "เบรก" inside "ผ้าเบรกหน้า".
-        // The second keeps today's matching exact: the screens search name, nameTH and
-        // partNo only (`products_screen.dart`), and the indexed expression also holds
-        // `compat` and the spaces joining the fields.
-        where.push(
-          `${SEARCH_EXPRESSION} LIKE lower(${p}) ESCAPE '\\'`,
-          `(part_no ILIKE ${p} ESCAPE '\\' OR name ILIKE ${p} ESCAPE '\\' OR name_th ILIKE ${p} ESCAPE '\\')`,
-        );
-      }
-
-      if (query.partNo) {
-        // A barcode scan: one product, never a ranked list (02_API_SCREENS.md §3.1).
-        // Compared the way uniqueness is enforced (`uq_products_partno_ci`), so a scan
-        // cannot miss the one live product whose number differs only in case.
-        params.push(query.partNo.trim());
-        where.push(`lower(part_no) = lower($${params.length})`);
-      }
-
-      if (query.category) {
-        params.push(query.category);
-        where.push(`category = $${params.length}`);
-      }
-
-      if (query.updatedSince && query.afterId) {
-        // Keyset on (updated_at, id): many rows share one `updated_at` (a sale stamps
-        // every line with the transaction's `now()`, an import stamps a whole catalogue),
-        // so `updated_at > $ts` alone skips the rest of a tie that a page boundary cut.
-        params.push(query.updatedSince, query.afterId);
-        where.push(
-          `(updated_at, id) > ($${params.length - 1}::timestamptz, $${params.length})`,
-        );
-      } else if (query.updatedSince) {
-        params.push(query.updatedSince);
-        where.push(`updated_at > $${params.length}::timestamptz`);
-      }
-
-      // A sync reader walks forward in (updated_at, id) order and follows `nextCursor`.
-      const order = query.updatedSince ? 'updated_at ASC, id ASC' : 'id ASC';
-
-      const clause = where.join(' AND ');
-      const totals = (await manager.query(
-        `SELECT count(*)::int AS n FROM products WHERE ${clause}`,
-        params,
-      )) as { n: number }[];
-
-      params.push(query.limit, (query.page - 1) * query.limit);
-      const rows = (await manager.query(
-        `SELECT ${COLUMNS}, ${CURSOR_TIMESTAMP} AS updated_at_cursor FROM products
-          WHERE ${clause}
-          ORDER BY ${order}
-          LIMIT $${params.length - 1} OFFSET $${params.length}`,
-        params,
-      )) as (ProductRow & { updated_at_cursor: string })[];
-
-      const items = rows.map(toProduct);
-      const total = totals[0]?.n ?? 0;
-      // The cursor is the last row's key at full precision. `updatedAt` on the wire is a
-      // JS `toISOString()` — milliseconds — and a truncated cursor sits *below* every row
-      // in its millisecond, so a tie larger than a page would be served again forever.
-      const last = rows[rows.length - 1];
-      const nextCursor = query.updatedSince
-        ? last
-          ? { updatedSince: last.updated_at_cursor, afterId: last.id }
-          : null
-        : undefined;
-
+      const loaded = await this.listUncached(query);
       if (key !== null) {
-        await this.cache.set(
-          key,
-          { items, total, nextCursor } satisfies CachedList,
-          'products',
-        );
+        await this.cache.set(key, loaded satisfies CachedList, 'products');
       }
-
-      return { items, total, nextCursor, fromCache: false };
+      return { ...loaded, fromCache: false };
     } finally {
       await release();
     }
   }
 
-  byId(id: string): Promise<{ product: Product; fromCache: boolean }> {
-    return this.tenants.runTx(() => this.byIdIn(id));
+  /** The Postgres read behind `list`, in one transaction (count and page share a snapshot). */
+  listUncached(query: ListQuery): Promise<CachedList> {
+    return this.tenants.runTx(() => this.listUncachedIn(query));
   }
 
-  private async byIdIn(
-    id: string,
-  ): Promise<{ product: Product; fromCache: boolean }> {
+  private async listUncachedIn(query: ListQuery): Promise<CachedList> {
     const { tenantId, manager } = currentRequestContext();
+    const params: unknown[] = [tenantId];
+    // `updatedSince` is the sync read (01_DATABASE.md §10): it must see tombstones,
+    // or a product deleted on one device lives forever in every other device's cache.
+    const where = [
+      'tenant_id = $1::uuid',
+      query.updatedSince ? 'TRUE' : 'deleted_at IS NULL',
+    ];
+
+    if (query.search) {
+      params.push(`%${escapeLike(query.search)}%`);
+      const p = `$${params.length}`;
+      // The first test is the trigram index's own expression, so Postgres can answer
+      // it from `idx_products_search` — Thai substring, "เบรก" inside "ผ้าเบรกหน้า".
+      // The second keeps today's matching exact: the screens search name, nameTH and
+      // partNo only (`products_screen.dart`), and the indexed expression also holds
+      // `compat` and the spaces joining the fields.
+      where.push(
+        `${SEARCH_EXPRESSION} LIKE lower(${p}) ESCAPE '\\'`,
+        `(part_no ILIKE ${p} ESCAPE '\\' OR name ILIKE ${p} ESCAPE '\\' OR name_th ILIKE ${p} ESCAPE '\\')`,
+      );
+    }
+
+    if (query.partNo) {
+      // A barcode scan: one product, never a ranked list (02_API_SCREENS.md §3.1).
+      // Compared the way uniqueness is enforced (`uq_products_partno_ci`), so a scan
+      // cannot miss the one live product whose number differs only in case.
+      params.push(query.partNo.trim());
+      where.push(`lower(part_no) = lower($${params.length})`);
+    }
+
+    if (query.category) {
+      params.push(query.category);
+      where.push(`category = $${params.length}`);
+    }
+
+    if (query.updatedSince && query.afterId) {
+      // Keyset on (updated_at, id): many rows share one `updated_at` (a sale stamps
+      // every line with the transaction's `now()`, an import stamps a whole catalogue),
+      // so `updated_at > $ts` alone skips the rest of a tie that a page boundary cut.
+      params.push(query.updatedSince, query.afterId);
+      where.push(
+        `(updated_at, id) > ($${params.length - 1}::timestamptz, $${params.length})`,
+      );
+    } else if (query.updatedSince) {
+      params.push(query.updatedSince);
+      where.push(`updated_at > $${params.length}::timestamptz`);
+    }
+
+    // A sync reader walks forward in (updated_at, id) order and follows `nextCursor`.
+    const order = query.updatedSince ? 'updated_at ASC, id ASC' : 'id ASC';
+
+    const clause = where.join(' AND ');
+    const totals = (await manager.query(
+      `SELECT count(*)::int AS n FROM products WHERE ${clause}`,
+      params,
+    )) as { n: number }[];
+
+    params.push(query.limit, (query.page - 1) * query.limit);
+    const rows = (await manager.query(
+      `SELECT ${COLUMNS}, ${CURSOR_TIMESTAMP} AS updated_at_cursor FROM products
+        WHERE ${clause}
+        ORDER BY ${order}
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params,
+    )) as (ProductRow & { updated_at_cursor: string })[];
+
+    const items = rows.map(toProduct);
+    const total = totals[0]?.n ?? 0;
+    // The cursor is the last row's key at full precision. `updatedAt` on the wire is a
+    // JS `toISOString()` — milliseconds — and a truncated cursor sits *below* every row
+    // in its millisecond, so a tie larger than a page would be served again forever.
+    const last = rows[rows.length - 1];
+    const nextCursor = query.updatedSince
+      ? last
+        ? { updatedSince: last.updated_at_cursor, afterId: last.id }
+        : null
+      : undefined;
+
+    return { items, total, nextCursor };
+  }
+
+  /** Cache first, like `list` (#173): a hit opens no transaction. */
+  async byId(id: string): Promise<{ product: Product; fromCache: boolean }> {
+    const tenantId = authorisedTenantId();
     const prefix = await this.cache.prefix(tenantId, 'products');
     const key = prefix === null ? null : `${prefix}item:${id}`;
 
@@ -268,6 +268,17 @@ export class ProductsService {
       if (cached) return { product: cached, fromCache: true };
     }
 
+    const product = await this.byIdUncached(id);
+    if (key !== null) await this.cache.set(key, product, 'products');
+    return { product, fromCache: false };
+  }
+
+  byIdUncached(id: string): Promise<Product> {
+    return this.tenants.runTx(() => this.byIdUncachedIn(id));
+  }
+
+  private async byIdUncachedIn(id: string): Promise<Product> {
+    const { tenantId, manager } = currentRequestContext();
     const rows = (await manager.query(
       `SELECT ${COLUMNS} FROM products
         WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL`,
@@ -276,16 +287,7 @@ export class ProductsService {
 
     if (!rows || rows.length === 0) throw productNotFound();
 
-    const product = toProduct(rows[0]);
-    if (key !== null) {
-      await this.cache.set(
-        key,
-        product,
-        'products',
-      );
-    }
-
-    return { product, fromCache: false };
+    return toProduct(rows[0]);
   }
 
   /** `db.js addProduct`: a fresh `p` id, and no second live product with this part number. */
@@ -476,7 +478,6 @@ export class ProductsService {
     this.cache.invalidateAfterCommit(tenantId, 'products');
     return { stockAfter, product, movement: movementOut(movement[0]) };
   }
-
 }
 
 /**
