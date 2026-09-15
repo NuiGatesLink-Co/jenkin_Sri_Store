@@ -470,6 +470,46 @@ survive a rollback (and `/auth/token` must not hold a transaction across its arg
    rejection is an unhandled rejection, which Node answers by killing the worker.
    `TenantScopeMiddleware` does no I/O at all; keep it that way.
 
+### The transaction ceiling (#213)
+
+🔴 **ADR-0010's phase-2 pull rewinds its `?updatedSince=` cursor by 30 s (#191), and that is
+safe only while no write commits more than 30 s after it stamped `updated_at = now()`** (the
+transaction's *start*). A later commit lands behind a cursor that already moved past it, and the
+row is never pulled. This ceiling is what keeps the rewind honest; raise one only with the other.
+
+Migration `1788652802130` sets, on `pos_app` in the application database:
+
+| setting | value | bounds | when it fires |
+|---|---|---|---|
+| `statement_timeout` | `5s` | one statement, lock waits included | `57014`; the transaction rolls back, the connection is reused |
+| `idle_in_transaction_session_timeout` | `5s` | the app stalling between statements with a transaction open | Postgres ends the session; pg-pool drops the client |
+
+- **Every `pos_app` connection gets it at session start** — the request pool, `AUDIT_DATA_SOURCE`,
+  the BullMQ worker, a `psql` session — not per query. The owner (`postgres`: the compose `migrate`
+  job, `ADMIN_DATA_SOURCE`, platform provisioning and import) is **not capped**, so long migrations
+  and imports are unaffected.
+- **The value:** one capped statement plus one capped stall is ≤ 10 s, leaving 20 s of the 30 s
+  rewind for commit latency. The longest transaction measured is ~14–22 ms
+  (`test/tx-hold-measure.e2e-spec.ts`), so 5 s is ~250× headroom. It also ends a lock-stuck
+  request well inside nginx's `proxy_read_timeout 30s` and the client's 40 s write timeout, so
+  the counter gets a 500 — fate unknown, resend the same key; the claim rolled back — not a 504.
+- **The one exemption:** the tenant export job (`backup.processor.ts`) reads a tenant's whole
+  history unpaged, so it `SET LOCAL`s both settings to `5min`. That is safe for the rewind only
+  because it writes no pulled row (its one write is `audit_log`). A new exemption needs the same
+  argument.
+- 🔴 **Residual gap — Postgres 16 cannot bound a whole transaction.** `transaction_timeout` is
+  Postgres 17+. A transaction of *k* statements is bounded by *k* × (5 s + 5 s), not by 10 s: a
+  bill whose several lock-taking statements each wait close to the cap could in principle commit
+  past 30 s. Each such wait needs another transaction holding that lock for nearly 5 s, which the
+  same ceiling makes pathological, not routine. Closing it outright means Postgres 17
+  (`transaction_timeout = 25s` on the role) or a commit-time check of
+  `clock_timestamp() - now()` on the rows the pull reads.
+- `test/tx-ceiling.e2e-spec.ts` pins it at `DB_POOL_SIZE=2`: a bill parked on an owner-held row
+  lock answers 500 after ~5 s, writes nothing, and its resend with the same key is a 201; two bills
+  stalled mid-transaction are both ended, pg-pool drops exactly those two clients, and the next
+  burst is all 2xx in ~70 ms. Without the migration all three cases fail (the lock case hangs until
+  its 15 s client timeout).
+
 ## Document numbers (#19)
 
 `RC01-2569-08-0042` — type, two-digit `device_no`, Buddhist year-month, four-digit running

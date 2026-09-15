@@ -82,6 +82,14 @@ export class BackupProcessor extends WorkerHost {
     return this.tenantJobRunner.runWithTenantContext(job, async (em: EntityManager) => {
       const tenantId = data.tenantId;
 
+      // The one `pos_app` transaction whose statements scale with a tenant's whole history
+      // (every sale, every movement, unpaged), so it is exempt from the role's 5 s ceiling
+      // (#213). Safe for ADR-0010's 30 s cursor rewind: it writes no row a client pulls — its
+      // only write is `audit_log`. `SET LOCAL` ends with this transaction, so the pooled
+      // connection goes back with the role's ceiling.
+      await em.query(`SET LOCAL statement_timeout = '5min'`);
+      await em.query(`SET LOCAL idle_in_transaction_session_timeout = '5min'`);
+
       // 1. Settings
       const settingsRows: Array<Record<string, any>> = await em.query(
         `SELECT shop_name, shop_name_en, tax_rate, quote_valid_days, address, phone, cashier_name, tax_id, branch_no, updated_at
