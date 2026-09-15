@@ -156,7 +156,7 @@ Total Sales / Unique Receipts:    50 / 50
 | 1 read, 1,000 VUs | tunnel | 6,011 (163/s) | 0% | cache hit 99.98% | 11.6 s |
 | 1 read, 1,000 VUs | on-VM | 14,023 (398/s) | 0% | cache hit 99.99% | 839 ms, max 26.4 s |
 | 3 idempotent replay, 100 VUs × 5 | on-VM | 500 | 0% | 100 created, 400 replays matched, 0 5xx | 1.32 s (500 ms) |
-| 4 mixed 80/20, 500 VUs, 30 s | on-VM | 5,976 (4,763 read / 1,213 write) | 0% | 0 pool exhaustion | 3.23 s (500 ms) |
+| 4 mixed 80/20, 500 VUs, 30 s | on-VM | 5,976 (4,763 read / 1,213 write) | 0% | 0 pool exhaustion **over 30 s only** — `02 §9` row 4 specifies **10 minutes**, so this is not a spec-length run (the script's default; `-e DURATION=10m` was not used) | 3.23 s (500 ms) |
 
 After scenario 4, a whole-catalogue check ran as `postgres` over the tunnel. All 51 products had
 `stock == seeded − sold (non-voided)` and `Σ movements == −sold`, with none negative. There were
@@ -165,18 +165,18 @@ restarted or was OOM-killed.
 
 For comparison, #37 on a dev machine hit api directly without nginx: p95 of 123 / 349 / 303 / 15 ms.
 
-## 5. 🔴 Findings
+## 5. Findings
 
-1. **etcd auth is not enabled on the VM** (the PR #237 review's pre-existing bug, confirmed read-only).
+1. 🔴 **etcd auth is not enabled on the VM** (the PR #237 review's pre-existing bug, confirmed read-only).
    `/opt/pos/docker/etcd/etcd-init.sh` is a **root-owned directory** created at 10:24 by Docker's
    bind mount, because `deploy.yml` never copies the script. The `etcd-init` container "exits 0" with
    **no output**, since `sh` handed a directory does nothing and succeeds. `etcdctl auth status` answers
    `Authentication Status: false`. `up -d` stays green. The fix (copy task + stray-directory removal)
-   is in PR #237. It was not touched here.
+   is handled by a separate PR on branch `fix/etcd-init-deploy`. The VM was not touched here.
 2. **Nginx's per-IP limit makes a single-machine k6 run through nginx meaningless** (§4.1). The same
    limit also means any shop behind one NAT IP shares 30 r/s. That is fine for one counter, but worth
    knowing before a multi-till tenant.
-3. **`/health/ready` reported `postgres: down` (503) under load.** During the 500-VU on-VM mixed run,
+3. 🔴 **`/health/ready` reported `postgres: down` (503) under load.** During the 500-VU on-VM mixed run,
    a Prometheus scrape of `api-1` got `NOT_READY {"postgres":"down"}`. The readiness `SELECT 1` shares
    the request pool (`DB_POOL_SIZE` 15) and has a 2 s probe timeout, so a saturated pool reads as a
    dead database. Nginx does not use readiness, so no counter traffic was affected. But
@@ -186,8 +186,8 @@ For comparison, #37 on a dev machine hit api directly without nginx: p95 of 123 
    `0 (across 0 bills)` and "ALL INTEGRITY CHECKS PASSED". It never asserts `sold == initialStock` or a
    bill count, so it cannot tell "the contention run never reached the server" from a good run. Pair it
    with the k6 counters, or add an expected-bills assertion.
-5. **A rollback reverts images, not configuration** (§3.4). #67 should deploy from a checkout of
-   `image_tag`.
+5. 🔴 **A rollback reverts images, not configuration** (§3.4). PR #237 (#67) addresses this: its
+   wrapper deploys from its own clone checked out at `image_tag`, so config follows the tag.
 6. **Probable, not tested: nginx keeps an old `nginx.conf` after a deploy that changes it.**
    `nginx.conf` is a single-file bind mount, Ansible `copy` replaces the file by rename (new inode), and
    `up -d --no-deps nginx` does not recreate the container when the compose config is unchanged. Nginx
@@ -203,7 +203,7 @@ For comparison, #37 on a dev machine hit api directly without nginx: p95 of 123 
       with several source IPs, or (c) accept correctness-only evidence on the VM plus #37's dev-machine
       latency. Then tick or re-scope `03 §8` "k6 ผ่านเกณฑ์".
 - [ ] Close #184 if §1 is enough. Latency is the only AC not met cleanly.
-- [ ] After PR #237 merges and deploys: confirm `etcdctl auth status` shows `true`, and remove the
+- [ ] After the `fix/etcd-init-deploy` PR merges and deploys: confirm `etcdctl auth status` shows `true`, and remove the
       root-owned `docker/etcd/etcd-init.sh` directory if the PR does not.
 - [ ] Decide whether readiness should get its own connection or a longer timeout (finding 3).
 - [ ] Still carried from `session-2026-09-15-phase1-closeout.md` §6: the `demo` GitHub Environment and
