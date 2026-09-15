@@ -8,13 +8,16 @@ import {
   QUEUE_INVENTORY,
   QUEUE_MAINTENANCE,
   QUEUE_SALE_POST,
+  QUEUE_TENANT_IMPORT,
 } from './queue.constants.js';
 import { TenantJobRunner } from './tenant-job-runner.js';
 import { SalePostProcessor } from './processors/sale-post.processor.js';
 import { InventoryProcessor } from './processors/inventory.processor.js';
 import { MaintenanceProcessor } from './processors/maintenance.processor.js';
 import { BackupProcessor } from './processors/backup.processor.js';
+import { TenantImportProcessor } from './processors/tenant-import.processor.js';
 import { AuditModule } from '../audit/audit.module.js';
+import { TenantImportModule } from '../platform/tenant-import.module.js';
 import { JobSchedulerService } from './job-scheduler.service.js';
 
 @Global()
@@ -43,6 +46,7 @@ import { JobSchedulerService } from './job-scheduler.service.js';
       { name: QUEUE_INVENTORY },
       { name: QUEUE_MAINTENANCE },
       { name: QUEUE_BACKUP },
+      { name: QUEUE_TENANT_IMPORT },
       { name: QUEUE_DLQ },
     ),
   ],
@@ -52,18 +56,20 @@ import { JobSchedulerService } from './job-scheduler.service.js';
 export class QueueModule {}
 
 @Module({
-  imports: [QueueModule, AuditModule],
+  imports: [QueueModule, AuditModule, TenantImportModule],
   providers: [
     SalePostProcessor,
     InventoryProcessor,
     MaintenanceProcessor,
     BackupProcessor,
+    TenantImportProcessor,
   ],
   exports: [
     SalePostProcessor,
     InventoryProcessor,
     MaintenanceProcessor,
     BackupProcessor,
+    TenantImportProcessor,
   ],
 })
 export class QueueProcessorsModule {}
