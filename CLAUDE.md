@@ -725,9 +725,13 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   device (`USE_API_WRITES` only); a failure never blocks sign-in. 🔴 A seeded marker proves only that a seed happened
   at `seededAt`, **not** that the counter is current — in phase 1 the server keeps issuing after the seed and the
   client does not advance from write responses; #189 must re-seed or compare before trusting it (hazards on #189).
-- **Merged 2026-09-15:** #199 → PR #209 (Thai connection sentence at the counter) and #200 → PR #208
-  (`AbortableRequest` cancels a timed-out request) — both merged by another session **without review**; a post-merge
-  review of the two together is in progress. Don't build on `api_client.dart` / `ServerErrorResolver` until it reports.
+- **Merged 2026-09-15:** #199 → PR #209 (Thai connection sentence at the counter via `resolveCounterError`) and
+  #200 → PR #208 (`AbortableRequest` cancels a timed-out request). Merged by another session without review; the
+  post-merge review found no regression (#183 invariants hold, abort proven on a live socket, verdicts keep their
+  Thai text). Follow-ups #219 (`http ^1.5.0`, 200 ms timers, test fixtures), #221 (the credit-payment re-ask only
+  handles the server's `CREDIT_PAYMENT_EXCEEDS_BALANCE`, not the local `OVERPAYMENT_NOT_ALLOWED`). 🔴 After a
+  timeout Checkout still says "ขายไม่สำเร็จ" although the bill may have committed — editing the cart then mints a new
+  id + key and can ring a second bill; the wording is the owner's call (#220).
 - **Decided 2026-09-15 (owner):** #187 + #191 → PR #214 (supersedes PR #206, corrects PR #210). Offline PIN for
   `cashier` only, device-bound, valid 3 days since the last online login on that device, Degraded mode only, re-checked
   on `/sync/push`. Reconnect = push outbox then pull; products with pending ops are not overwritten until pushed;
@@ -747,7 +751,9 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   `TenantJobRunner` also stopped losing the DLQ after a failed rollback or a failed `BEGIN`.
   Follow-up #217: tenant import stamps historic `updated_at`, so already-synced devices never pull imported rows.
 - **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
-  (owner runs 07 §4, #186); #217. Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196. The repo's only long-lived
+  (owner runs 07 §4, #186); #217; #219–#221. Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196;
+  the owner decided 2026-09-15 to clear all of it before starting phase 2 — read
+  `docs/handoff_log/lane-a-closeout-round-2026-09-15.md` for the ordered next steps. The repo's only long-lived
   branches are `main` and `POC_sample_offline_first`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
