@@ -59,14 +59,18 @@
       ansible.builtin.set_fact:
         current_sha: "{{ (current_sha_file.content | b64decode | trim) if (current_sha_file is succeeded and current_sha_file.content is defined) else '' }}"
 
+    # `-e force_redeploy=true` redeploys the SHA .current_sha already names (#67): the automatic
+    # rollback needs it, because .current_sha is written only after readiness passes and so still
+    # names the previous release after a failed deploy. Never delete .current_sha to force instead:
+    # if that redeploy fails too, the VM has lost its only record of what it runs.
     - name: Notify if release is already deployed
       ansible.builtin.debug:
         msg: "Release '{{ image_tag }}' is already active on {{ inventory_hostname }}. Skipping duplicate deployment."
-      when: current_sha == image_tag
+      when: current_sha == image_tag and not (force_redeploy | default(false) | bool)
 
     - name: Early exit on duplicate release deployment
       ansible.builtin.meta: end_play
-      when: current_sha == image_tag
+      when: current_sha == image_tag and not (force_redeploy | default(false) | bool)
 
     # docker-compose.yml's network gained ip_range (#148). Compose cannot change the IPAM of a network
     # that has containers attached: measured with compose v5.0.2, `run --rm` swaps the network under
