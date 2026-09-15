@@ -17,13 +17,19 @@ import {
  *
  * `Queue.upsertJobScheduler(id, …)` is keyed by `id`: calling it again (a restart, or a future
  * second worker replica) updates the same schedule rather than adding a duplicate one, which is
- * what makes this safe to run from `onApplicationBootstrap` with no extra bookkeeping.
+ * what makes this safe to run from `onApplicationBootstrap` with no extra bookkeeping. Against
+ * real Redis/BullMQ 6.3.4, `every` with no prior run schedules the first job immediately (not
+ * epoch-aligned an hour out) — the recurring cadence is what the review confirmed at an hour
+ * apart from there.
  *
- * Registered only in the worker (`QueueProcessorsModule`, `WorkerModule`), not the API
- * (`AppModule` imports `QueueModule` — it enqueues jobs — but never `QueueProcessorsModule`,
- * which owns the processors and now this scheduler). `docker-compose.yml` runs one worker
- * replica against three API replicas, so this also means the registration itself runs once per
- * deploy, not three times; `upsertJobScheduler`'s idempotency is the belt to that suspenders.
+ * Lives in its own `QueueSchedulerModule`, imported only by `WorkerModule` — **not**
+ * `QueueProcessorsModule`. Several e2e suites mount `QueueProcessorsModule` to exercise one
+ * processor directly (`test/backup.e2e-spec.ts`, `test/worker-jobs.e2e-spec.ts`) and must not
+ * also register (and fan out) the global schedule just by booting. `docker-compose.yml` runs one
+ * worker replica against three API replicas (`AppModule` imports `QueueModule` to enqueue jobs,
+ * never `QueueProcessorsModule` or this module), so the registration itself also runs once per
+ * deploy, not three times; `upsertJobScheduler`'s id-based idempotency is the belt to that
+ * suspenders.
  */
 @Injectable()
 export class JobSchedulerService implements OnApplicationBootstrap {
@@ -33,10 +39,14 @@ export class JobSchedulerService implements OnApplicationBootstrap {
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
+    // No `data` in the template: `MaintenanceProcessor.handleIdemCleanup` already falls back to
+    // `idem-cleanup-${job.id}` for `correlationId` and the default TTL for `olderThanSeconds`
+    // when a job carries neither, so a static correlationId here would just make every hourly
+    // run log the same one.
     await this.maintenanceQueue.upsertJobScheduler(
       IDEM_CLEANUP_SCHEDULER_ID,
       { every: IDEM_CLEANUP_INTERVAL_MS },
-      { name: JOB_IDEM_CLEANUP, data: { correlationId: 'idem-cleanup-scheduler' } },
+      { name: JOB_IDEM_CLEANUP },
     );
     this.logger.info(
       { schedulerId: IDEM_CLEANUP_SCHEDULER_ID, everyMs: IDEM_CLEANUP_INTERVAL_MS },

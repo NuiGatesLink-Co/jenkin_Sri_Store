@@ -58,14 +58,26 @@ export class QueueModule {}
     InventoryProcessor,
     MaintenanceProcessor,
     BackupProcessor,
-    JobSchedulerService,
   ],
   exports: [
     SalePostProcessor,
     InventoryProcessor,
     MaintenanceProcessor,
     BackupProcessor,
-    JobSchedulerService,
   ],
 })
 export class QueueProcessorsModule {}
+
+/**
+ * Separate from `QueueProcessorsModule` on purpose: several e2e suites mount
+ * `QueueProcessorsModule` to exercise a processor directly (`test/backup.e2e-spec.ts`,
+ * `test/worker-jobs.e2e-spec.ts`) without wanting the global `idem.cleanup` schedule
+ * registered — and fanning that out over every dev tenant on every such boot is exactly the
+ * shared-state leak #182's review caught. Only `WorkerModule` imports this module.
+ */
+@Module({
+  imports: [QueueModule],
+  providers: [JobSchedulerService],
+  exports: [JobSchedulerService],
+})
+export class QueueSchedulerModule {}

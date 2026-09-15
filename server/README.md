@@ -309,9 +309,17 @@ voidSale(@Param('id') id: string, @Body() body: unknown, @Req() req: Authenticat
   "succeeds". `queue/job-scheduler.service.ts` (#182) registers the global job as a repeatable
   BullMQ job scheduler — `upsertJobScheduler(IDEM_CLEANUP_SCHEDULER_ID, { every: 1h }, …)` — on
   worker boot; the id makes re-registering (a restart, or a future second worker replica) an
-  upsert of the same schedule, never a duplicate. It lives in `QueueProcessorsModule`
-  (`WorkerModule`), not `AppModule`: the API imports `QueueModule` to enqueue jobs but never runs
-  `QueueProcessorsModule`, so the three API replicas never call it.
+  upsert of the same schedule, never a duplicate. Against real Redis/BullMQ 6.3.4 the first run
+  fires immediately on first registration (`every` with no prior run is not epoch-aligned), then
+  every hour after that. 🔴 Renaming `IDEM_CLEANUP_SCHEDULER_ID` orphans the old scheduler under
+  its old id in Redis — remove it (`queue.removeJobScheduler(oldId)`) before changing the
+  constant, or it keeps firing forever with nothing watching it.
+  It lives in its own `QueueSchedulerModule`, imported only by `WorkerModule` — **not**
+  `QueueProcessorsModule`, which several e2e suites (`test/backup.e2e-spec.ts`,
+  `test/worker-jobs.e2e-spec.ts`) mount on its own to exercise one processor, and must not also
+  register (and fan out) the global schedule by booting. The API imports plain `QueueModule` to
+  enqueue jobs but never `QueueProcessorsModule` or `QueueSchedulerModule`, so the three API
+  replicas never call it either.
 
 Three decisions the design docs do not cover, made here and recorded in
 `02_API_SCREENS.md §8`: `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_KEY_IN_FLIGHT`, and the
