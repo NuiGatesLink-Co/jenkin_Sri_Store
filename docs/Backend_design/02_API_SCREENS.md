@@ -859,6 +859,19 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | ยิง `POST /sales` ซ้ำด้วย Idempotency-Key เดิม 5 ครั้ง | 100 VUs | สร้างบิลเดียว, ตัดสต็อกครั้งเดียว |
 | Mixed (80% read / 20% write) | 500 VUs, 10 นาที | ไม่มี connection pool หมด, replication lag < 1s |
 
+🔴 **วิธีวัด latency ให้สะอาด — เคาะแล้ว 2026-09-15 (owner, issue #251):** ยิงจาก**หลายเครื่องพร้อมกัน**
+(สามเครื่องทีม บน campus network) แต่ละเครื่องอยู่ใต้ `limit_req zone=perip rate=30r/s burst=60` ของ
+Nginx เอง (ห้ามยกเว้น `perip` ให้ — ตัวจำกัดต้องเข้มเท่าที่ร้านจริงเจอ) ผล metrics ส่งเข้า Prometheus
+ของ VM ผ่าน `--web.enable-remote-write-receiver` (`deploy/compose/monitoring.yml`) หลัง Nginx ที่
+`location /prometheus-remote-write/` (allowlist + Basic Auth, `server/docker/nginx/nginx.conf`)
+รวมผลใน Grafana. เหตุผลที่ยิงจากเครื่องเดียวผ่าน Nginx วัดไม่ได้สะอาด, SSH tunnel วัดได้แค่ tunnel,
+และ k6 บน VM เองแย่ง CPU กับ server — ดู `docs/handoff_log/close3-demo-deploy-2026-09-15.md` §4.1.
+สูตรแบ่งโหลดต่อเครื่อง (`SAFE_RATE_PER_SHARD` = 24r/s, 80% ของ 30r/s; `SAFE_BURST_PER_SHARD` = 45
+requests, 75% ของ burst=60) อยู่ที่ `server/test/k6/lib/shard.js`; ขั้นตอนเต็มอยู่ที่
+`server/test/k6/README.md`. **p95/p99 เป็นค่าต่อเครื่อง ไม่ใช่ค่าเฉลี่ยรวม** — k6's remote-write
+คำนวณ percentile ในเครื่องตัวเอง รวมทีหลังไม่ได้ (ไม่ใช่สถิติเชิงเส้น) — ทุกเครื่องต้องผ่านเกณฑ์
+ของตัวเองแยกกัน.
+
 **Data-integrity proof ที่ต้องแคปหน้าจอส่ง (แบบเดียวกับ assignment):**
 `SELECT stock FROM products WHERE id='p12'` ต้องเท่ากับ `สต็อกตั้งต้น − SUM(sale_items.qty)` พอดี และ **ไม่ติดลบ**
 
