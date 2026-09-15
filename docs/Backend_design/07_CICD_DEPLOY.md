@@ -262,7 +262,8 @@ on:
   `auto` และ SHA นี้เป็น ancestor ของ `.current_sha` → ไม่ deploy → checkout SHA นั้น (compose/nginx.conf/playbook ตรงกับ image
   ของ release นั้น — rollback ได้ไฟล์เก่ากลับมาด้วย) → `ansible-playbook -i 'vm-demo,' -e ansible_connection=local deploy.yml`
   **จำกัด 20 นาทีต่อรอบ** (compose ที่ค้างจึงเป็น fail ของรอบนั้นแล้วยัง rollback ได้ — ถ้าปล่อยให้ชน timeout ของ job, job ถูก
-  cancel และไม่มีอะไรรันต่อ)
+  cancel และไม่มีอะไรรันต่อ) · ข้อที่ยอมรับ: ถ้าค้างใน monitoring block (§6 ข้อ 9) ซึ่งรัน**หลัง**เขียน `.current_sha` แล้ว watchdog
+  จะ kill แล้ว rollback release ที่ healthy อยู่ทิ้ง
 * **rollback อัตโนมัติ:** รอบ deploy fail และ `.current_sha` มีค่าอื่น → checkout release นั้น → playbook
   `-e force_redeploy=true` (§6 ข้อ 1) · **ไม่ลบ `.current_sha`** · run ยัง**แดง** · ปฏิเสธถ้า playbook ของ release นั้นยังไม่รู้จัก
   `force_redeploy` (release ก่อน PR #237 merge) — ต้อง rollback ด้วยมือ · rollback หลัง fail ที่เกิด**ก่อน**แตะ container
@@ -311,11 +312,12 @@ on:
    sudo install -d -o root -g root -m 0755 /usr/local/lib/pos-runner
    sudo install -o root -g root -m 0755 /tmp/pos-src/deploy/scripts/runner-job-started.sh /usr/local/lib/pos-runner/job-started.sh
    # sudoers: ตรวจไฟล์ชั่วคราวก่อน แล้วค่อยวางเข้าที่ — ไฟล์ผิดใน /etc/sudoers.d ทำให้ sudo ใช้ไม่ได้ทั้งเครื่อง (VM ไม่มีรหัส root)
-   printf '%s\n' 'Defaults!/usr/local/bin/pos-deploy env_reset' \
-     'gha-runner ALL=(deploy) NOPASSWD: /usr/local/bin/pos-deploy' > /tmp/pos-deploy.sudoers
-   sudo visudo -cf /tmp/pos-deploy.sudoers \
-     && sudo install -o root -g root -m 0440 /tmp/pos-deploy.sudoers /etc/sudoers.d/pos-deploy
-   rm -f /tmp/pos-deploy.sudoers
+   t=$(mktemp) \
+     && printf '%s\n' 'Defaults!/usr/local/bin/pos-deploy env_reset' \
+          'gha-runner ALL=(deploy) NOPASSWD: /usr/local/bin/pos-deploy' > "$t" \
+     && sudo visudo -cf "$t" \
+     && sudo install -o root -g root -m 0440 "$t" /etc/sudoers.d/pos-deploy \
+     && rm -f "$t"
    sudo chmod 0750 /home/deploy                                   # gha-runner อ่าน clone ของ deploy ไม่ได้
    rm -rf /tmp/pos-src
    id gha-runner                                                  # ต้องไม่มี docker ในรายการ group

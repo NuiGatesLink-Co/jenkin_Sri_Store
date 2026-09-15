@@ -78,12 +78,15 @@ run_playbook() {
   # </dev/null: ansible-core refuses non-blocking stdio (handoff 2026-09-15 §4).
   (
     cd "$CLONE/deploy/ansible"
+    # Relies on setsid NOT forking (this subshell is not a group leader), so $! is the playbook's pid
+    # and its process group; never add `set -m` or `setsid -f`.
     IMAGE_TAG="$sha" exec setsid ansible-playbook -i 'vm-demo,' \
       -e ansible_connection=local \
       -e ansible_python_interpreter=/usr/bin/python3 \
       "$@" deploy.yml </dev/null
   ) &
   pid=$!
+  # Same as above: setsid must not fork, so $! is the watchdog's pid and process group (no `set -m`, no `setsid -f`).
   # shellcheck disable=SC2016 # $1..$3 are the positional arguments passed to bash -c below
   setsid bash -c 'sleep "$1"; kill -TERM -- "-$2"; sleep "$3"; kill -KILL -- "-$2"' \
     watchdog "$PLAYBOOK_TIMEOUT_SECONDS" "$pid" "$KILL_GRACE_SECONDS" </dev/null >/dev/null 2>&1 &
