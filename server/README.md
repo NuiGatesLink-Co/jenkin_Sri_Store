@@ -505,10 +505,10 @@ between `now()` and `COMMIT`, since `now()` is wall-clock time and the mark is m
       alone does not help: `migrationsTransactionMode: 'each'` runs each migration as one
       transaction. So either stamp last, with `clock_timestamp()`, in a short migration, or tell
       clients to reset their cursor.
-    - 🔴 **The tenant import is not rewind-safe.** It writes the snapshot's historic
-      `products.updated_at` and only refuses tenants that already have transactional rows. A device
-      that pulled before the import (cursor T1) never sees imported products stamped before
-      T1 − 30 s. Tracked in #217.
+    - **The tenant import stamps `clock_timestamp()` on imported products (#217).** It does
+      not write the snapshot's historic `products.updated_at`. A device that pulled before
+      the import (cursor T1) sees imported products because their `updated_at` is stamped
+      at import time (> T1).
   - `pos_app` writes that do not go through either door, where the role timeouts still apply:
     - `AuthService`'s login, refresh and enrolment audit writes, on the default pool with their own
       transactions. They write only `audit_log`, which no client pulls.

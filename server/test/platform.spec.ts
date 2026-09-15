@@ -399,6 +399,37 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
       expect(tenantCache.invalidate).toHaveBeenCalledWith('t1', 'products');
     });
 
+    it('stamps imported products with clock_timestamp() and ignores historic updatedAt (#217)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      await importService.importSnapshot(
+        't1',
+        {
+          __meta: { version: 2 },
+          sa_products: [
+            {
+              id: 'p1',
+              name: 'Brake Pad',
+              stock: 10,
+              price: 500,
+              updatedAt: '2020-01-01T00:00:00.000Z',
+            },
+          ],
+        },
+        'adm1',
+      );
+
+      const productInserts = mockAdminDs.query.mock.calls.filter((c: any) =>
+        c[0].includes('INSERT INTO products'),
+      );
+      expect(productInserts).toHaveLength(1);
+      const [sql, params] = productInserts[0];
+      expect(sql).toContain('clock_timestamp()');
+      expect(params).not.toContain('2020-01-01T00:00:00.000Z');
+      expect(params).not.toContain(new Date('2020-01-01T00:00:00.000Z'));
+    });
+
     it('rolls back and does not invalidate cache if audit log fails during import', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
       vi.spyOn(auditService, 'log').mockRejectedValueOnce(new Error('Audit write failed'));
