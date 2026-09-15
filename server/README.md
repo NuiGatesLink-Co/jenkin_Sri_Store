@@ -304,6 +304,9 @@ voidSale(@Param('id') id: string, @Body() body: unknown, @Req() req: Authenticat
   for that row's remaining life, so it can neither invent a success nor outlive a key
   Lane C has deleted. Every call is bounded at 200 ms and falls through on failure.
 - Keys live 24h; deleting them is Lane C's `idem.cleanup` job, not this module's.
+  With no `tenantId` the job lists `tenants` and fans out one tenant-scoped job each (#169): a
+  DELETE on the `pos_app` pool with no `app.tenant_id` matches 0 rows under forced RLS and still
+  "succeeds". Nothing schedules the global job yet — add a BullMQ job scheduler when it is wanted.
 
 Three decisions the design docs do not cover, made here and recorded in
 `02_API_SCREENS.md §8`: `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_KEY_IN_FLIGHT`, and the

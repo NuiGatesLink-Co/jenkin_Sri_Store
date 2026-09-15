@@ -121,7 +121,7 @@ const ALLOWED: Record<string, string> = {
   'queue/tenant-job-runner.ts':
     'BullMQ jobs have no request: checks tenants.status (ADR-0003 consequence 4), then opens its own transaction with set_config per job. It names its tenant from the job payload (job.data.tenantId), not from a guard — so its callers are policed below (queue/processors/ only).',
   'queue/processors/maintenance.processor.ts':
-    'System-wide idempotency_keys cleanup job with no tenant — note it runs as pos_app with no app.tenant_id, so under forced RLS it deletes nothing (pre-existing; #169).',
+    'idem.cleanup with no tenant lists tenants (no RLS) on the pool and fans out one tenant-scoped job each; every DELETE runs through runWithTenantContext (#169).',
   'platform/audit.service.ts':
     'Imports DataSource as a value for the type of log(runner) only; the caller passes its own transaction manager (admin plane, #123). Holds no pool itself.',
   'platform/platform-auth.guard.ts':

@@ -234,16 +234,19 @@ describe('Worker Jobs Processors (unit)', () => {
 
   describe('MaintenanceProcessor', () => {
     let mockDataSource: { query: ReturnType<typeof vi.fn> };
+    let mockMaintenanceQueue: { addBulk: ReturnType<typeof vi.fn> };
     let processor: MaintenanceProcessor;
 
     beforeEach(() => {
       mockDataSource = {
         query: vi.fn(),
       };
+      mockMaintenanceQueue = { addBulk: vi.fn() };
       processor = new MaintenanceProcessor(
         mockDataSource as any,
         mockTenantJobRunner as any,
         logger,
+        mockMaintenanceQueue as any,
       );
     });
 
@@ -272,8 +275,9 @@ describe('Worker Jobs Processors (unit)', () => {
         );
       });
 
-      it('cleans up expired idempotency keys globally if no tenantId provided', async () => {
-        mockDataSource.query.mockResolvedValueOnce([{ key: 'key-global-1' }]);
+      it('with no tenantId, fans out one tenant-scoped job per tenant and deletes nothing itself (#169)', async () => {
+        const OTHER = '22222222-2222-2222-2222-222222222222';
+        mockDataSource.query.mockResolvedValueOnce([{ id: TENANT_ID }, { id: OTHER }]);
 
         const job = {
           id: 'job-idem-global',
@@ -287,11 +291,25 @@ describe('Worker Jobs Processors (unit)', () => {
 
         const res = (await processor.process(job)) as any;
 
-        expect(res).toEqual({ cleaned: true, deletedCount: 1 });
-        expect(mockDataSource.query).toHaveBeenCalledWith(
-          expect.stringContaining('DELETE FROM idempotency_keys'),
-          [86400],
+        expect(res).toEqual({ fannedOut: 2 });
+        expect(mockDataSource.query).toHaveBeenCalledTimes(1);
+        expect(mockDataSource.query).not.toHaveBeenCalledWith(
+          expect.stringContaining('DELETE'),
+          expect.anything(),
         );
+        expect(mockTenantJobRunner.runWithTenantContext).not.toHaveBeenCalled();
+        expect(mockMaintenanceQueue.addBulk).toHaveBeenCalledWith([
+          {
+            name: JOB_IDEM_CLEANUP,
+            data: { tenantId: TENANT_ID, correlationId: 'corr-global', olderThanSeconds: 86400 },
+            opts: { jobId: `idem-cleanup-job-idem-global-${TENANT_ID}` },
+          },
+          {
+            name: JOB_IDEM_CLEANUP,
+            data: { tenantId: OTHER, correlationId: 'corr-global', olderThanSeconds: 86400 },
+            opts: { jobId: `idem-cleanup-job-idem-global-${OTHER}` },
+          },
+        ]);
       });
     });
 
