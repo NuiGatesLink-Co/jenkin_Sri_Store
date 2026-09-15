@@ -140,10 +140,15 @@ group ด้วยคอลัมน์นี้ การยุบสองค�
 
 ## ยังไม่เคาะ
 
-* [ ] **(#55, เพิ่ม 2026-09-14 จาก #16) read-back window ของ `?updatedSince=`** — write ที่ประทับ `updated_at = now()`
+* [x] **(#55, เพิ่ม 2026-09-14 จาก #16) read-back window ของ `?updatedSince=`** — write ที่ประทับ `updated_at = now()`
       (เวลาเริ่ม transaction) แล้ว commit ช้า อาจ commit หลังจาก client เลื่อน cursor ผ่านเวลานั้นไปแล้ว → แถวนั้นไม่ถูกดึงเลย
       server แก้เรื่อง tie/ความละเอียดของ cursor แล้ว (keyset `(updated_at, id)` + `meta.nextCursor`) แต่ยังไม่เคาะว่า
       client ต้องถอย cursor ย้อนหลังกี่วินาที หรือ server ต้องเปลี่ยนวิธีประทับเวลา
+      → **เคาะแล้ว 2026-09-15 (#191, เจ้าของโปรเจกต์):** cursor ของเฟส 2 = keyset นี้ **ไม่สร้าง `change_log`** ·
+      client **ถอย cursor ย้อนหลัง 5 วินาที**ทุกครั้งที่ pull (แถวที่ได้ซ้ำ upsert ซ้ำได้ ไม่เสียหาย) · การลบใช้ `deletedAt` (#55)
+      🔴 ถอย 5 วินาทีปลอดภัยเฉพาะเมื่อ write transaction commit ภายใน 5 วินาที — **วันนี้ server ยังไม่ตั้ง
+      `idle_in_transaction_session_timeout` / `transaction_timeout`** งานที่ implement การ pull ต้องบังคับเพดานนี้
+      หรือตั้งค่าถอยให้ยาวกว่าเพดานที่บังคับจริง
 * [ ] cache invalidation ฝั่ง client — Drift ที่ค้างอยู่จะถือว่าหมดอายุเมื่อไหร่ (TTL? ตอน login? ตอน sync เสร็จ?)
 * [ ] อ่านตอน Online อ่านจาก Drift ก่อนแล้ว refresh (stale-while-revalidate) หรือรอ server เสมอ
 * [ ] **ถามเจ้าของโปรเจกต์:** เมื่อ server รับบิลแล้ว แอปต้องเชื่อตัวเลขของ server และทับของในเครื่อง
