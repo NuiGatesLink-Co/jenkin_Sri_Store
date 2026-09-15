@@ -692,8 +692,12 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   plaintext code in `idempotency_keys` is accepted; one `เข้าสู่ระบบไม่สำเร็จ` for every login 401; code re-issue,
   label edit and a client device screen are **phase 2** (ADR-0004 *ยังไม่เคาะ*). PR #176; read
   `docs/handoff_log/owner-decisions-145-163.md`.
+- **Merged 2026-09-15 (tx follow-ups):** #169 → PR #177 (global `idem.cleanup` fans out per tenant; 🔴 nothing
+  schedules it yet), #175 → PR #178 (audit pool timeout 10 s; loss not reproducible for role denials, burst pinned),
+  #173 → PR #179 (🔴 cached reads: Redis first via `authorisedTenantId()`, `runTx` loader only on a miss — never
+  open `runTx` before `singleFlight`). Read `docs/handoff_log/followups-169-173-175.md`.
 - **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
-  (owner runs 07 §4); `ApiClient` has no request timeout (unticketed). The repo's only long-lived branches are
+  (owner runs 07 §4); `ApiClient` has no request timeout (unticketed); no scheduler for the global `idem.cleanup`. The repo's only long-lived branches are
   `main` and `POC_sample_offline_first`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
