@@ -292,8 +292,8 @@ CREATE TABLE users (
   username      TEXT NOT NULL,
   password_hash TEXT NOT NULL,                  -- argon2id
   display_name  TEXT NOT NULL,
-  role          TEXT NOT NULL CHECK (role IN ('owner','manager','cashier')),
-  pin_hash      TEXT,                           -- manager PIN สำหรับยืนยันงานเสี่ยง (void/ลดราคาเกิน)
+  role          TEXT NOT NULL CHECK (role IN ('owner','manager','cashier')),  -- ⚠️ 2026-09-15 (#240 E1): เฟส 2 เหลือ CHECK (role IN ('owner')) · บัญชีร้านบัญชีเดียว (E2) — 08 §3
+  pin_hash      TEXT,                           -- manager PIN สำหรับยืนยันงานเสี่ยง (void/ลดราคาเกิน) · ⚠️ 2026-09-15 (#240 E3): void ไม่ใช้ PIN แล้ว → ลบคอลัมน์ในเฟส 2 (08 §3)
   is_active     BOOLEAN NOT NULL DEFAULT TRUE,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (tenant_id, id),
@@ -1128,7 +1128,7 @@ flowchart LR
 | **ไม่มี soft delete ครบทุกตาราง** | ตอน sync การลบต้องส่งเป็น tombstone ไม่งั้นเครื่องอื่นจะ resurrect ข้อมูลที่ลบไปแล้ว |
 | ~~หลายร้าน = หลาย timezone?~~ **เคาะแล้ว (ADR-0003)** | เพิ่ม `tenants.timezone TEXT DEFAULT 'Asia/Bangkok'` แล้ว (§5.1) เพราะ `shifts.date_str` และรายงานรายวันทุกใบขึ้นกับค่านี้ |
 | **`customers` / `mechanics` / `settings` ยังไม่มี `updated_at`** | มีแต่ `products` ที่มี → refresh cache ด้วย `?updatedSince=` ทำไม่ได้กับ 3 ตารางนี้ **เป็น Drift schema change ที่ต้องรัน `build_runner` บน ASCII path** ควรทำรวดเดียวตอนนี้ ไม่ใช่ไปเจอตอนเฟส 2 |
-| **`sales.sync_status`** | ถ้าจะทำโหมดออฟไลน์ ต้องมี `('local'\|'confirmed'\|'rejected')` + คิวให้เจ้าของร้านเคลียร์บิลที่ server ปฏิเสธหลังพิมพ์ใบเสร็จไปแล้ว — ซ่อนไว้ใน log ไม่ได้ |
+| ~~**`sales.sync_status`**~~ | ~~ถ้าจะทำโหมดออฟไลน์ ต้องมี `('local'\|'confirmed'\|'rejected')`~~ + คิวให้เจ้าของร้านเคลียร์บิลที่ server ปฏิเสธหลังพิมพ์ใบเสร็จไปแล้ว — ซ่อนไว้ใน log ไม่ได้ · **2026-09-15: ไม่ทำคอลัมน์ — สถานะอยู่ใน outbox ของเครื่อง, คิวคือหน้า "รอ owner" (08 §7, §14)** |
 
 ---
 

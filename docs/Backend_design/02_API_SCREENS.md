@@ -552,7 +552,8 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | ~~POST~~ | ~~`/backup/import`~~ → ย้ายไป **§4.1 admin plane** | – | – | – | – | – |
 | **GET** | **`/doc-counters`** 🆕 | ✔ | **pos เท่านั้น** | – | – | – |
 | GET | `/export/:entity.csv` | manager | ทั้งคู่ | – | – | – |
-| POST | `/sync/push` · GET `/sync/pull` · `/sync/bootstrap` | ✔ | **pos เท่านั้น** | – | – | **✔ บังคับ** |
+| ~~POST~~ | ~~`/sync/push` · GET `/sync/pull` · `/sync/bootstrap`~~ | ~~✔~~ | ~~**pos เท่านั้น**~~ | – | – | ~~**✔ บังคับ**~~ |
+| POST | `/sync/push` (2026-09-15, 08 §8 — `/sync/pull`/`/sync/bootstrap` ไม่ทำ) | **device token** (`X-Device-Token`) ไม่ใช่ JWT | **pos เท่านั้น** | – | – | **✔ บังคับ ต่อ op** |
 | GET | `/health/live` · `/health/ready` | – | – | – | – | – |
 | GET | `/metrics` | internal | – | – | – | – |
 
@@ -687,7 +688,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | `maintenance` | `idem.cleanup` | repeatable ทุกชั่วโมง | ลบ idempotency key > 24h |
 | `backup` | `tenant-export` | `POST /backup/export` (ADR-0005) | export ข้อมูลร้านเดียว (ไม่ใช่ทั้ง cluster) เป็นโครง `sa_*` + `__meta` เดิม, สร้างลิงก์ดาวน์โหลดที่หมดอายุ, เขียน `audit_log` — **ไม่ใช่ backup สำหรับ restore** |
 | `backup` | `tenant-import` | `POST /platform/tenants/{id}/import` (ADR-0005) | นำเข้าข้อมูลตอน onboard ร้านใหม่เท่านั้น — ปฏิเสธถ้า tenant มีบิลอยู่แล้ว |
-| `sync` | `sync.apply` | `/sync/push` (Arch C) | apply command จากเครื่องที่ออฟไลน์ |
+| ~~`sync`~~ | ~~`sync.apply`~~ | ~~`/sync/push` (Arch C)~~ | ~~apply command จากเครื่องที่ออฟไลน์~~ — **ไม่ทำ (2026-09-15, 08 §8): push ตอบผลต่อ op ในคำขอเดียวกัน** |
 
 **กติกา (จาก Backend05):**
 * ทุก job ต้อง **idempotent** — BullMQ เป็น at-least-once, job รันซ้ำได้เสมอ
@@ -699,9 +700,9 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 
 ## 7. Sync endpoints (ใช้เฉพาะ Architecture B / C)
 
-> 🔴 **แทนที่ 2026-09-15** — สัญญาของ `POST /sync/push` ที่ใช้จริงอยู่ที่ [`08_PHASE2_SPEC.md §6`](08_PHASE2_SPEC.md)
+> 🔴 **แทนที่ 2026-09-15** — สัญญาของ `POST /sync/push` ที่ใช้จริงอยู่ที่ [`08_PHASE2_SPEC.md §8`](08_PHASE2_SPEC.md)
 > (ยืนยันด้วย device token, ผลต่อ op `applied`/`rejected`/`retry`, service เดียวกับ endpoint ออนไลน์) ·
-> `GET /sync/pull?since=serverSeq` / `GET /sync/bootstrap` / `change_log` **ไม่ทำ** (#191 — pull ใช้ keyset `GET /products?updatedSince=&afterId=`, 08 §12) ·
+> `GET /sync/pull?since=serverSeq` / `GET /sync/bootstrap` / `change_log` **ไม่ทำ** (#191 — pull ใช้ keyset `GET /products?updatedSince=&afterId=` + `meta.nextCursor`, 08 §15) ·
 > job `sync.apply` ใน §6 ไม่ทำ — push ตอบผลในคำขอเดียวกัน · ตารางและตัวอย่างข้างล่างเก็บไว้เป็นประวัติ
 
 | Method + Path | ทำอะไร |

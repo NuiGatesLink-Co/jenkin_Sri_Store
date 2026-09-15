@@ -52,3 +52,12 @@ Build & Test · Security Scan · Package/Storage · Config & Deploy · KV Storag
 * **production host** — ยังไม่เลือก (ครบกำหนดก่อน `q4`) · เมื่อเลือก: inventory ที่สอง + required reviewer
 * **ชื่อโดเมน** — ถ้ามีเมื่อไร ค่อยเปลี่ยน self-signed เป็น certbot
 * **retention ของ image บน GHCR** — ยังไม่ตั้งนโยบายลบ tag เก่า
+
+## Addendum 2026-09-15 — owner round 2 on #240 (E11) + #242
+
+| # | ตัดสิน | ผลกับ ADR นี้ |
+|---|---|---|
+| #242 | host = VM ของภาค **`mob04`** · **สภาพแวดล้อมเดียว และเป็น production** · ไม่มี demo แยก · cutover ร้านจริงจากนอกมหาวิทยาลัย = เฟสถัดไป | environment ที่ ADR นี้และ `07_CICD_DEPLOY.md` เรียก `demo` คือ production ตัวเดียว (ชื่อ environment ใน GitHub แก้ใน #67) |
+| E11 | deploy ด้วย **self-hosted GitHub Actions runner บน `mob04`** · รันเฉพาะ job `deploy` บน `main` ผ่าน protected environment · **ห้ามรัน workflow ของ PR** (repo public) | แทน "Actions → SSH → Ansible" จาก GitHub-hosted runner ซึ่งเข้า VM ในเครือข่ายมหาวิทยาลัยไม่ได้ · Ansible playbook ยังใช้ แต่รันจาก runner บนเครื่องเอง |
+
+รายละเอียด: [`08_PHASE2_SPEC.md §17`](../08_PHASE2_SPEC.md) · ticket #67
