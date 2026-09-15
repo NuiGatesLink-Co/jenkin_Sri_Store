@@ -88,23 +88,33 @@ passes only `success`/`skipped` and fails on anything else. `flutter.yml` has th
 - Schema exists **only** through `src/db/migrations/*` — `synchronize` is never true, in any
   environment including tests. `node dist/db/migrate.js up|down|status` (`pnpm db:migrate*`)
   runs them; the compose `migrate` service runs `up` once, as `postgres`, before `api-*` start.
-- 27 tables (01_DATABASE §5). `change_log` is phase 2 and does not exist. Every tenant-scoped
-  table has `tenant_id` in its primary key, composite FKs, and indexes that start with `tenant_id`.
+- 28 tables (01_DATABASE §5 + `import_jobs`, #239). `change_log` is phase 2 and does not exist.
+  Every tenant-scoped table has `tenant_id` in its primary key, composite FKs, and indexes that
+  start with `tenant_id`.
 - **RLS is enabled and forced** on all 25 tenant-scoped tables with one fail-closed policy:
   `tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid`. With the GUC unset
   `pos_app` reads zero rows (no error) and cannot insert. `set_config('app.tenant_id', …, true)` inside a
   `TenantService.runTx` transaction, under the tenant `TenantGuard` named, is the only way in (#4, tx.4 #153). `pos_app` cannot `SET row_security = off`.
 - Grants: `pos_app` has `SELECT/INSERT/UPDATE/DELETE` on every table except `movements`
-  (`SELECT/INSERT` — it is a ledger) and nothing on `migrations`.
+  (`SELECT/INSERT` — it is a ledger) and nothing on `migrations` or `import_jobs` (#239 — only
+  `ADMIN_DATA_SOURCE` ever touches that one; it carries `tenant_id` but no RLS policy, since a
+  policy would guard a role that never queries it).
 - Product search is `pg_trgm` + `ILIKE '%…%'` over `lower(part_no||' '||name||' '||name_th||' '||compat)`
   (`idx_products_search`). `to_tsvector` cannot find "เบรก" inside "ผ้าเบรกหน้า".
 - `src/db/seed.ts` — `seedCategories(db, tenantId)` inserts the five categories (ADR-0001) and
   nothing else; provisioning (#5) calls it inside its transaction.
 
 **Adding a migration:** create `src/db/migrations/<epoch-ms>-Name.ts` implementing `up` and
-`down`, append the class to `MIGRATIONS` in `src/db/data-source.ts`, and if it adds a table put
-the name in `TENANT_SCOPED_TABLES` (RLS + grants are asserted per table by `test/schema.e2e-spec.ts`,
-so a missing entry fails the suite). Run `pnpm build && pnpm db:migrate`, then rebuild the image.
+`down`, append the class to `MIGRATIONS` in `src/db/data-source.ts`, and if it adds a
+**tenant-facing** table (one `pos_app`/tenant requests will read or write) put the name in
+`TENANT_SCOPED_TABLES` (RLS + grants are asserted per table by `test/schema.e2e-spec.ts`, so a
+missing entry fails the suite). 🔴 That array lives in `RowLevelSecurity1788652800001`, which
+already ran by the time a later migration's table exists — **never append to it directly**; its
+`up()`/`down()` would then try to `ALTER TABLE` a table that does not exist yet on a from-empty
+run. `import_jobs` (#239) is the precedent for an admin-only table that needs neither RLS nor a
+`TENANT_SCOPED_TABLES` entry: its own migration explains the reasoning, and
+`test/schema.e2e-spec.ts` asserts its no-RLS, no-grant shape by name instead. Run
+`pnpm build && pnpm db:migrate`, then rebuild the image.
 
 ## Dynamic config (etcd, #64/#66)
 
@@ -1048,6 +1058,113 @@ every case of `frontend/test/products_repository_test.dart` at the HTTP seam.
 - `PATCH /products/:id` never reads `stock` — stock moves only through writes that log a movement.
 - Product money is now a string on the wire (`price`/`cost`, §1.1); it was a number before #16.
 
+## Tenant import (#185, #238, #239)
+
+`POST /api/v1/platform/tenants/:id/import` — admin plane, `PlatformAuthGuard`, onboarding only
+(ADR-0005: never a per-tenant restore). It turns a shop's `SnapshotRepository.exportSnapshot()`
+file (`sa_*` + `__meta`) into the tenant's first rows, per `01_DATABASE.md §9`.
+
+**It answers `202 Accepted` with a `jobId`, not `201` (#239, owner decision 2026-09-15).** A
+synchronous import took ~6.4 s per 2 MiB locally (four months, 2,043 bills,
+`test/import-snapshot.e2e-spec.ts`) and nginx allows a 10 MiB body — a bigger shop's file can
+run past `proxy_read_timeout 30s` while the transaction goes on to commit, so the operator got a
+504 for a write that had actually succeeded, and a retry read back as a confusing 409. The route
+now does two things in order:
+
+1. **Pre-flight, synchronously** — no write, so a bad file still answers 400/409 immediately.
+   Checks the tenant has no transaction data yet (`sales`/`returns`/`purchase_orders`/
+   `credit_payments`/`quotes`/`shifts` all empty, else `409`), then `01_DATABASE.md §9` step 2's
+   list: negative stock, a case-duplicate part number, a non-numeric category position, a
+   duplicate document number (`receipt_no`/`cn_no`/`po_no`/`quote_no`, and credit payments' own
+   `receipt_no` — a different table), an unparseable date anywhere `parseDate()` would otherwise
+   default to import time, a value that used to clamp silently (negative mechanic
+   `creditBalance`/customer `points`/product `minStock`, or a sale/return/PO/quote line `qty`
+   that was zero, negative, non-integer or missing), and #238's tombstone/FK checks
+   (`missingRefs`/`unnamed`/`returnsWithoutSale`). The first four are `snapshot-preflight.ts`
+   (pure, unit-tested on their own — `snapshot-preflight.spec.ts`); the tombstone checks are
+   `snapshot-tombstones.ts` (#238/#252, unchanged). **#22's lesson applied to import: validate,
+   then clamp — never the other way round.** A clamp on an unvalidated value (the old
+   `Math.max(0, …)`/`Math.max(1, …)` calls) turns a loud corruption into a quiet one; every such
+   clamp in `tenant-import.service.ts` now runs only on a value pre-flight has already accepted.
+2. **Enqueue** — a row in `import_jobs` (own migration, `1788652802200-ImportJobs.ts`) carries the
+   whole snapshot as `jsonb`, and a tiny `TenantImportJobPayload` (`{tenantId, correlationId,
+   importJobId}`) goes on its own queue, `QUEUE_TENANT_IMPORT` — **not** `QUEUE_BACKUP`, even
+   though both are one-shot admin-plane whole-tenant jobs (ADR-0005 groups them): `@nestjs/bullmq`
+   starts one BullMQ `Worker` per `@Processor(queueName)` class, and two Workers consuming the
+   same queue name race for every job — `BackupProcessor`'s `if (name !== JOB_TENANT_EXPORT)
+   return {skipped:true}` would then silently "complete" a `tenant.import` job about half the
+   time without ever running `TenantImportProcessor`. A queue name costs nothing extra (no new
+   Redis service — it is a keyspace in the existing `redis-queue`).
+
+`GET /api/v1/platform/tenants/:id/import/:jobId` (same guard) reads `import_jobs` directly —
+`status`: `queued|running|succeeded|failed`, plus `tombstones`/`droppedSuppliers` on success or
+`error` on failure. No BullMQ `job.getState()` call: the row **is** the status, so a poller sees
+the same answer whether the worker is still warming up, mid-transaction, or long finished and
+its BullMQ job already reaped by `removeOnComplete`.
+
+**Why Postgres, not Redis, holds the snapshot.** `redis-queue` runs `noeviction` (BullMQ must
+never lose a job it hasn't finished), so putting a 10 MiB body straight into a job's own `data`
+— the obvious BullMQ-native place — means a burst of large imports grows Redis memory unbounded
+with nothing to page it out; Redis-with-a-TTL was considered and rejected for the same reason
+(nothing frees the memory early, and losing it before the worker reads it is worse than never
+having a TTL). `import_jobs.payload` is `jsonb`, which Postgres TOASTs out of the row
+automatically, and is cleared (`payload = NULL`) once a job reaches a terminal state — the
+outcome (`result`/`error`) stays, the shop's actual data at rest does not.
+
+**Idempotency.** `import_jobs (tenant_id) WHERE status IN ('queued','running')` is a partial
+unique index: a second `POST .../import` for a tenant with one already in flight is a `409` on
+that constraint (checked after pre-flight, so a bad file never even reaches it). A **completed**
+import (success or failure that committed nothing) is refused the same way it always was — the
+tenant-already-has-bills pre-flight check — since a successful import leaves those tables
+non-empty and a failed one leaves them exactly as empty as before, so a fresh attempt is a fresh
+row, no special-casing needed. `TenantImportProcessor` re-runs the full pre-flight (defence in
+depth — the payload cannot have changed since enqueue, but nothing besides the partial unique
+index stops a second code path from writing sales in between) before writing.
+
+**Retries and the DLQ.** `QUEUE_TENANT_IMPORT` uses `DEFAULT_JOB_OPTIONS` like every other queue
+(3 attempts, BullMQ's builtin exponential-jitter backoff, #201) — a transaction failure here is
+almost always deterministic (bad data the pre-flight missed, or a row Postgres itself refuses,
+e.g. the drawer-entry `CHECK amount > 0` `test/import-snapshot.e2e-spec.ts` pins), so a retry
+rarely helps, but it costs nothing more than the existing backoff delay and keeps every queue
+behaving the same way. `import_jobs.payload` is kept across a non-final failure (a retry has to
+re-read it) and cleared only once `TenantImportProcessor` knows this was the last attempt — the
+same `job.attemptsMade + 1 >= maxAttempts` rule `TenantJobRunner.routeToDlq` uses for everything
+else, duplicated locally rather than shared because `TenantJobRunner.runWithTenantContext` opens
+a `pos_app`/RLS transaction scoped to one tenant, which is not what this job does (see below).
+
+**No `TenantJobRunner`.** Every other BullMQ processor runs its work through
+`runWithTenantContext`, which sets `app.tenant_id` on the `pos_app` role and enforces the #213
+commit ceiling. The import's whole point is writing historical rows as the **owner** role
+(`ADMIN_DATA_SOURCE`, exactly as the synchronous endpoint always has — RLS would refuse an
+insert whose `updated_at`/`created_at` predates "now", and the owner role is outside the #213
+ceiling by design: "platform provisioning and import" is one of the roles the README's
+*The transaction ceiling* section names as exempt). `TenantImportService` is therefore already on
+`tenant-door.spec.ts`'s allowlist for `ADMIN_DATA_SOURCE`, and `TenantImportProcessor` reaches no
+pool of its own at all — it only calls the service.
+
+**`import_jobs` carries no RLS.** See that migration's own comment and *Schema and migrations*
+above: it has a `tenant_id` column (for lookup) but only `ADMIN_DATA_SOURCE` ever touches it, so
+a `pos_app` RLS policy would guard nothing real. `test/schema.e2e-spec.ts` asserts the no-RLS,
+no-`pos_app`-grant shape explicitly, since it is deliberately absent from
+`RowLevelSecurity1788652800001`'s exported table lists (which that migration's own `up()`
+executes against — appending a not-yet-created table there would break a from-empty run).
+
+**Still true, unchanged by #239:**
+- An imported bill carries no `shift_id` (the file does not link bills to shifts), so a closing
+  report for an imported shift shows `cashSales 0.00` — only starting cash and drawer entries.
+  Documented, not fixed (`01_DATABASE.md §9`); #239 leaves it exactly as found.
+- Every imported shift is archived (`is_active = false`) — see *The cash drawer* /
+  `snapshot-tombstones.ts`'s header comment for the review that fixed the "active drawer with no
+  device" bug (#185, PR #244).
+- The 10 MiB body limit + verified-platform-token body parser (`app.setup.ts`'s `IMPORT_ROUTE`,
+  #244) is unchanged: `POST .../import` is still the only route it applies to (Express's `use()`
+  path-prefix matching also covers `GET .../import/:jobId`, harmlessly — a GET has no JSON body
+  for it to parse).
+
+Read `docs/handoff_log/close4-synthetic-snapshot-2026-09-15.md` for #185's synthetic-snapshot
+scrutiny round that found the gaps #239 closes, with a dated correction note about #252's
+supplier-drop landing after that document was written.
+
 ## Bootstrap and settings (#25)
 
 `src/bootstrap/` and `src/settings/` — Checkout's one-shot read (`02_API_SCREENS.md §3.1`) and
@@ -1224,7 +1341,8 @@ scanned. The old keys become unreachable at once and expire on their own TTL. `K
   request outside `runTx` (tx.4 #153). So does `onTransactionCommit` itself: there is no commit
   to wait for, and running the hook at once would run it before the caller's own commit.
 - The platform import runs its own `ADMIN_DATA_SOURCE` transaction. It calls `invalidate()` for all
-  four namespaces after `await adminDs.transaction(…)` resolves.
+  five namespaces after `await adminDs.transaction(…)` resolves. Since #239 this runs inside
+  `TenantImportProcessor` (a BullMQ worker), not the HTTP request — see *Tenant import (#239)* below.
 - A failed invalidation `SET` is logged as `cache invalidation failed`. A failed post-commit hook of
   any kind is logged as `post-commit hook failed`.
 

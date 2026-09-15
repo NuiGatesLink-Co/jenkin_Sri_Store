@@ -412,7 +412,8 @@ refundTotal, refundMethod, reason, customerId, mechanicId, mechanicName, date, s
 | `GET /settings` · `PATCH /settings` | ข้อมูลร้าน, VAT, อายุใบเสนอราคา |
 | `POST /backup/export` | → `202 Accepted` + `jobId` (งานหนัก เข้า BullMQ) → ได้ signed URL ตอนเสร็จ |
 | ~~`POST /backup/import`~~ | **ย้ายไป admin plane แล้ว** → `POST /platform/tenants/{id}/import` (ดู §4.1) |
-| `GET /backup/jobs/:id` | เช็คสถานะงาน export/import |
+| `GET /backup/jobs/:id` | เช็คสถานะงาน export (tenant plane, tenant JWT) |
+| `GET /platform/tenants/{id}/import/{jobId}` | เช็คสถานะงาน **import** (#239) — คนละ endpoint กับแถวบน: import อยู่ admin plane (platform admin token, ไม่มี `tid`) ไม่ใช่ tenant plane เหมือน export — ดู §4.1 |
 | `GET /export/products.csv` `?…` | CSV — ทุกช่องผ่าน `csvSafe()` กัน formula injection |
 
 > ### ⚠️ ทำไม import ถึงไม่ใช่ปุ่มของร้านอีกต่อไป (ADR-0005)
@@ -483,7 +484,8 @@ guard ของ `/platform/*` ปฏิเสธ token ที่ `aud != "platfo
 | POST | `/platform/auth/token` | – | – | login ของ platform admin (ตาราง `platform_admins` แยกจาก `users`) — JWT ที่ได้ `aud: "platform"` ไม่มี `tid` |
 | POST | `/platform/tenants` | platform admin | ✔ | สร้างร้านใหม่ (ADR-0001) **ทรานแซกชันเดียว** ต้องได้ครบ: แถวใน `tenants` (`status='active'`) + `users` แถวแรก `role='owner'` + `settings` 1 แถว + seed หมวดหมู่/หน่วยนับ + device แรก `role='pos'`, `device_no=1` — ล้มข้อใดข้อหนึ่งต้อง rollback ทั้งหมด ห้ามมี tenant ที่ไม่มี owner หรือไม่มี settings |
 | PATCH | `/platform/tenants/{id}/status` | platform admin | ✔ | เปลี่ยน `active`/`suspended`/`closed` (ADR-0003) — **ต้องล้าง cache `t:{tid}:status` ทันที** ไม่งั้นการระงับจะช้าเท่า TTL ของ cache นั้น |
-| POST | `/platform/tenants/{id}/import` | platform admin | ✔ | นำเข้า snapshot `sa_*` + `__meta` ตอน **onboard ร้านใหม่เท่านั้น** (ADR-0005) — **ต้องปฏิเสธถ้า tenant นั้นมีบิลอยู่แล้ว** ไม่ใช่ทาง restore ย้อนเวลา · ย้ายมาจาก `POST /backup/import` เดิม |
+| POST | `/platform/tenants/{id}/import` | platform admin | ✔ | นำเข้า snapshot `sa_*` + `__meta` ตอน **onboard ร้านใหม่เท่านั้น** (ADR-0005) — **ต้องปฏิเสธถ้า tenant นั้นมีบิลอยู่แล้ว** ไม่ใช่ทาง restore ย้อนเวลา · ย้ายมาจาก `POST /backup/import` เดิม · **ตอบ `202 Accepted` + `jobId` (#239, ไม่ใช่ `201` อีกต่อไป)** — pre-flight (`01_DATABASE.md §9` ข้อ 2) รันแบบ synchronous ก่อนตอบ ไฟล์เสีย 400/409 ทันที ส่วนการเขียนจริงเป็น BullMQ job (`QUEUE_TENANT_IMPORT`, แยกจาก `QUEUE_BACKUP` ที่ export ใช้ — เหตุผลใน `server/README.md` §*Tenant import*) |
+| GET | `/platform/tenants/{id}/import/{jobId}` | platform admin | – | สถานะงาน import (#239) — `queued\|running\|succeeded\|failed` + `tombstones`/`droppedSuppliers` ตอนสำเร็จ หรือ `error` ตอนล้ม อ่านจากตาราง `import_jobs` โดยตรง ไม่ผ่าน `GET /backup/jobs/:id` (ตัวนั้นอยู่ tenant plane ใช้ tenant JWT — platform admin ไม่มี token แบบนั้น) |
 | GET | `/platform/tenants` | platform admin | – | รายชื่อร้าน (platform ops เท่านั้น) |
 
 > 🔴 **ทุก endpoint ในตารางนี้ต้องเขียน `audit_log` ทุกครั้งที่ถูกเรียก** (ใคร, endpoint ไหน, แตะ tenant ใด) — ADR-0002 กติกาข้อ 3
@@ -685,8 +687,8 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | `inventory` | `po.received` | รับของ | คำนวณต้นทุนใหม่, เตือนของใกล้หมด |
 | `maintenance` | `quotes.purge` | manual / cron | ลบใบเสนอราคาเก่า |
 | `maintenance` | `idem.cleanup` | repeatable ทุกชั่วโมง | ลบ idempotency key > 24h |
-| `backup` | `tenant-export` | `POST /backup/export` (ADR-0005) | export ข้อมูลร้านเดียว (ไม่ใช่ทั้ง cluster) เป็นโครง `sa_*` + `__meta` เดิม, สร้างลิงก์ดาวน์โหลดที่หมดอายุ, เขียน `audit_log` — **ไม่ใช่ backup สำหรับ restore** |
-| `backup` | `tenant-import` | `POST /platform/tenants/{id}/import` (ADR-0005) | นำเข้าข้อมูลตอน onboard ร้านใหม่เท่านั้น — ปฏิเสธถ้า tenant มีบิลอยู่แล้ว |
+| `backup` | `tenant.export` | `POST /backup/export` (ADR-0005) | export ข้อมูลร้านเดียว (ไม่ใช่ทั้ง cluster) เป็นโครง `sa_*` + `__meta` เดิม, สร้างลิงก์ดาวน์โหลดที่หมดอายุ, เขียน `audit_log` — **ไม่ใช่ backup สำหรับ restore** |
+| `tenant-import` | `tenant.import` | `POST /platform/tenants/{id}/import` (ADR-0005, #239) | นำเข้าข้อมูลตอน onboard ร้านใหม่เท่านั้น — ปฏิเสธถ้า tenant มีบิลอยู่แล้ว · **คิวแยกจาก `backup`** แม้เป็นงานฝั่งเดียวกัน (ADR-0005) เพราะ `@nestjs/bullmq` สร้าง Worker หนึ่งตัวต่อคิวต่อคลาส — สองคลาสแย่งคิวเดียวกันจะสุ่มว่าใครได้ job (เหตุผลเต็มใน `server/README.md` §*Tenant import*) · endpoint ตอบ `202` + `jobId`, เช็คสถานะที่ `GET /platform/tenants/{id}/import/{jobId}` |
 | `sync` | `sync.apply` | `/sync/push` (Arch C) | apply command จากเครื่องที่ออฟไลน์ |
 
 **กติกา (จาก Backend05):**
