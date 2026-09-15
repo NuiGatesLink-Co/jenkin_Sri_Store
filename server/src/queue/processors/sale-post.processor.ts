@@ -13,10 +13,9 @@ import {
   type SaleCreatedJobPayload,
 } from '../queue.constants.js';
 import { TenantJobRunner } from '../tenant-job-runner.js';
-import { WORKER_SETTINGS } from '../jitter-backoff.js';
 
 @Injectable()
-@Processor(QUEUE_SALE_POST, WORKER_SETTINGS)
+@Processor(QUEUE_SALE_POST)
 export class SalePostProcessor extends WorkerHost {
   constructor(
     private readonly tenantJobRunner: TenantJobRunner,

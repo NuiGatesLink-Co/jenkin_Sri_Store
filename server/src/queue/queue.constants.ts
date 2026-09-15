@@ -58,11 +58,21 @@ export interface IdemCleanupJobPayload extends BaseJobPayload {
   olderThanSeconds?: number;
 }
 
+// #201: `jitter: 1` is BullMQ's own full-jitter backoff — `exponential(delay, jitter)` in
+// bullmq's classes/backoffs.js computes `minDelay = maxDelay * (1 - jitter)`, so `jitter: 1`
+// gives `minDelay = 0` and a result of `floor(random() * 2^(attemptsMade-1) * delay)`, exactly
+// the full-jitter formula the course deck omits (without jitter, retries collide). A prior
+// version registered a custom `'exponential-jitter'` type via `settings.backoffStrategy` on
+// each worker to get the same formula; that type isn't one of BullMQ's builtins, and leaving it
+// unregistered on any worker (as all four were) makes `Backoffs.calculate` throw and leaves the
+// job stuck `active` instead of retrying or failing (#201). Using the builtin removes the whole
+// bug class: nothing is registered per-Worker, so a future processor has nothing to forget.
 export const DEFAULT_JOB_OPTIONS: JobsOptions = {
   attempts: 3,
   backoff: {
-    type: 'exponential-jitter',
+    type: 'exponential',
     delay: 1000,
+    jitter: 1,
   },
   removeOnComplete: {
     age: 3600, // keep for 1 hour

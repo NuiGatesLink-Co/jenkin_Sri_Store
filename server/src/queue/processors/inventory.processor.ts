@@ -9,10 +9,9 @@ import {
   type InventoryCheckJobPayload,
 } from '../queue.constants.js';
 import { TenantJobRunner } from '../tenant-job-runner.js';
-import { WORKER_SETTINGS } from '../jitter-backoff.js';
 
 @Injectable()
-@Processor(QUEUE_INVENTORY, WORKER_SETTINGS)
+@Processor(QUEUE_INVENTORY)
 export class InventoryProcessor extends WorkerHost {
   constructor(
     private readonly tenantJobRunner: TenantJobRunner,
