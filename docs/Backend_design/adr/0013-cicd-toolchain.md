@@ -70,10 +70,11 @@ runner ของ GitHub (GitHub-hosted) ต่อเข้าไม่ได้ 
 | หัวข้อ | ค่าที่เคาะ |
 |---|---|
 | งานที่ runner รับ | job `deploy` ของ `.github/workflows/deploy.yml` **job เดียว** · label เฉพาะ `srisurart-demo-deploy` · job อื่นทุกตัว (CI, build image, การเช็ค tag บน GHCR ก่อน deploy) ยังรันบน GitHub-hosted |
-| runner เรียก deploy อย่างไร | รัน **`deploy/ansible/deploy.yml` ตัวเดิม** บน VM ด้วย `ansible_connection=local` — **ไม่**เขียนขั้น deploy ซ้ำใน workflow · เหตุผล: ADR นี้เลือก Ansible เป็นเครื่องมือของบล็อก Config & Deploy และ playbook เป็นขั้นตอน deploy **ชุดเดียว**ที่คนรันด้วยมือก็ใช้ (07 §6) — ถ้าย้ายขั้นไปไว้ใน YAML ของ workflow จะมีสองชุดที่ต้องแก้คู่กันและเพี้ยนกันในที่สุด · เปลี่ยนแค่ "ต่อเครื่องอย่างไร" (SSH → local) ไม่เปลี่ยน "ทำอะไร" · production host ในอนาคตที่ต่อ SSH ได้ ใช้ playbook เดิมผ่าน SSH ได้ทันที |
-| user ของ runner | **`deploy`** ที่ `provision.yml` สร้างไว้แล้ว (ไม่มี sudo, อยู่ใน group `docker`, เป็นเจ้าของ `/opt/pos`) · **ไม่**สร้าง user แยก เพราะ `docker compose` ต้องอ่าน `/opt/pos/.env` (0600 ของ `deploy`) และ group `docker` เทียบเท่า root อยู่แล้ว — user แยกจะต้องได้ sudo เป็น `deploy` (อำนาจเท่ากัน) หรือต้องคลายสิทธิ์ `.env` (แย่กว่า) · รันเป็น systemd service ผ่าน `svc.sh` (คนที่มี sudo ติดตั้งครั้งเดียว) |
+| runner เรียก deploy อย่างไร | job มีขั้นเดียว: `sudo -n -u deploy /usr/local/bin/pos-deploy auto\|manual <sha>` (`deploy/scripts/pos-deploy.sh`) ซึ่ง **fetch `main` เอง** ลง clone ของ `deploy`, ปฏิเสธ commit ที่ไม่อยู่บน `main` หรือเก่ากว่า #233, checkout SHA นั้นแล้วรัน **`deploy/ansible/deploy.yml` ตัวเดิม** ด้วย `ansible_connection=local` — **ไม่**เขียนขั้น deploy ซ้ำใน workflow · เหตุผล: ADR นี้เลือก Ansible เป็นเครื่องมือของบล็อก Config & Deploy และ playbook เป็นขั้นตอน deploy **ชุดเดียว**ที่คนรันด้วยมือก็ใช้ (07 §6) — ถ้าย้ายขั้นไปไว้ใน YAML ของ workflow จะมีสองชุดที่ต้องแก้คู่กันและเพี้ยนกันในที่สุด · เปลี่ยนแค่ "ต่อเครื่องอย่างไร" (SSH → local) ไม่เปลี่ยน "ทำอะไร" · ไฟล์ที่รันมาจาก `main` บน GitHub **ไม่ใช่** จาก workspace ของ job |
+| user ของ runner | **`gha-runner`** (สร้างใหม่, ไม่อยู่ใน group `docker`, ไม่มี sudo ยกเว้น**กฎเดียว** `gha-runner ALL=(deploy) NOPASSWD: /usr/local/bin/pos-deploy`) · wrapper เป็นไฟล์ของ root แก้ไม่ได้จาก `deploy` หรือ `gha-runner` · ผล: job ที่หลุดมาถึง runner **อ่าน `/opt/pos/.env` ไม่ได้ สั่ง docker ไม่ได้** ทำได้แค่ deploy commit ที่อยู่บน `main` อยู่แล้ว · (ฉบับแรกของ addendum นี้ให้ runner รันเป็น `deploy` ด้วยเหตุผลว่า "user แยกได้อำนาจเท่ากัน" — ผิด: sudo ที่จำกัดเหลือคำสั่งเดียวซึ่งตรวจ argument เอง แคบกว่า group `docker` มาก; แก้ใน review ของ PR #237) |
+| job-started hook | `ACTIONS_RUNNER_HOOK_JOB_STARTED` ชี้ `deploy/scripts/runner-job-started.sh` (ติดตั้งเป็นไฟล์ของ root) — job ที่ไม่ใช่ `NuimanLP/srisurart-pos-flutter/.github/workflows/deploy.yml@refs/heads/main` หรือ event ไม่ใช่ `workflow_run`/`workflow_dispatch` **fail ก่อนขั้นแรกจะรัน** · fail-closed: ตัวแปรที่ runner ไม่ส่งมาถือว่าไม่ผ่าน · 🔴 ยังไม่ได้พิสูจน์กับ runner จริงว่าตัวแปรทั้งสามเห็นได้ใน hook — เจ้าของตรวจ log ของ run แรก (07 §6.2) |
 | secret | workflow **ไม่ใช้ secret เลย** — `.env` ยังวางโดย `provision.yml` ที่คนรัน (ต้อง sudo) · `DEMO_SSH_HOST/USER/KEY` ไม่จำเป็นต่อ deploy อัตโนมัติอีกต่อไป จึง**ไม่ต้อง**เก็บ private key ของ VM ไว้ใน GitHub · Environment `demo` ยังต้องมี เพื่อบังคับ deployment branch = `main` และเก็บประวัติ deploy · ข้อนี้**แทน**บรรทัด "GitHub Environment `demo` ถือ secret ทั้งหมด" ใน *ผลที่ตามมา* ข้างบน |
-| rollback | **อัตโนมัติ**เมื่อ playbook fail: deploy SHA ใน `.current_sha` ด้วย playbook ตัวเดิม — playbook เขียนไฟล์นี้หลัง `/health/ready` ผ่านเท่านั้น ตอน fail จึงยังเป็น release ก่อนหน้า · **มือ**: `workflow_dispatch` รับ SHA · schema ไม่ถอยเหมือนเดิม · run ที่ rollback แล้วยังเป็น**สีแดง** |
+| rollback | **อัตโนมัติ**เมื่อ playbook fail (หรือเกิน 20 นาทีต่อรอบ): deploy SHA ใน `.current_sha` ซ้ำด้วย `-e force_redeploy=true` — playbook เขียนไฟล์นี้หลัง `/health/ready` ผ่านเท่านั้น ตอน fail จึงยังเป็น release ก่อนหน้า · **ห้ามลบ `.current_sha` เพื่อบังคับ** — ถ้า rollback fail ด้วยเหตุเดียวกัน VM จะไม่เหลือบันทึกว่ารันอะไรอยู่ · **มือ**: `workflow_dispatch` รับ SHA · schema ไม่ถอยเหมือนเดิม · run ที่ rollback แล้วยังเป็น**สีแดง** · ไม่ deploy/rollback ไปก่อน #233 (`ROLLBACK_FLOOR`) |
 
 **ตัวเลือกที่ปฏิเสธ:**
 
@@ -88,22 +89,32 @@ runner ของ GitHub (GitHub-hosted) ต่อเข้าไม่ได้ 
 
 * 🔴 **workflow ที่ใช้ label ของ runner ต้องไม่มีทาง trigger จาก `pull_request` / `pull_request_target`** —
   `deploy.yml` รับเฉพาะ `workflow_run` (ของ push บน `main` ใน repo นี้, conclusion success) กับ `workflow_dispatch`
-  บน `main` · ทุก job มี `if:` เช็ค event + `github.repository` + branch · job `resolve` เช็คอีกชั้นว่า commit อยู่บน
+  บน `main` · ทั้งสอง job มี `if:` เช็ค event + `github.repository` + branch · job `resolve` เช็คอีกชั้นว่า commit อยู่บน
   ประวัติของ `main` (กัน SHA ของ fork ที่ GitHub เสิร์ฟผ่าน `refs/pull/*`) · ห้าม workflow อื่นใช้ label นี้
-* 🔴 **`if:` กันได้แค่ไฟล์นี้** — PR จาก fork ที่แก้ workflow ให้ `runs-on` label นี้เอง ไม่ผ่าน `if:` ของเราเลย ·
-  ตัวกันคือ setting ของ repo **"Require approval for all external contributors"** (run ของ fork PR ทุกอันต้องมีคน
-  กดอนุมัติ) ซึ่ง**ต้อง**ตั้งก่อนลงทะเบียน runner · ห้ามกดอนุมัติ run ของ fork ที่แตะ `.github/`
-* `permissions: contents: read` ระดับไฟล์ · checkout ด้วย `persist-credentials: false` · ค่าจาก input/event ส่งเข้า
-  shell ผ่าน `env:` และตรวจรูปแบบก่อนใช้ ไม่ interpolate `${{ }}` ลง script
-* runner ลงทะเบียนกับ **repo นี้เท่านั้น** (ไม่ใช่ระดับ account) · user `deploy` ไม่มี sudo · runner ไม่ใช้รันงานอื่น
-* ความเสี่ยงที่ยอมรับ: ใครที่เอา commit ขึ้น `main` ได้ (ผ่าน PR ตาม branch protection 07 §4) สั่งอะไรก็ได้บน VM `demo`
-  ในสิทธิ์ `docker` — เท่ากับอำนาจที่ deploy อัตโนมัติต้องมีอยู่แล้วไม่ว่าจะต่อด้วยวิธีไหน · ยอมรับได้บน `demo` ที่ไม่มี
-  ข้อมูลร้านจริง · **production host ต้องทบทวนข้อนี้ใหม่** (required reviewer ของ Environment, runner แบบ ephemeral)
+* 🔴 **`if:` กันได้แค่ไฟล์นี้** — workflow อื่นที่ตั้ง `runs-on` label นี้เอง (branch ที่คนมีสิทธิ์ write push ขึ้นมา, dispatch
+  ของ `deploy.yml` ฉบับแก้จาก branch อื่น, PR จาก fork) ไม่ผ่าน `if:` ของเราเลย · ตัวกันมีสามชั้น: (1) **job-started hook**
+  รับเฉพาะ `deploy.yml@refs/heads/main` (2) user `gha-runner` ไม่มี docker/`.env` ทำได้แค่ `pos-deploy` ซึ่งรับเฉพาะ commit
+  บน `main` (3) setting **"Require approval for all external contributors"** ซึ่ง**ต้อง**ตั้งก่อนลงทะเบียน runner · ห้ามกด
+  อนุมัติ run ของ fork ที่แตะ `.github/`
+* `permissions: contents: read` ระดับไฟล์ · ค่าจาก input/event ส่งเข้า shell ผ่าน `env:` และตรวจรูปแบบก่อนใช้ ไม่ interpolate
+  `${{ }}` ลง script · job บน runner ไม่ checkout อะไรเลย
+* runner ลงทะเบียนกับ **repo นี้เท่านั้น** (ไม่ใช่ระดับ account) · runner ไม่ใช้รันงานอื่น · แก้ `pos-deploy.sh` /
+  `runner-job-started.sh` ใน repo **ไม่มีผลกับ VM** จนกว่าเจ้าของจะติดตั้งใหม่ (ตั้งใจ — ไฟล์ของ root ต้องผ่านคน)
+* **ความเสี่ยงที่ยอมรับ (แก้ 2026-09-15 ใน review PR #237 — ฉบับแรกเขียนว่า "ใครที่เอา commit ขึ้น `main` ได้" ซึ่งไม่ครบ:
+  runner ตอนนั้นรับ job จาก branch ใดก็ได้ของคนที่มีสิทธิ์ write):**
+  * คนที่เอา commit ขึ้น `main` ได้ (PR ตาม branch protection 07 §4 — approval 0, admin ไม่ถูกบังคับ) กำหนด playbook ที่รันใน
+    สิทธิ์ `deploy` = group `docker` = root บน VM `demo` · เป็นอำนาจที่ deploy อัตโนมัติต้องมีไม่ว่าจะต่อด้วยวิธีไหน
+  * คนที่มีสิทธิ์ write สั่ง `workflow_dispatch` ได้ = deploy/rollback ไป commit ใดก็ได้บน `main` ที่ใหม่กว่า #233 — ไม่มีอะไรมากกว่านั้น
+  * ถ้า hook ไม่ทำงาน (เช่นตัวแปรไม่ถูกส่ง — fail-closed จะทำให้ **ทุก** deploy ถูกปฏิเสธ ไม่ใช่ทุก job ผ่าน) job ที่หลุดมาจะรันโค้ดใน
+    สิทธิ์ `gha-runner` บน VM ที่อยู่ในเครือข่ายมหาวิทยาลัยได้ แต่แตะ docker/`.env` ไม่ได้
+  * ยอมรับได้บน `demo` ที่ไม่มีข้อมูลร้านจริง · **production host ต้องทบทวนใหม่**: required reviewer ของ Environment และ runner แบบ
+    ephemeral/JIT ที่ถูกสร้างต่อ job
 
 **ผลที่ตามมา:**
 
-* `.github/workflows/deploy.yml` (ใหม่) + `.github/actionlint.yaml` ประกาศ label · ขั้นตั้ง runner และสิ่งที่เจ้าของต้องทำ
-  อยู่ใน `07_CICD_DEPLOY.md §6.2`
-* VM ต้องมี `ansible-core` + `git` เพิ่ม (runner รัน playbook บนเครื่องตัวเอง)
-* `deploy/ansible/deploy.yml` **ไม่ต้องแก้** — workflow override inventory ด้วย `-i 'vm-demo,' -e ansible_connection=local` ·
-  การรันด้วยมือผ่าน SSH (handoff 2026-09-15 §5) ยังใช้ได้เหมือนเดิม
+* `.github/workflows/deploy.yml` (ใหม่) + `.github/actionlint.yaml` ประกาศ label · `deploy/scripts/pos-deploy.sh` +
+  `deploy/scripts/runner-job-started.sh` (ใหม่, ติดตั้งบน VM โดยเจ้าของ) · ขั้นตั้ง runner อยู่ใน `07_CICD_DEPLOY.md §6.2`
+* VM ต้องมี `ansible-core` + `git` เพิ่ม (playbook รันบนเครื่องตัวเอง)
+* `deploy/ansible/deploy.yml` แก้แค่ `force_redeploy` ที่ duplicate-release check · inventory override จาก `pos-deploy` ด้วย
+  `-i 'vm-demo,' -e ansible_connection=local` · การรันด้วยมือผ่าน SSH (handoff 2026-09-15 §5) ยังใช้ได้เหมือนเดิม
+* `deploy/scripts/verify-ghcr-tags.sh` แยก exit 1 (ยังไม่มี image) ออกจาก 2 (ถาม registry ไม่ได้) — 2 ทำให้ run แดง
