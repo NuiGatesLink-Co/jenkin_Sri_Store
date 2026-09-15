@@ -116,6 +116,17 @@ Root cause: `TenantImportService` was written against invented keys (`sa_purchas
 
 What an orphan should become is the owner's decision → **#238**.
 
+**Update: #238 decided and built** (owner, 2026-09-15: option (a) tombstones; branch `feat/238-import-tombstones`, stacked on #244).
+- `server/src/platform/snapshot-tombstones.ts` plans one soft-deleted row per missing id:
+  - which references: movements/suppliers → products, sales → customers/mechanics, credit payments → mechanics
+  - name from history (`movements`/`sale_items` name and part_no, `sales.customer_name`/`mechanic_name`, `returns.mechanic_name`)
+  - zero totals, `deleted_at` = import time
+  - marked with `products.brand` or `code` prefix `import-tombstone`
+  - counts in `audit_log.after` and in the import response
+- Refused in pre-flight with a 400 listing the ids: a reference with no usable name anywhere, and a credit note whose bill is missing.
+- **`full/realistic` now imports:** 201 in 6.4 s. Tombstones: 2 products, 1 customer, 1 mechanic. All six §9 checks pass. Counts include the tombstones, the live rows equal the file, and 0 customers/mechanics differ.
+- The e2e runs both profiles.
+
 ## Bugs fixed in this PR (root cause + test)
 
 1. **Import body capped at 100 KiB** (`server/src/app.setup.ts`). A 10 MiB JSON parser (matching nginx `client_max_body_size`) now covers `POST /api/v1/platform/tenants/:id/import` only.
