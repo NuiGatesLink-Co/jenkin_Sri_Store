@@ -13,9 +13,10 @@ import {
   type QuotesPurgeJobPayload,
 } from '../queue.constants.js';
 import { TenantJobRunner } from '../tenant-job-runner.js';
+import { WORKER_SETTINGS } from '../jitter-backoff.js';
 
 @Injectable()
-@Processor(QUEUE_MAINTENANCE)
+@Processor(QUEUE_MAINTENANCE, WORKER_SETTINGS)
 export class MaintenanceProcessor extends WorkerHost {
   constructor(
     private readonly dataSource: DataSource,

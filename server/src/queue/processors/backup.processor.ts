@@ -11,6 +11,7 @@ import {
   type TenantExportJobPayload,
 } from '../queue.constants.js';
 import { TenantJobRunner } from '../tenant-job-runner.js';
+import { WORKER_SETTINGS } from '../jitter-backoff.js';
 
 function iso(d: Date | string | null | undefined): string | null {
   if (!d) return null;
@@ -57,7 +58,7 @@ export interface ExportSnapshotData {
 }
 
 @Injectable()
-@Processor(QUEUE_BACKUP)
+@Processor(QUEUE_BACKUP, WORKER_SETTINGS)
 export class BackupProcessor extends WorkerHost {
   constructor(
     private readonly tenantJobRunner: TenantJobRunner,
