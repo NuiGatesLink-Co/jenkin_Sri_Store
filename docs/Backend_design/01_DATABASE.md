@@ -292,7 +292,7 @@ CREATE TABLE users (
   username      TEXT NOT NULL,
   password_hash TEXT NOT NULL,                  -- argon2id
   display_name  TEXT NOT NULL,
-  role          TEXT NOT NULL CHECK (role IN ('owner','manager','cashier')),  -- ⚠️ 2026-09-15 (#240 E1): เฟส 2 เหลือ CHECK (role IN ('owner')) · บัญชีร้านบัญชีเดียว (E2) — 08 §3
+  role          TEXT NOT NULL CHECK (role IN ('owner','manager','cashier')),  -- ⚠️ 2026-09-15 (#240 E1/E2/F9): เฟส 2 เหลือ CHECK (role IN ('owner')) · user active หนึ่งคนต่อร้าน (UNIQUE INDEX ON users(tenant_id) WHERE is_active) — 08 §3
   pin_hash      TEXT,                           -- manager PIN สำหรับยืนยันงานเสี่ยง (void/ลดราคาเกิน) · ⚠️ 2026-09-15 (#240 E3): void ไม่ใช้ PIN แล้ว → ลบคอลัมน์ในเฟส 2 (08 §3)
   is_active     BOOLEAN NOT NULL DEFAULT TRUE,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),

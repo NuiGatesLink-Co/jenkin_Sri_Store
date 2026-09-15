@@ -49,7 +49,7 @@ Build & Test · Security Scan · Package/Storage · Config & Deploy · KV Storag
 
 * **key ใน etcd มีตัวเดียว (`log_level`)** — ค่า rate limit ถูกตัดออกเพราะไม่มีผู้ใช้ (ADR-0006 เก็บโควตาใน `tenants.plan`)
 * **maintenance mode ใน etcd** — ต้องมีข้อความไทยหน้าเคาน์เตอร์ใหม่ ซึ่ง `CLAUDE.md` ห้ามแต่งเอง รอร้าน
-* **production host** — ยังไม่เลือก (ครบกำหนดก่อน `q4`) · เมื่อเลือก: inventory ที่สอง + required reviewer
+* ~~**production host** — ยังไม่เลือก (ครบกำหนดก่อน `q4`) · เมื่อเลือก: inventory ที่สอง + required reviewer~~ — **เคาะ 2026-09-15 (#242): `mob04` production เดียว** (addendum ด้านล่าง)
 * **ชื่อโดเมน** — ถ้ามีเมื่อไร ค่อยเปลี่ยน self-signed เป็น certbot
 * **retention ของ image บน GHCR** — ยังไม่ตั้งนโยบายลบ tag เก่า
 
@@ -58,6 +58,14 @@ Build & Test · Security Scan · Package/Storage · Config & Deploy · KV Storag
 | # | ตัดสิน | ผลกับ ADR นี้ |
 |---|---|---|
 | #242 | host = VM ของภาค **`mob04`** · **สภาพแวดล้อมเดียว และเป็น production** · ไม่มี demo แยก · cutover ร้านจริงจากนอกมหาวิทยาลัย = เฟสถัดไป | environment ที่ ADR นี้และ `07_CICD_DEPLOY.md` เรียก `demo` คือ production ตัวเดียว (ชื่อ environment ใน GitHub แก้ใน #67) |
-| E11 | deploy ด้วย **self-hosted GitHub Actions runner บน `mob04`** · รันเฉพาะ job `deploy` บน `main` ผ่าน protected environment · **ห้ามรัน workflow ของ PR** (repo public) | แทน "Actions → SSH → Ansible" จาก GitHub-hosted runner ซึ่งเข้า VM ในเครือข่ายมหาวิทยาลัยไม่ได้ · Ansible playbook ยังใช้ แต่รันจาก runner บนเครื่องเอง |
+| ~~E11~~ | ~~deploy ด้วย **self-hosted GitHub Actions runner บน `mob04`** · รันเฉพาะ job `deploy` บน `main` ผ่าน protected environment · **ห้ามรัน workflow ของ PR** (repo public)~~ | ~~แทน "Actions → SSH → Ansible" จาก GitHub-hosted runner ซึ่งเข้า VM ในเครือข่ายมหาวิทยาลัยไม่ได้ · Ansible playbook ยังใช้ แต่รันจาก runner บนเครื่องเอง~~ **(แทนที่โดย F4 รอบ 3)** |
+
+รายละเอียด: [`08_PHASE2_SPEC.md §17`](../08_PHASE2_SPEC.md) · ticket #67
+
+## Addendum 2026-09-15 (รอบ 3) — owner round 3 on #240 (F4)
+
+| # | ตัดสิน | ผลกับ ADR นี้ |
+|---|---|---|
+| F4 | **deploy แบบ pull**: systemd timer บน `mob04` อ่าน digest ของ image `main` บน GHCR (server + web) · เปลี่ยน → อ่าน sha จาก label `org.opencontainers.image.revision` → รัน `deploy.yml` ในเครื่อง (rollback เดิม) · lock กันรันซ้อน · **ไม่มี self-hosted runner** | แทน E11 และ "Actions → SSH → Ansible" · repo public — runner ที่ fork PR เรียกได้ = รันโค้ดบน production · ไม่ต้องมี inbound · GitHub Actions เหลือ build + scan + push image |
 
 รายละเอียด: [`08_PHASE2_SPEC.md §17`](../08_PHASE2_SPEC.md) · ticket #67

@@ -507,9 +507,9 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | POST | `/auth/refresh` | refresh | – (เช็ค `devices.retired_at` ของ `did`) | – | – | – |
 | POST | `/auth/device` `{code}` 🆕 | – | – | – | – | – |
 | GET | `/auth/me` | ✔ | ทั้งคู่ | – | – | – |
-| GET | `/devices` 🆕 | owner | ทั้งคู่ | – | – | – |
-| POST | `/devices` `{label, role}` 🆕 | owner | ทั้งคู่ | – | – | ✔ |
-| POST | `/devices/{id}/retire` `{physicalCash?}` 🆕 (#144) | owner | ทั้งคู่ | – | – | ✔ |
+| GET | `/devices` 🆕 | ~~owner~~ **ต้องมี `did`** (2026-09-15 F6, 08 §3) | ทั้งคู่ | – | – | – |
+| POST | `/devices` `{label, role}` 🆕 | ~~owner~~ **ต้องมี `did`** (2026-09-15 F6, 08 §3) | ทั้งคู่ | – | – | ✔ |
+| POST | `/devices/{id}/retire` `{physicalCash?}` 🆕 (#144) | ~~owner~~ **ต้องมี `did`** (2026-09-15 F6, 08 §3) | ทั้งคู่ | – | – | ✔ |
 | **GET** | **`/bootstrap`** 🆕 (#25) | ✔ | ทั้งคู่ | `ETag`/`304`, ไม่ใช่ Redis — ดู §3.1 (#32 ไม่ทำ Redis cache ให้ bootstrap — ไม่มีใน §5) | – | – |
 | GET | `/products` (`?search=` / `?partNo=` / `?updatedSince=`) | ✔ | ทั้งคู่ | ✅ 5m | – | – |
 | GET | `/products/:id` | ✔ | ทั้งคู่ | ✅ 5m | – | – |
@@ -548,7 +548,7 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 | GET | `/reports/*` | ✔ | ทั้งคู่ | – *(ยังไม่ cache — §5 บอก "ปล่อยหมดอายุเอง" ขัดกับ AC3 ของ #32 ที่ให้อ่านหลังเขียนต้องสด → คำถามถึงเจ้าของโปรเจกต์ ดู `server/README.md` The server cache)* | – | – |
 | GET | `/settings` | ✔ (ทุก role) | ทั้งคู่ | ✅ 3600s ±10% (#32) | – | – |
 | PATCH | `/settings` | manager | ทั้งคู่ | invalidate (#32) | – | ✔ |
-| POST | `/backup/export` | **owner เท่านั้น** | ทั้งคู่ | – | ✅ `tenant-export` | ✔ |
+| POST | `/backup/export` | ~~**owner เท่านั้น**~~ **ต้องมี `did`** (2026-09-15 F6) | ทั้งคู่ | – | ✅ `tenant-export` | ✔ |
 | ~~POST~~ | ~~`/backup/import`~~ → ย้ายไป **§4.1 admin plane** | – | – | – | – | – |
 | **GET** | **`/doc-counters`** 🆕 | ✔ | **pos เท่านั้น** | – | – | – |
 | GET | `/export/:entity.csv` | manager | ทั้งคู่ | – | – | – |
