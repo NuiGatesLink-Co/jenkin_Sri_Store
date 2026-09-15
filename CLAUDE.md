@@ -690,7 +690,8 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
 - **Settled 2026-09-15 (owner):** #145 + #163 — Thai wording for `SALE_NOT_IN_OPEN_SHIFT` and the four device
   errors (02 §8.1, `ServerErrorResolver`); enrol/retire stays **owner only**; enrol code 15 min single use; the
   plaintext code in `idempotency_keys` is accepted; one `เข้าสู่ระบบไม่สำเร็จ` for every login 401; code re-issue,
-  label edit and a client device screen are **phase 2** (ADR-0004 *ยังไม่เคาะ*).
+  label edit and a client device screen are **phase 2** (ADR-0004 *ยังไม่เคาะ*). PR #176; read
+  `docs/handoff_log/owner-decisions-145-163.md`.
 - **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
   (owner runs 07 §4); `ApiClient` has no request timeout (unticketed). The repo's only long-lived branches are
   `main` and `POC_sample_offline_first`.
