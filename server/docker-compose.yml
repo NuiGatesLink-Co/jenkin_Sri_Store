@@ -10,7 +10,8 @@
 #
 # Memory budget (faculty VM 4 vCPU / 6 GB): 1024 + 2×256 + 3×384 + 256 + 128 + 64 + 256 (etcd)
 # ≈ 3.3 GB.
-# Connections: max_connections=100 → 3 api × 15 + worker × 5 = 50 ≤ 80 (80%).
+# Connections: max_connections=100 → 3 api × (15 request + 2 audit + 1 health) + worker ×
+# (5 + 2 + 1) = 62 ≤ 80 (80%). The admin pool is platform-plane only (server/README.md *Invariants this stack enforces*).
 
 name: srisurart-pos
 
