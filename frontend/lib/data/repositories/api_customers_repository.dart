@@ -117,7 +117,7 @@ class ApiCustomersRepository extends CustomersRepository {
         if (data.address.present && data.address.value != null) 'address': data.address.value,
       };
 
-      final res = await apiClient.post('/api/v1/customers', body: body);
+      final res = await apiClient.post('/api/v1/customers', body: body, headers: idempotencyKey());
       if (res is Map) {
         final comp = _customerToCompanion(Map<String, dynamic>.from(res));
         await db.into(db.customers).insertOnConflictUpdate(comp);
@@ -141,7 +141,7 @@ class ApiCustomersRepository extends CustomersRepository {
       if (patch.phone.present) body['phone'] = patch.phone.value;
       if (patch.address.present) body['address'] = patch.address.value;
 
-      final res = await apiClient.patch('/api/v1/customers/$id', body: body);
+      final res = await apiClient.patch('/api/v1/customers/$id', body: body, headers: idempotencyKey());
       if (res is Map) {
         final comp = _customerToCompanion(Map<String, dynamic>.from(res));
         await db.into(db.customers).insertOnConflictUpdate(comp);
@@ -159,7 +159,7 @@ class ApiCustomersRepository extends CustomersRepository {
   @override
   Future<void> deleteCustomer(String id) async {
     try {
-      await apiClient.delete('/api/v1/customers/$id');
+      await apiClient.delete('/api/v1/customers/$id', headers: idempotencyKey());
       await (db.update(db.customers)..where((t) => t.id.equals(id))).write(
         CustomersCompanion(
           deletedAt: Value(DateTime.now()),

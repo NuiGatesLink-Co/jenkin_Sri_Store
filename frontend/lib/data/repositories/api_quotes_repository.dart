@@ -130,7 +130,7 @@ class ApiQuotesRepository extends QuotesRepository {
             .toList(),
       };
 
-      final res = await apiClient.post('/api/v1/quotes', body: body);
+      final res = await apiClient.post('/api/v1/quotes', body: body, headers: idempotencyKey());
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
         final realId = (resMap['id'] ?? newId('q')) as String;
@@ -204,7 +204,7 @@ class ApiQuotesRepository extends QuotesRepository {
   @override
   Future<void> deleteQuote(String id) async {
     try {
-      await apiClient.delete('/api/v1/quotes/$id');
+      await apiClient.delete('/api/v1/quotes/$id', headers: idempotencyKey());
       await (db.delete(db.quoteItems)..where((t) => t.quoteId.equals(id))).go();
       await (db.delete(db.quotes)..where((t) => t.id.equals(id))).go();
       return;
@@ -218,15 +218,33 @@ class ApiQuotesRepository extends QuotesRepository {
   @override
   Future<void> updateQuote(String id, QuotesCompanion patch) async {
     try {
+      if (patch.status.present && patch.status.value == 'converted') {
+        final res = await apiClient.post('/api/v1/quotes/$id/convert', headers: idempotencyKey());
+        if (res is Map) {
+          final resMap = Map<String, dynamic>.from(res);
+          final status = (resMap['status'] ?? 'converted') as String;
+          final convertedAt = stampOrNull(resMap['convertedAt'] ?? resMap['converted_at']) ?? DateTime.now();
+          await (db.update(db.quotes)..where((t) => t.id.equals(id))).write(
+            QuotesCompanion(
+              status: Value(status),
+              convertedAt: Value(convertedAt),
+            ),
+          );
+          return;
+        }
+      }
+
       final body = <String, dynamic>{};
       if (patch.customerName.present) body['customerName'] = patch.customerName.value;
       if (patch.customerPhone.present) body['customerPhone'] = patch.customerPhone.value;
       if (patch.notes.present) body['notes'] = patch.notes.value;
 
-      final res = await apiClient.patch('/api/v1/quotes/$id', body: body);
-      if (res is Map) {
-        await db.into(db.quotes).insertOnConflictUpdate(patch.copyWith(id: Value(id)));
-        return;
+      if (body.isNotEmpty) {
+        final res = await apiClient.patch('/api/v1/quotes/$id', body: body, headers: idempotencyKey());
+        if (res is Map) {
+          await db.into(db.quotes).insertOnConflictUpdate(patch.copyWith(id: Value(id)));
+          return;
+        }
       }
     } on ApiException catch (e) {
       rethrowServerRefusal(e);
@@ -238,7 +256,7 @@ class ApiQuotesRepository extends QuotesRepository {
   @override
   Future<QuoteRow?> duplicateQuote(String id) async {
     try {
-      final res = await apiClient.post('/api/v1/quotes/$id/duplicate');
+      final res = await apiClient.post('/api/v1/quotes/$id/duplicate', headers: idempotencyKey());
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
         final newIdStr = (resMap['id'] ?? newId('q')) as String;
@@ -312,7 +330,7 @@ class ApiQuotesRepository extends QuotesRepository {
   @override
   Future<int> purgeOldQuotes({int olderThanDays = 90}) async {
     try {
-      final res = await apiClient.post('/api/v1/quotes/purge', body: {'olderThanDays': olderThanDays});
+      final res = await apiClient.post('/api/v1/quotes/purge', body: {'olderThanDays': olderThanDays}, headers: idempotencyKey());
       if (res is Map) {
         final resMap = Map<String, dynamic>.from(res);
         if (resMap['queued'] == true || resMap['count'] != null) {

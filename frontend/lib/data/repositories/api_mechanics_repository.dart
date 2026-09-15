@@ -142,7 +142,7 @@ class ApiMechanicsRepository extends MechanicsRepository {
         if (data.creditLimit.present) 'creditLimit': wireMoney(data.creditLimit.value),
       };
 
-      final res = await apiClient.post('/api/v1/mechanics', body: body);
+      final res = await apiClient.post('/api/v1/mechanics', body: body, headers: idempotencyKey());
       if (res is Map) {
         final comp = _mechanicToCompanion(Map<String, dynamic>.from(res));
         await db.into(db.mechanics).insertOnConflictUpdate(comp);
@@ -169,7 +169,7 @@ class ApiMechanicsRepository extends MechanicsRepository {
       if (patch.note.present) body['note'] = patch.note.value;
       if (patch.creditLimit.present) body['creditLimit'] = wireMoney(patch.creditLimit.value);
 
-      final res = await apiClient.patch('/api/v1/mechanics/$id', body: body);
+      final res = await apiClient.patch('/api/v1/mechanics/$id', body: body, headers: idempotencyKey());
       if (res is Map) {
         final comp = _mechanicToCompanion(Map<String, dynamic>.from(res));
         await db.into(db.mechanics).insertOnConflictUpdate(comp);
@@ -187,7 +187,7 @@ class ApiMechanicsRepository extends MechanicsRepository {
   @override
   Future<void> deleteMechanic(String id) async {
     try {
-      await apiClient.delete('/api/v1/mechanics/$id');
+      await apiClient.delete('/api/v1/mechanics/$id', headers: idempotencyKey());
       await (db.update(db.mechanics)..where((t) => t.id.equals(id))).write(
         MechanicsCompanion(
           deletedAt: Value(DateTime.now()),
