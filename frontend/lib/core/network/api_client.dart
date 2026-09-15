@@ -15,6 +15,8 @@ class ApiClient {
     http.Client? httpClient,
     this.tokenStorage,
     this.onSessionExpired,
+    this.readTimeout = defaultReadTimeout,
+    this.writeTimeout = defaultWriteTimeout,
   })  : baseUrl = (baseUrl ?? const String.fromEnvironment('API_BASE_URL', defaultValue: 'http://localhost:3000'))
             .replaceAll(RegExp(r'/+$'), ''),
         _client = httpClient ?? http.Client();
@@ -22,6 +24,25 @@ class ApiClient {
   final String baseUrl;
   final http.Client _client;
   final TokenStorage? tokenStorage;
+
+  /// How long a `GET` waits for its response before failing (#183).
+  ///
+  /// Reads are safe to repeat and nothing in the API takes longer than a few
+  /// hundred milliseconds to read, so the counter is told sooner.
+  static const Duration defaultReadTimeout = Duration(seconds: 15);
+
+  /// How long every other method — the money/stock writes, and
+  /// `/auth/refresh` — waits before failing (#183).
+  ///
+  /// Just above nginx's `proxy_read_timeout 30s` + `proxy_connect_timeout 2s`
+  /// (`server/docker/nginx/nginx.conf`): when the API itself is slow, the
+  /// proxy's own 504 ends the wait first, so this only fires when the link to
+  /// nginx is what hung. Waiting that long for a write is deliberate — a
+  /// real answer is worth more to the counter than an early "fate unknown".
+  static const Duration defaultWriteTimeout = Duration(seconds: 35);
+
+  final Duration readTimeout;
+  final Duration writeTimeout;
 
   /// Called when the refresh token is gone or the server refuses it — the
   /// session is over and only a fresh login can continue.
@@ -82,6 +103,7 @@ class ApiClient {
       },
       path: path,
       skipAuth: skipAuth,
+      timeout: readTimeout,
     );
   }
 
@@ -100,6 +122,7 @@ class ApiClient {
       },
       path: path,
       skipAuth: skipAuth,
+      timeout: writeTimeout,
     );
   }
 
@@ -118,6 +141,7 @@ class ApiClient {
       },
       path: path,
       skipAuth: skipAuth,
+      timeout: writeTimeout,
     );
   }
 
@@ -136,6 +160,7 @@ class ApiClient {
       },
       path: path,
       skipAuth: skipAuth,
+      timeout: writeTimeout,
     );
   }
 
@@ -152,6 +177,7 @@ class ApiClient {
       },
       path: path,
       skipAuth: skipAuth,
+      timeout: writeTimeout,
     );
   }
 
@@ -169,6 +195,7 @@ class ApiClient {
       },
       path: path,
       skipAuth: skipAuth,
+      timeout: readTimeout,
     );
 
     final statusCode = response.statusCode;
@@ -187,10 +214,16 @@ class ApiClient {
   }
 
   Future<http.Response> _executeWithRetry(
-    Future<http.Response> Function() execute, {
+    Future<http.Response> Function() rawExecute, {
     required String path,
     required bool skipAuth,
+    required Duration timeout,
   }) async {
+    // Every send — the first and the one retry after a 401 — gets its own
+    // [timeout]; with the refresh in between, one call waits at most three
+    // timeouts. A timeout is never retried here: it throws out of this method.
+    Future<http.Response> execute() => _withTimeout(rawExecute(), timeout, path);
+
     final sentWith = await tokenStorage?.getAccessToken();
     final response = await execute();
 
@@ -217,9 +250,42 @@ class ApiClient {
     Future<http.Response> Function() execute, {
     required String path,
     required bool skipAuth,
+    required Duration timeout,
   }) async {
-    final response = await _executeWithRetry(execute, path: path, skipAuth: skipAuth);
+    final response = await _executeWithRetry(
+      execute,
+      path: path,
+      skipAuth: skipAuth,
+      timeout: timeout,
+    );
     return _handleResponse(response);
+  }
+
+  /// Fails [send] with an [http.ClientException] — the class a dropped socket
+  /// raises — once [timeout] has passed with no response (#183).
+  ///
+  /// 🔴 A timeout is NOT a verdict. The request may have reached the server and
+  /// committed; only the reply is missing. So it must never surface as an
+  /// [ApiException]: `isVerdict` would read a 4xx-looking one as an answer,
+  /// `PendingWrites` would forget the bill's id and `Idempotency-Key`, and the
+  /// counter's second press would ring the bill up twice. As a transport error
+  /// it takes exactly the path a lost socket takes everywhere — the attempt
+  /// stays parked, the refresh keeps both tokens.
+  ///
+  /// The abandoned request is not cancelled (a browser XHR keeps running);
+  /// its late reply is simply dropped, which is why the retry must replay.
+  Future<http.Response> _withTimeout(
+    Future<http.Response> send,
+    Duration timeout,
+    String path,
+  ) {
+    return send.timeout(
+      timeout,
+      onTimeout: () => throw http.ClientException(
+        'No response within ${timeout.inMilliseconds} ms',
+        _buildUri(path),
+      ),
+    );
   }
 
   bool _isAuthPath(String path) {
@@ -273,10 +339,16 @@ class ApiClient {
     // A transport failure propagates as-is (ClientException, TimeoutException…):
     // it is what the original request would have thrown had its own socket
     // dropped, and every caller already reads it as "the server never answered".
-    final response = await _client.post(
-      _buildUri('/api/v1/auth/refresh'),
-      headers: await _buildHeaders(skipAuth: true),
-      body: jsonEncode({'refreshToken': currentRefreshToken}),
+    // A timeout is one of those (#183) — it keeps both tokens.
+    const refreshPath = '/api/v1/auth/refresh';
+    final response = await _withTimeout(
+      _client.post(
+        _buildUri(refreshPath),
+        headers: await _buildHeaders(skipAuth: true),
+        body: jsonEncode({'refreshToken': currentRefreshToken}),
+      ),
+      writeTimeout,
+      refreshPath,
     );
     final status = response.statusCode;
 
