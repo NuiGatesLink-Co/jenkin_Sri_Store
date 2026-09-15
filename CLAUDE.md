@@ -34,7 +34,7 @@ The repo now carries **two lines of work**. Know which one you are on before you
   The Dart repositories stay the behavioural reference for those rules — port them, don't reinvent.
 - `POC_sample_offline_first` preserves the offline-first build exactly as the shop runs it today,
   so the phase-1 rule **"the shop keeps running the Drift build, no cutover"** stays testable.
-- The offline-first design is **not abandoned** — it returns as **phase 2** (outbox + `offlineOk`
+- The offline-first design is **not abandoned** — it returns as **phase 2** (outbox + ~~`offlineOk`~~ — dropped 2026-09-15, see 08
   + a single `role='pos'` writer per tenant, ADR-0004). The POC branch is its starting point.
 
 > Read `docs/Backend_design/adr/README.md` before writing backend code, and remember:
@@ -766,6 +766,15 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   `docs/handoff_log/lane-a-closeout-round-2026-09-15.md` for the ordered next steps. The repo's only long-lived
   branches are `main` and `POC_sample_offline_first`.
 
+**Phase 2 spec — `docs/Backend_design/08_PHASE2_SPEC.md` (2026-09-15; owner decisions D1–D15, E1–E11, F1–F10 in #240, map #243).**
+Read it before any phase-2 ticket: one user role `owner` + one active shop account per tenant (slice 1; device roles unchanged),
+retire/enrol/export need an enrolled device token, no `offlineOk` (column dropped), the `pos` device issues RC/CN online and
+offline, `POST /sync/push` authenticates with the device token, acts as the tenant's single active user, replays by key then
+client id before any check and stops at the first non-verdict (a head op stuck 3 times goes to the owner screen), multiple
+shifts per day, online void = reason only (no PIN), the offline-PIN 3-day window is enforced on the till only, production =
+the department VM `mob04` deployed by the hardened self-hosted runner from PR #237 (F4′ reversed the pull-based timer; a real-shop cutover is a later phase).
+§2 records the design decisions; the only open item is the Thai-strings ticket (F10). ADR-0004/0007/0009/0010/0013 carry dated addenda.
+
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
 back** (decided 2026-09-04). Recover from git history if you ever need the Supabase-era text:
@@ -796,7 +805,7 @@ back** (decided 2026-09-04). Recover from git history if you ever need the Supab
 - **Multi-tenant client work** — the Flutter side of phase 1/2: an `ApiRepository` layer behind the
   existing repository interfaces (`03_ARCHITECTURE.md §8` task `q1`) that **writes through to
   Drift** and maps at the repository boundary ([ADR-0010](docs/Backend_design/adr/0010-client-write-through-cache.md)),
-  then the outbox + `offlineOk` shell. Thai strings for the 7 new server errors now have
+  then the outbox ~~+ `offlineOk`~~ shell (no `offlineOk` since 2026-09-15 — `docs/Backend_design/08_PHASE2_SPEC.md`). Thai strings for the 7 new server errors now have
   **agent-drafted placeholders** accepted by the project owner (`02_API_SCREENS.md §8.1`) — three
   of them are counter-facing and still need the shop's own wording. Never invent new ones.
 - **Re-capture tutorial screenshots** from the Flutter app (current images are from the JS app).
