@@ -1,7 +1,10 @@
 import { Global, Module, Inject } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { APP_CONFIG, type AppConfig } from '../config/config.js';
+import type { Logger } from 'pino';
 import { TenantService } from '../common/database/tenant.service.js';
+import { APP_ROLE_TIMEOUTS } from '../common/database/commit-ceiling.js';
+import { LOGGER } from './logger.provider.js';
 
 export const ADMIN_DATA_SOURCE = Symbol('ADMIN_DATA_SOURCE');
 export const AUDIT_DATA_SOURCE = Symbol('AUDIT_DATA_SOURCE');
@@ -19,8 +22,8 @@ export const AUDIT_DATA_SOURCE = Symbol('AUDIT_DATA_SOURCE');
   providers: [
     {
       provide: DataSource,
-      inject: [APP_CONFIG],
-      useFactory: async (cfg: AppConfig) => {
+      inject: [APP_CONFIG, LOGGER],
+      useFactory: async (cfg: AppConfig, logger: Logger) => {
         const ds = new DataSource({
           type: 'postgres',
           url: cfg.databaseUrl,
@@ -35,7 +38,9 @@ export const AUDIT_DATA_SOURCE = Symbol('AUDIT_DATA_SOURCE');
             idleTimeoutMillis: 30000,
           },
         });
-        return ds.initialize();
+        await ds.initialize();
+        await warnIfRoleTimeoutsDiffer(ds, logger);
+        return ds;
       },
     },
     {
@@ -98,5 +103,26 @@ export class DbModule {
     if (this.ds.isInitialized) await this.ds.destroy();
     if (this.adminDs.isInitialized) await this.adminDs.destroy();
     if (this.auditDs.isInitialized) await this.auditDs.destroy();
+  }
+}
+
+/**
+ * #213: the `pos_app` timeouts come from migration `1788652802131` as role-in-database
+ * settings, which a plain `pg_dump`/restore drops and which a pooled connection only picks
+ * up when it reconnects. Loud, but never fatal — readiness does not depend on it.
+ */
+export async function warnIfRoleTimeoutsDiffer(ds: DataSource, logger: Logger): Promise<void> {
+  try {
+    for (const [name, expected] of Object.entries(APP_ROLE_TIMEOUTS)) {
+      const [row] = (await ds.query(`SHOW ${name}`)) as Record<string, string>[];
+      if (row?.[name] !== expected) {
+        logger.warn(
+          { setting: name, actual: row?.[name], expected },
+          'pos_app transaction ceiling is not in force (#213): re-run migrations or restore role settings, then restart',
+        );
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, 'could not read the pos_app transaction ceiling (#213)');
   }
 }

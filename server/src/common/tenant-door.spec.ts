@@ -99,7 +99,9 @@ function reachesForPool(source: string): boolean {
 /**
  * Files allowed to hold a pool of their own, and why (`src/`-relative, production code).
  * Built from the tree on 2026-09-14, not from the migration plan's 12-file count. A new
- * entry needs a reason a reviewer can check, not just a line.
+ * entry needs a reason a reviewer can check, not just a line. A pool holder that writes a table
+ * clients pull by `updated_at` must commit through the commit guard (`runTx` /
+ * `TenantJobRunner`) — README *The transaction ceiling (#213)*.
  */
 const ALLOWED: Record<string, string> = {
   'common/database/tenant.service.ts':

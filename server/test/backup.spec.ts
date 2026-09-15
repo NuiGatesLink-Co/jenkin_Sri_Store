@@ -55,6 +55,9 @@ describe('Backup Module (unit)', () => {
 
     it('assembles complete snapshot matching legacy sa_* format and records audit log', async () => {
       // Mock queries in the sequence called in BackupProcessor
+      // 0. SET LOCAL statement_timeout / idle_in_transaction_session_timeout (#213)
+      mockEm.query.mockResolvedValueOnce([]);
+      mockEm.query.mockResolvedValueOnce([]);
       // 1. Settings
       mockEm.query.mockResolvedValueOnce([
         {

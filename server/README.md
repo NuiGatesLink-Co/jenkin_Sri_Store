@@ -470,6 +470,75 @@ survive a rollback (and `/auth/token` must not hold a transaction across its arg
    rejection is an unhandled rejection, which Node answers by killing the worker.
    `TenantScopeMiddleware` does no I/O at all; keep it that way.
 
+### The transaction ceiling (#213)
+
+🔴 **ADR-0010's phase-2 pull rewinds its `?updatedSince=` cursor by 30 s (#191), and that is
+safe only while no write commits more than 30 s after it stamped `updated_at = now()`** (the
+transaction's *start*). A later commit lands behind a cursor that has already moved past it, and
+the row is never pulled. Change one of these numbers only together with the other.
+
+Postgres here is 16, which has no `transaction_timeout` (added in 17), so the ceiling has two parts:
+
+| part | where | value | what it does |
+|---|---|---|---|
+| **commit guard** | `TenantService.runTx`, `TenantJobRunner.runWithTenantContext` (`common/database/commit-ceiling.ts`) | **25 s** | takes a monotonic mark just before `BEGIN`; right before `COMMIT`, if the mark is more than 25 s old, rolls back and throws `CommitCeilingExceededError` (a 500) |
+| `idle_in_transaction_session_timeout` | role `pos_app` in the app database (migration `1788652802131`) | **5 s** | a transaction the app leaves idle between statements: Postgres ends the session, the transaction rolls back, and pg-pool drops the client |
+| `statement_timeout` | same | **25 s** | a runaway statement: `57014`, the transaction can only roll back. It is a safety net that fires before nginx's `proxy_read_timeout 30s`, not the thing that bounds the rewind |
+
+**The guarantee.** `BEGIN` is sent after the mark, so Postgres `now()` is no earlier than the
+mark. Every transaction that commits through `runTx` or `TenantJobRunner` therefore commits within
+**25 s + one round trip** of its `now()`, whatever number of statements it ran. That stays under
+30 s. The guard adds no round trip. It relies on the database host's clock not being stepped
+between `now()` and `COMMIT`, since `now()` is wall-clock time and the mark is monotonic.
+
+- **A guard trip means "not committed", and the response is a 500.** The client reads a 5xx as
+  "fate unknown" and resends the same key. The idempotency claim rolled back with everything else,
+  so the resend is a first attempt.
+- **Reads are not cut short at 5 s.** An all-time report over years of data can take longer than
+  5 s, and it is only killed if a single statement runs past 25 s. A read that commits late stamps
+  nothing, so the guard's 500 on a read older than 25 s costs a retry and no data.
+- **Outside the guard, by design:**
+  - The owner role (`postgres`): the compose `migrate` job, `ADMIN_DATA_SOURCE`, platform
+    provisioning and import. Nothing caps these, so long migrations and imports keep working.
+    - 🔴 **A migration that touches pulled rows must commit within 30 s of stamping them.** A
+      `now()` stamp that commits later is **never** pulled, not pulled again. `clock_timestamp()`
+      alone does not help: `migrationsTransactionMode: 'each'` runs each migration as one
+      transaction. So either stamp last, with `clock_timestamp()`, in a short migration, or tell
+      clients to reset their cursor.
+    - 🔴 **The tenant import is not rewind-safe.** It writes the snapshot's historic
+      `products.updated_at` and only refuses tenants that already have transactional rows. A device
+      that pulled before the import (cursor T1) never sees imported products stamped before
+      T1 − 30 s. Tracked in #217.
+  - `pos_app` writes that do not go through either door, where the role timeouts still apply:
+    - `AuthService`'s login, refresh and enrolment audit writes, on the default pool with their own
+      transactions. They write only `audit_log`, which no client pulls.
+    - `enrolDevice`'s autocommit write to `devices`, which no client pulls.
+    - `VoidService`'s refusal audit, on `AUDIT_DATA_SOURCE`.
+    - Any plain autocommit `ds.query` statement. Its commit is the statement itself, so
+      `statement_timeout` (25 s) bounds it.
+- **The one exemption is the tenant export** (`backup.processor.ts`, which passes
+  `exemptFromCommitCeiling: true`; `tenant-job-runner.spec.ts` fails if any other file passes it).
+  It reads a tenant's whole history unpaged, so it also `SET LOCAL`s both role timeouts to `5min`.
+  It used to be unbounded and is now capped at 5 min. The exemption is safe for the rewind only
+  because the export writes nothing a client pulls: its one write is `audit_log`. Any new exemption
+  needs the same argument.
+- **`CLAIM_LOCK_TIMEOUT` (5 s) must stay below `statement_timeout`.** When a resend waits on the
+  original's claim, it has to get `55P03`, which becomes `503 IDEMPOTENCY_KEY_IN_FLIGHT`. It must
+  not get `57014`, which becomes a plain 500.
+- **The role settings are fragile.** A role-in-database setting is lost by a plain `pg_dump` and
+  restore unless roles and globals are dumped too. A pooled connection only picks up a new value
+  when it reconnects, so after a migrate-only rerun you must **restart the app**. At boot the app
+  reads both settings with `SHOW` and logs a loud warning if they differ from `APP_ROLE_TIMEOUTS`.
+  It never fails readiness over this.
+- `test/tx-ceiling.e2e-spec.ts` pins all of this at `DB_POOL_SIZE=2`:
+  - Both `pos_app` pools show `25s` / `5s`, and the owner pool shows `0` / `0`.
+  - A 6 s `pg_sleep` read completes.
+  - A bill held past a lowered guard answers 500 and commits nothing, claim included; the resend
+    with the same key is a 201.
+  - Two bills stalled for more than 5 s are both ended. pg-pool drops exactly those two clients
+    after their connection errors, and the next burst is all 2xx.
+  - A resend during an uncommitted claim answers 503 `IDEMPOTENCY_KEY_IN_FLIGHT` after about 5 s.
+
 ## Document numbers (#19)
 
 `RC01-2569-08-0042` — type, two-digit `device_no`, Buddhist year-month, four-digit running
