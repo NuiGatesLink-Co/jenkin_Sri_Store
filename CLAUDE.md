@@ -725,8 +725,29 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   device (`USE_API_WRITES` only); a failure never blocks sign-in. 🔴 A seeded marker proves only that a seed happened
   at `seededAt`, **not** that the counter is current — in phase 1 the server keeps issuing after the seed and the
   client does not advance from write responses; #189 must re-seed or compare before trusting it (hazards on #189).
+- **Merged 2026-09-15:** #199 → PR #209 (Thai connection sentence at the counter) and #200 → PR #208
+  (`AbortableRequest` cancels a timed-out request) — both merged by another session **without review**; a post-merge
+  review of the two together is in progress. Don't build on `api_client.dart` / `ServerErrorResolver` until it reports.
+- **Decided 2026-09-15 (owner):** #187 + #191 → PR #214 (supersedes PR #206, corrects PR #210). Offline PIN for
+  `cashier` only, device-bound, valid 3 days since the last online login on that device, Degraded mode only, re-checked
+  on `/sync/push`. Reconnect = push outbox then pull; products with pending ops are not overwritten until pushed;
+  `offlineOk` computed on the client; keyset cursor with a **30 s** rewind + tombstones; no `change_log`. Still open in
+  ADR-0009: offline PIN vs online credential reuse, re-login vs background JWT exchange, void offline. Implementation
+  #211 / #212. Read `docs/handoff_log/owner-decisions-187-191.md`.
+- **Merged 2026-09-15:** #213 → PR #215 — the transaction ceiling ADR-0010's 30 s rewind depends on. 🔴 A **25 s
+  commit guard** (monotonic mark before `BEGIN`, rollback + `CommitCeilingExceededError` before `COMMIT`) in
+  `TenantService.runTx` and `TenantJobRunner` bounds commit − `now()` for any number of statements; role `pos_app` gets
+  `statement_timeout=25s` and `idle_in_transaction_session_timeout=5s` (migration `1788652802131`; Postgres 16 has no
+  `transaction_timeout`). 🔴 Never make `statement_timeout` ≤ `CLAIM_LOCK_TIMEOUT` — the first cut (5 s) made
+  `503 IDEMPOTENCY_KEY_IN_FLIGHT` unreachable and killed all-time reports (57014 at 5 s on 550k bills). 🔴 A pool
+  holder that writes a table clients pull by `updated_at` must commit through the guard (`tenant-door.spec.ts`); the
+  tenant export is the only opt-out (`exemptFromCommitCeiling`). Role-in-database settings are lost by a plain
+  `pg_dump`, and running processes keep old values until they reconnect — `DbModule` warns at boot on a mismatch.
+  A dev DB that ran the short-lived id `1788652802130` must delete that `migrations` row and re-migrate.
+  `TenantJobRunner` also stopped losing the DLQ after a failed rollback or a failed `BEGIN`.
+  Follow-up #217: tenant import stamps historic `updated_at`, so already-synced devices never pull imported rows.
 - **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
-  (owner runs 07 §4, #186); #199 and #200 (timeout follow-ups, being worked in another session). Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196. The repo's only long-lived
+  (owner runs 07 §4, #186); #217. Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196. The repo's only long-lived
   branches are `main` and `POC_sample_offline_first`.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
