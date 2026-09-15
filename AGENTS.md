@@ -491,7 +491,8 @@ device token (ADR-0004 — the machine is still enrolled, only the person is sig
 dialog about token lifetimes. **The login screen and router redirect landed with #143 (PR #155)**,
 active only with `USE_API_WRITES`. 🔴 Only a 401/403 from `/auth/refresh` ends the session (#161, PR #164).
 This file lags `CLAUDE.md`; for status after 2026-09-14 read `CLAUDE.md`,
-`docs/handoff_log/orchestrated-round-2026-09-14.md` and `docs/handoff_log/tx-migration-2026-09-15.md`.
+`docs/handoff_log/orchestrated-round-2026-09-14.md`, `docs/handoff_log/tx-migration-2026-09-15.md` and
+`docs/handoff_log/owner-decisions-145-163.md` (#145/#163 settled by the owner, PR #176).
 
 **#83 is open** (`team/3`): `ServerErrorResolver` prefers *any* server message containing a Thai
 codepoint over its own canonical string, so `returns.service.ts`'s English
