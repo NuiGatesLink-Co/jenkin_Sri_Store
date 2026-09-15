@@ -140,7 +140,24 @@ agreed `testid`.
 There is no valid way to recombine three machines' independent p95s into one true
 cross-machine p95 after the fact (it is not a linear statistic). So §9 latency evidence is
 **per machine**: every shard's own `k6_http_req_duration_p95` line must clear the threshold —
-not an average, min, or max of the three. This is why the dashboard groups by `machine`.
+not an average, min, or max of the three. This is why the dashboard groups by `machine`. This
+is the standard the PromQL table below assumes.
+
+**Advanced, if a true combined percentile is ever wanted:** k6's remote-write output has a
+second mode, `TrendAsNativeHistogram`, gated by env var **`K6_PROMETHEUS_RW_TREND_AS_NATIVE_HISTOGRAM=true`**
+(name confirmed from the k6 source, `internal/output/prometheusrw/remotewrite/config.go` —
+"the native-histograms feature flag... is intentionally not bound here [as a JSON option]").
+It maps each Trend to a Prometheus **native histogram** instead of per-stat gauges, and native
+histograms *can* be `sum()`-ed across series before `histogram_quantile()` is applied, because
+Prometheus's own aggregation preserves enough bucket structure to do that correctly — unlike
+the default gauge-per-stat mode this README otherwise assumes throughout. A query would look
+like `histogram_quantile(0.95, sum(rate(k6_http_req_duration[5m])))` (no `_p95` suffix — native
+histograms are a single metric, not one series per requested stat). **This project has not
+run that mode** — the env var name and mechanism are verified from the k6 source, but the
+actual query hasn't been exercised end to end against our stack, and it changes what
+`K6_PROMETHEUS_RW_TREND_STATS` even means (native histogram mode ignores it). Per-machine
+remains the default standard for §9 evidence; treat this as a documented option, not a
+validated one, if the team ever wants a single combined number instead.
 
 | `02_API_SCREENS.md §9` row | scenario tag | PromQL |
 |---|---|---|
