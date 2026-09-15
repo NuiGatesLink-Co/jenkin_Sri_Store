@@ -482,7 +482,7 @@ Postgres here is 16, which has no `transaction_timeout` (added in 17), so the ce
 | part | where | value | what it does |
 |---|---|---|---|
 | **commit guard** | `TenantService.runTx`, `TenantJobRunner.runWithTenantContext` (`common/database/commit-ceiling.ts`) | **25 s** | takes a monotonic mark just before `BEGIN`; right before `COMMIT`, if the mark is more than 25 s old, rolls back and throws `CommitCeilingExceededError` (a 500) |
-| `idle_in_transaction_session_timeout` | role `pos_app` in the app database (migration `1788652802130`) | **5 s** | a transaction the app leaves idle between statements: Postgres ends the session, the transaction rolls back, and pg-pool drops the client |
+| `idle_in_transaction_session_timeout` | role `pos_app` in the app database (migration `1788652802131`) | **5 s** | a transaction the app leaves idle between statements: Postgres ends the session, the transaction rolls back, and pg-pool drops the client |
 | `statement_timeout` | same | **25 s** | a runaway statement: `57014`, the transaction can only roll back. It is a safety net that fires before nginx's `proxy_read_timeout 30s`, not the thing that bounds the rewind |
 
 **The guarantee.** `BEGIN` is sent after the mark, so Postgres `now()` is no earlier than the
@@ -499,12 +499,23 @@ between `now()` and `COMMIT`, since `now()` is wall-clock time and the mark is m
   nothing, so the guard's 500 on a read older than 25 s costs a retry and no data.
 - **Outside the guard, by design:**
   - The owner role (`postgres`): the compose `migrate` job, `ADMIN_DATA_SOURCE`, platform
-    provisioning and import. Nothing caps these, so long migrations and imports keep working. A
-    migration that stamps `updated_at = now()` on rows clients pull should use `clock_timestamp()`,
-    or accept that clients will pull those rows again.
-  - `pos_app` transactions that do not go through either door. `AuthService`'s login/refresh audit
-    writes and `VoidService`'s refusal audit on `AUDIT_DATA_SOURCE` write only `audit_log`, which
-    no client pulls. The role timeouts still apply to them.
+    provisioning and import. Nothing caps these, so long migrations and imports keep working.
+    - 🔴 **A migration that touches pulled rows must commit within 30 s of stamping them.** A
+      `now()` stamp that commits later is **never** pulled, not pulled again. `clock_timestamp()`
+      alone does not help: `migrationsTransactionMode: 'each'` runs each migration as one
+      transaction. So either stamp last, with `clock_timestamp()`, in a short migration, or tell
+      clients to reset their cursor.
+    - 🔴 **The tenant import is not rewind-safe.** It writes the snapshot's historic
+      `products.updated_at` and only refuses tenants that already have transactional rows. A device
+      that pulled before the import (cursor T1) never sees imported products stamped before
+      T1 − 30 s. Tracked in #217.
+  - `pos_app` writes that do not go through either door, where the role timeouts still apply:
+    - `AuthService`'s login, refresh and enrolment audit writes, on the default pool with their own
+      transactions. They write only `audit_log`, which no client pulls.
+    - `enrolDevice`'s autocommit write to `devices`, which no client pulls.
+    - `VoidService`'s refusal audit, on `AUDIT_DATA_SOURCE`.
+    - Any plain autocommit `ds.query` statement. Its commit is the statement itself, so
+      `statement_timeout` (25 s) bounds it.
 - **The one exemption is the tenant export** (`backup.processor.ts`, which passes
   `exemptFromCommitCeiling: true`; `tenant-job-runner.spec.ts` fails if any other file passes it).
   It reads a tenant's whole history unpaged, so it also `SET LOCAL`s both role timeouts to `5min`.

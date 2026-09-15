@@ -78,11 +78,13 @@ export class TenantJobRunner {
 
     // 2. Open dedicated QueryRunner and execute inside transaction with SET LOCAL
     const queryRunner = this.dataSource.createQueryRunner();
-    await queryRunner.connect();
-    const startedAt = commitClockStart();
-    await queryRunner.startTransaction();
 
     try {
+      // Inside the try, so a failed connect or BEGIN still releases the runner.
+      await queryRunner.connect();
+      const startedAt = commitClockStart();
+      await queryRunner.startTransaction();
+
       await queryRunner.query('SELECT set_config($1, $2, true)', [
         'app.tenant_id',
         tenantId,

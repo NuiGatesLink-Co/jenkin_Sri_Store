@@ -43,7 +43,7 @@ function fakeRunner(opts: { rollbackThrows?: boolean } = {}) {
   const logger = { warn: vi.fn(), error: vi.fn(), info: vi.fn() };
   const dlq = { add: vi.fn(async () => undefined) };
   const runner = new TenantJobRunner(ds as any, logger as any, dlq as any);
-  return { runner, events, dlq };
+  return { runner, events, dlq, qr };
 }
 
 const job = (attemptsMade: number) =>
@@ -68,6 +68,14 @@ describe('TenantJobRunner (#213)', () => {
     expect(events).toContain('rollback');
     expect(dlq.add).toHaveBeenCalledTimes(1);
     expect(events.at(-1)).toBe('release');
+  });
+
+  it('a failed BEGIN releases the runner and still rethrows', async () => {
+    const { runner, events, qr } = fakeRunner();
+    const refused = new Error('BEGIN refused');
+    qr.startTransaction.mockRejectedValueOnce(refused);
+    await expect(runner.runWithTenantContext(job(0), async () => 'never')).rejects.toBe(refused);
+    expect(events).toEqual(['connect', 'release']);
   });
 
   it('rolls back instead of committing a job transaction older than the ceiling', async () => {

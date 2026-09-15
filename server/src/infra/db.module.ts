@@ -107,11 +107,11 @@ export class DbModule {
 }
 
 /**
- * #213: the `pos_app` timeouts come from migration `1788652802130` as role-in-database
+ * #213: the `pos_app` timeouts come from migration `1788652802131` as role-in-database
  * settings, which a plain `pg_dump`/restore drops and which a pooled connection only picks
  * up when it reconnects. Loud, but never fatal — readiness does not depend on it.
  */
-async function warnIfRoleTimeoutsDiffer(ds: DataSource, logger: Logger): Promise<void> {
+export async function warnIfRoleTimeoutsDiffer(ds: DataSource, logger: Logger): Promise<void> {
   try {
     for (const [name, expected] of Object.entries(APP_ROLE_TIMEOUTS)) {
       const [row] = (await ds.query(`SHOW ${name}`)) as Record<string, string>[];

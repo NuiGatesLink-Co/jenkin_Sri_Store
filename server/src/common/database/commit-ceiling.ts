@@ -9,7 +9,7 @@ import { performance } from 'node:perf_hooks';
 export const TX_COMMIT_CEILING_MS = 25_000;
 
 /**
- * What migration `1788652802130` sets on `pos_app`. Checked once at boot, where a mismatch
+ * What migration `1788652802131` sets on `pos_app`. Checked once at boot, where a mismatch
  * only warns: a `pg_dump` without `--roles`/globals drops role-in-database settings.
  */
 export const APP_ROLE_TIMEOUTS = {
