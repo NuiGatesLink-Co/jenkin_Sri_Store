@@ -72,10 +72,13 @@ export const AUDIT_DATA_SOURCE = Symbol('AUDIT_DATA_SOURCE');
           // owns. The writes are single INSERTs, and the pool opens nothing until the
           // first one, so a process that never refuses a void never connects at all.
           poolSize: 2,
-          // Half the request pool's, deliberately: the caller is still holding its own
-          // request connection while it waits here, so a saturated audit pool must give
-          // up quickly rather than pin that connection for the full 5 s.
-          extra: { connectionTimeoutMillis: 2000, idleTimeoutMillis: 30000 },
+          // The request pool's default, not less (#175). The 2 s this used to be assumed the
+          // caller held its request connection while waiting here; since tx.5 (#154) a void
+          // denial holds none, so waiting longer pins nothing — and giving up drops the row.
+          // Bursts are bounded upstream: wrong PINs by `consumeAttempt` (5/user/300 s), role and
+          // no-PIN denials by the per-tenant route limit (ADR-0006). Measured at pool 2 with no
+          // route limit (`loadtest` plan): 1000 concurrent role denials, 1000 rows, 6.2 s.
+          extra: { connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000 },
         });
         return ds.initialize();
       },
