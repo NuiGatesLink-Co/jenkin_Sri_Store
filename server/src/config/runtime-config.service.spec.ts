@@ -535,13 +535,7 @@ describe('RuntimeConfigService watch resume (#120)', () => {
         });
 
       await authService.start();
-      await new Promise<void>((resolve) => {
-        const check = () => {
-          if (authCalls >= 2) return resolve();
-          setTimeout(check, 1);
-        };
-        check();
-      });
+      await until(() => authCalls >= 2);
 
       expect(authCalls).toBeGreaterThanOrEqual(2);
       const watchCalls = fetchSpy.mock.calls.filter(([u]) =>
@@ -551,6 +545,42 @@ describe('RuntimeConfigService watch resume (#120)', () => {
       const secondWatchInit = watchCalls[1]?.[1] as RequestInit;
       const secondWatchHeaders = secondWatchInit.headers as Record<string, string>;
       expect(secondWatchHeaders.Authorization).toBe('token-2');
+    });
+
+    it('does not re-authenticate for a compaction whose revision text contains "401" (e.g. 14017)', async () => {
+      let authCalls = 0;
+      let rangeCalls = 0;
+      let watchCalls = 0;
+      const fetchSpy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async (url, init) => {
+          const u = String(url);
+          if (u.endsWith('/v3/auth/authenticate')) {
+            authCalls += 1;
+            return json({ token: `token-${authCalls}` });
+          }
+          if (u.endsWith('/v3/kv/range')) {
+            rangeCalls += 1;
+            return json({ header: { revision: '5' }, kvs: [] });
+          }
+          watchCalls += 1;
+          if (watchCalls === 1) {
+            // compact_revision '14017' contains the substring '401' — must not be read as HTTP 401.
+            return stream({
+              result: { canceled: true, compact_revision: '14017' },
+            });
+          }
+          return hang(url, init);
+        });
+
+      await authService.start();
+      await until(() => watchCalls >= 2);
+
+      // Only the initial authenticate() from start() — a compaction is not an auth failure.
+      expect(authCalls).toBe(1);
+      // The resync fetchInitialLogLevel() call the compaction forces, plus the initial one.
+      expect(rangeCalls).toBe(2);
+      expect(fetchSpy).toHaveBeenCalled();
     });
   });
 
