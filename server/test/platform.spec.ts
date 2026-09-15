@@ -483,6 +483,47 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
       expect(inserts('parked_sales').map((p: any) => p[1])).toEqual(['pk1']);
     });
 
+    // #238: history naming hard-deleted rows becomes soft-deleted, marked tombstones.
+    it('writes one soft-deleted, marked tombstone per missing reference and audits the counts (#238)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      const res = await importService.importSnapshot(
+        't1',
+        {
+          __meta: { version: 2 },
+          sa_movements: [{ id: 'mv1', productId: 'p-gone', partNo: 'BP-9', name: 'Brake Pad', delta: 1, type: 'adjustment-in', stockAfter: 1 }],
+          sa_sales: [{ id: 's1', receiptNo: 'RC1', total: 0, customerId: 'c-gone', customerName: 'Test Customer', mechanicId: 'm-gone', mechanicName: 'Test Mechanic', items: [] }],
+        },
+        'adm1',
+      );
+
+      expect(res.tombstones).toEqual({ products: 1, customers: 1, mechanics: 1 });
+      const insert = (table: string) =>
+        mockAdminDs.query.mock.calls.filter((c: any) => c[0].includes(`INSERT INTO ${table} `));
+      const [productSql, productParams] = insert('products')[0];
+      expect(productSql).toContain('deleted_at');
+      expect(productParams).toEqual(expect.arrayContaining(['p-gone', 'BP-9', 'Brake Pad', 'import-tombstone']));
+      expect(insert('customers')[0][1]).toEqual(['t1', 'c-gone', 'import-tombstone:c-gone', 'Test Customer']);
+      expect(insert('mechanics')[0][1]).toEqual(['t1', 'm-gone', 'import-tombstone:m-gone', 'Test Mechanic']);
+      const audit = mockAdminDs.query.mock.calls.find((c: any) => c[0].includes('INSERT INTO audit_log'));
+      expect(audit[1]).toContain(JSON.stringify({ tombstones: { products: 1, customers: 1, mechanics: 1 } }));
+    });
+
+    it('refuses in pre-flight a reference no tombstone can be named for, listing the ids (#238)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      await expect(
+        importService.importSnapshot(
+          't1',
+          { __meta: { version: 2 }, sa_credit_payments: [{ id: 'cp1', receiptNo: 'CP1', mechanicId: 'm-nameless', amount: 100 }] },
+          'adm1',
+        ),
+      ).rejects.toThrow('mechanics:m-nameless');
+      expect(mockAdminDs.transaction).not.toHaveBeenCalled();
+    });
+
     it('rolls back and does not invalidate cache if audit log fails during import', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
       vi.spyOn(auditService, 'log').mockRejectedValueOnce(new Error('Audit write failed'));

@@ -19,7 +19,8 @@
  *   - `realistic` — adds what the Drift build really produces and `clean` avoids: hard-
  *     deleted products / customers / mechanics that history still references (Drift has
  *     no foreign keys and every delete is a hard delete), and a deleted category that
- *     products still name (`01_DATABASE.md §9`, §10).
+ *     products still name (`01_DATABASE.md §9`, §10). The import turns those references into
+ *     soft-deleted tombstones (#238).
  *
  * CLI:  corepack pnpm exec tsx test/fixtures/synthetic-snapshot.ts \
  *         [--scale small|full] [--profile clean|realistic] [--seed 185] [--out file.json]

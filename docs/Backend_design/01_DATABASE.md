@@ -1090,6 +1090,21 @@ flowchart LR
 * float → NUMERIC: ค่าอย่าง `123.45000000000002` ต้อง `round2` ก่อนใส่
 * `categories` ที่มีสินค้าอ้างถึงแต่ไม่มีในตาราง (ข้อมูลเก่าไม่ clean) → สร้าง category ให้อัตโนมัติ
   **แต่ห้ามใส่ FK `products.category → categories`** — ดู §10 (ของเดิมตั้งใจให้เป็น orphan ได้)
+* **ประวัติอ้างถึงแถวที่ร้านลบทิ้งไปแล้ว (#238 — เจ้าของโปรเจกต์เคาะ 2026-09-15: ตัวเลือก (a) tombstone)**
+  Drift ไม่มี FK และลบแบบ hard delete ทุกที่ ไฟล์จริงจึงมี `movements`/`suppliers` ที่อ้างสินค้าที่หายไปแล้ว
+  มี `sales` ที่อ้างลูกค้า/ช่างที่หายไป และมี `credit_payments` ที่อ้างช่างที่หายไป ถ้าไม่จัดการ Postgres จะชน FK → 500 ทั้งร้าน
+  → import สร้าง **แถว soft-deleted หนึ่งแถวต่อ id ที่หายไป** ดังนี้
+  - `deleted_at` = เวลา import
+  - ชื่อเอามาจากชื่อที่ประวัติคัดลอกเก็บไว้ (`movements.name/part_no`, `sale_items.name/part_no`, `sales.customer_name`,
+    `sales.mechanic_name`, `returns.mechanic_name`)
+  - ยอดสะสมเป็นศูนย์
+  - ติดป้าย `import-tombstone` (`products.brand`, และ `customers.code`/`mechanics.code` = `import-tombstone:<id>`)
+  - นับจำนวนต่อตารางลง `audit_log.after` ใน transaction เดียวกับ import
+
+  tombstone ไม่ชน `uq_products_partno(_ci)` เพราะทั้งสอง index เป็น partial `WHERE deleted_at IS NULL`
+  และไม่คืนชีพเป็นแถว live
+  **อ้างถึงแต่ไม่มีชื่อให้เก็บเลย** หรือ **ใบลดหนี้ที่บิลต้นทางหายไป** → pre-flight ตอบ 400 พร้อมรายการ id
+  (ห้ามสร้างบิลปลอม เพราะเท่ากับสร้างเงิน) — `server/src/platform/snapshot-tombstones.ts`
 
 ---
 

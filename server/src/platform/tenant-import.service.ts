@@ -9,6 +9,7 @@ import { ADMIN_DATA_SOURCE } from '../infra/db.module.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { AuditService } from './audit.service.js';
 import { snapshotProductCategory } from './snapshot-category.js';
+import { planTombstones, TOMBSTONE_MARK } from './snapshot-tombstones.js';
 
 /**
  * The shop's backup file: the store keys `SnapshotRepository.exportSnapshot()` (a port of
@@ -131,6 +132,26 @@ export class TenantImportService {
       }
     }
 
+    // #238: references to rows the shop hard-deleted become soft-deleted tombstones. A
+    // reference no tombstone can be named for — or a credit note with no bill — is refused
+    // here, with the ids, instead of dying on a foreign key mid-transaction as a 500.
+    const tombstones = planTombstones(snapshot);
+    if (tombstones.unnamed.length > 0) {
+      throw new BadRequestException(
+        `Pre-flight failed: history references rows missing from the file with no name to keep: ${tombstones.unnamed.join(', ')}`,
+      );
+    }
+    if (tombstones.returnsWithoutSale.length > 0) {
+      throw new BadRequestException(
+        `Pre-flight failed: credit notes reference bills missing from the file: ${tombstones.returnsWithoutSale.join(', ')}`,
+      );
+    }
+    const tombstoneCounts = {
+      products: tombstones.products.length,
+      customers: tombstones.customers.length,
+      mechanics: tombstones.mechanics.length,
+    };
+
     // 3. Single-transaction import
     await this.adminDs.transaction(async (manager) => {
       // 3.1 Categories
@@ -197,6 +218,17 @@ export class TenantImportService {
         );
       }
 
+      // 3.2b Product tombstones (#238): soft-deleted, so `uq_products_partno(_ci)` — both
+      // partial on `deleted_at IS NULL` — never compare them with a live part number.
+      for (const t of tombstones.products) {
+        await manager.query(
+          `INSERT INTO products (tenant_id, id, part_no, name, name_th, category, brand, price, cost, stock, min_stock, updated_at, deleted_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 0, 0, 0, 0, clock_timestamp(), clock_timestamp())
+           ON CONFLICT (tenant_id, id) DO NOTHING`,
+          [tenantId, t.id, t.partNo, t.name, t.nameTh, snapshotProductCategory({}), TOMBSTONE_MARK],
+        );
+      }
+
       // 3.3 Suppliers
       const suppliers = snapshot.sa_suppliers || [];
       for (const sup of suppliers) {
@@ -234,6 +266,16 @@ export class TenantImportService {
         );
       }
 
+      // 3.4b Customer tombstones (#238): zero points/spend, code `import-tombstone:<id>`.
+      for (const t of tombstones.customers) {
+        await manager.query(
+          `INSERT INTO customers (tenant_id, id, code, name, name_th, points, total_spend, deleted_at)
+           VALUES ($1, $2, $3, $4, $4, 0, 0, clock_timestamp())
+           ON CONFLICT (tenant_id, id) DO NOTHING`,
+          [tenantId, t.id, t.code, t.name],
+        );
+      }
+
       // 3.5 Mechanics
       const mechanics = snapshot.sa_mechanics || [];
       for (const m of mechanics) {
@@ -261,6 +303,16 @@ export class TenantImportService {
             tenantId, id, code, name, nameTh, nickname, shopName, phone, note,
             creditLimit, creditBalance, totalSales, totalCredit, totalDiscount, totalMarkup, createdAt,
           ],
+        );
+      }
+
+      // 3.5b Mechanic tombstones (#238): zero balance and totals, code `import-tombstone:<id>`.
+      for (const t of tombstones.mechanics) {
+        await manager.query(
+          `INSERT INTO mechanics (tenant_id, id, code, name, deleted_at)
+           VALUES ($1, $2, $3, $4, clock_timestamp())
+           ON CONFLICT (tenant_id, id) DO NOTHING`,
+          [tenantId, t.id, t.code, t.name],
         );
       }
 
@@ -596,6 +648,8 @@ export class TenantImportService {
         tenantId,
         platformAdminId: adminId,
         action: 'platform.tenant.import',
+        // #238: how many soft-deleted rows the import invented, per table.
+        after: { tombstones: tombstoneCounts },
         ip,
       });
 
@@ -619,6 +673,6 @@ export class TenantImportService {
       await this.cache.invalidate(tenantId, ns);
     }
 
-    return { status: 'success', tenantId };
+    return { status: 'success', tenantId, tombstones: tombstoneCounts };
   }
 }
