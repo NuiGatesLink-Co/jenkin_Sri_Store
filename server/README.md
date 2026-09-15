@@ -137,7 +137,10 @@ is the consumer that reads it at boot and watches it live.
   `/v3/auth/role/add`, `/v3/auth/user/grant`, `/v3/auth/enable`), then **asserts** the result —
   root authenticates, an anonymous request is refused — rather than trusting the bootstrap
   calls succeeded. It is idempotent: re-run against an already-bootstrapped volume (a restart,
-  not a fresh one) short-circuits at the first authenticate call.
+  not a fresh one) short-circuits at the first authenticate call. It then seeds
+  `/pos/config/log_level` with `LOG_LEVEL` (default `info`) in a txn guarded by
+  `create_revision == 0`, so a value changed later is never overwritten (#67). Locally it still
+  runs from `up`; the VM deploy runs it with `run --rm`, so there a failure fails the deploy.
 - `etcdctl endpoint health` needs credentials once auth is enabled (it performs a linearizable
   read) — the healthcheck sets `ETCDCTL_USER=root:$ETCD_ROOT_PASSWORD` as an environment
   variable so the password never lands in a process argument, same reasoning as
