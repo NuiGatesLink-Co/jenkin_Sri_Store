@@ -1,15 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import { evaluateIntegrity, type IntegritySnapshot } from './verify-integrity.js';
 
+const TENANT_ID = '00000000-0000-4000-8000-000000000001';
+
 // The exact end state `pnpm k6:setup` + a successful 02-write-sales-contention.js
 // run should leave behind for the 200-on-50 scenario: 200 buyers against 50
-// seeded units of the contention target sell it out completely.
+// seeded units of the contention target sell it out completely, each buying 1 unit.
 const FULL_DEPLETION_SNAPSHOT: IntegritySnapshot = {
+  tenantId: TENANT_ID,
   productId: 'p12',
   initialStock: 50,
   currentStock: 0,
   soldQty: 50,
   totalBills: 50,
+  totalLines: 50,
   movementDelta: -50,
   totalSales: 50,
   distinctReceipts: 50,
@@ -21,11 +25,13 @@ const FULL_DEPLETION_SNAPSHOT: IntegritySnapshot = {
 // receipts) is trivially true here, which is exactly the bug: this snapshot
 // used to read as "ALL PASS".
 const EMPTY_RUN_SNAPSHOT: IntegritySnapshot = {
+  tenantId: TENANT_ID,
   productId: 'p12',
   initialStock: 50,
   currentStock: 50,
   soldQty: 0,
   totalBills: 0,
+  totalLines: 0,
   movementDelta: 0,
   totalSales: 0,
   distinctReceipts: 0,
@@ -48,6 +54,7 @@ describe('evaluateIntegrity — expectFullDepletion (pnpm k6:verify default)', (
       currentStock: 20,
       soldQty: 30,
       totalBills: 30,
+      totalLines: 30,
       movementDelta: -30,
       totalSales: 30,
       distinctReceipts: 30,
@@ -60,13 +67,18 @@ describe('evaluateIntegrity — expectFullDepletion (pnpm k6:verify default)', (
     expect(failed).toContain('Contention target fully sold (sold == seeded stock)');
   });
 
-  it('fails when bills and units sold diverge (e.g. a duplicate-priced line double-counted)', () => {
-    const mismatched: IntegritySnapshot = { ...FULL_DEPLETION_SNAPSHOT, totalBills: 49 };
+  it('fails when sale_items lines and units sold diverge (e.g. a qty != 1 line, or a duplicate line)', () => {
+    // 50 units sold across only 49 sale_item rows — one line recorded qty=2 (or a
+    // row is missing), either way the "1 unit per line" invariant does not hold,
+    // and it's read straight from sale_items rather than assumed from bill count.
+    const mismatched: IntegritySnapshot = { ...FULL_DEPLETION_SNAPSHOT, totalLines: 49 };
 
     const result = evaluateIntegrity(mismatched, { expectFullDepletion: true });
 
     expect(result.allPassed).toBe(false);
-    expect(result.checks.find((c) => c.name.startsWith('Bills match'))?.passed).toBe(false);
+    expect(result.checks.find((c) => c.name.startsWith('sale_items qty sums'))?.passed).toBe(
+      false,
+    );
   });
 
   it('fails when the movements ledger does not balance against units sold', () => {
@@ -91,11 +103,13 @@ describe('evaluateIntegrity — expectFullDepletion (pnpm k6:verify default)', (
 describe('evaluateIntegrity — default (no expectFullDepletion)', () => {
   it('still passes on an in-flight partial state (k6.e2e-spec.ts: 1 of 50 sold)', () => {
     const partial: IntegritySnapshot = {
+      tenantId: TENANT_ID,
       productId: 'p12',
       initialStock: 50,
       currentStock: 49,
       soldQty: 1,
       totalBills: 1,
+      totalLines: 1,
       movementDelta: -1,
       totalSales: 1,
       distinctReceipts: 1,

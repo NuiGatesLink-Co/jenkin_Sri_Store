@@ -12,11 +12,13 @@ const DB_URL =
   'postgres://postgres:dev-only-postgres@127.0.0.1:5432/pos';
 
 export interface IntegritySnapshot {
+  tenantId: string;
   productId: string;
   initialStock: number;
   currentStock: number;
   soldQty: number;
   totalBills: number;
+  totalLines: number;
   movementDelta: number;
   totalSales: number;
   distinctReceipts: number;
@@ -33,16 +35,16 @@ export interface IntegrityResult {
   allPassed: boolean;
 }
 
-export interface VerifyOptions {
+export interface EvaluateIntegrityOptions {
   /**
    * Require the contention target to be fully sold out: soldQty === initialStock,
-   * stock === 0, bills === soldQty, movements delta === -soldQty. This is the
-   * 200-on-50 scenario's whole point — 200 buyers against 50 units of stock should
-   * end with nothing left — so a soldQty of 0 under this option is not a quiet
-   * "nothing happened yet", it means the contention run never reached the server.
-   * Off by default so a caller checking an in-flight/partial state (e.g. one sale
-   * out of many seeded units, see k6.e2e-spec.ts) isn't forced into an end state
-   * it never claimed to reach.
+   * stock === 0, sale_items qty sums to soldQty with one unit per line, movements
+   * delta === -soldQty. This is the 200-on-50 scenario's whole point — 200 buyers
+   * against 50 units of stock should end with nothing left — so a soldQty of 0
+   * under this option is not a quiet "nothing happened yet", it means the
+   * contention run never reached the server. Off by default so a caller checking
+   * an in-flight/partial state (e.g. one sale out of many seeded units, see
+   * k6.e2e-spec.ts) isn't forced into an end state it never claimed to reach.
    */
   expectFullDepletion?: boolean;
 }
@@ -51,7 +53,10 @@ export interface VerifyOptions {
  * Pure assertion logic — no I/O — so it can be unit-tested against a fake
  * snapshot instead of a live Postgres.
  */
-export function evaluateIntegrity(s: IntegritySnapshot, options: VerifyOptions = {}): IntegrityResult {
+export function evaluateIntegrity(
+  s: IntegritySnapshot,
+  options: EvaluateIntegrityOptions = {},
+): IntegrityResult {
   const expectedStock = s.initialStock - s.soldQty;
   const checks: IntegrityCheck[] = [
     {
@@ -86,11 +91,14 @@ export function evaluateIntegrity(s: IntegritySnapshot, options: VerifyOptions =
         detail: `stock ${s.currentStock}`,
       },
       {
-        // Each contention-scenario sale buys exactly 1 unit of the target
-        // product, so bills and units sold are the same count.
-        name: 'Bills match units sold (1 unit per bill)',
-        passed: s.totalBills === s.soldQty,
-        detail: `${s.totalBills} bills, ${s.soldQty} units sold`,
+        // Reads straight off sale_items rather than assuming a fixed quantity
+        // per bill: soldQty is SUM(qty) and totalLines is COUNT(*) over the
+        // same rows, so equality means every recorded line sold exactly 1 unit
+        // — the actual qty the contention scenario's payload sends — without
+        // hard-coding that "1" anywhere or inferring it from the bill count.
+        name: 'sale_items qty sums to units sold (1 unit per line)',
+        passed: s.totalLines === s.soldQty,
+        detail: `${s.totalLines} sale_item lines, ${s.soldQty} units sold`,
       },
       {
         name: 'Stock movements balance (delta == -sold)',
@@ -107,6 +115,7 @@ function printResult(s: IntegritySnapshot, result: IntegrityResult): void {
   console.log('\n================================================================');
   console.log('🔍 DATA INTEGRITY PROOF (Assignment & Rubric Verification)');
   console.log('================================================================');
+  console.log(`Tenant ID:      ${s.tenantId}`);
   console.log(`Target Product: ${s.productId}`);
   console.log(`Initial Stock:  ${s.initialStock}`);
   console.log(`Timestamp:      ${new Date().toISOString()}`);
@@ -128,7 +137,7 @@ function printResult(s: IntegritySnapshot, result: IntegrityResult): void {
   }
 }
 
-export async function verifyIntegrity(options: VerifyOptions = {}) {
+export async function verifyIntegrity(options: EvaluateIntegrityOptions = {}) {
   const envPath = path.resolve(__dirname, 'k6-env.json');
   if (!fs.existsSync(envPath)) {
     console.error('❌ k6-env.json not found. Run "pnpm k6:setup" first.');
@@ -166,6 +175,7 @@ export async function verifyIntegrity(options: VerifyOptions = {}) {
     );
     const soldQty = Number(soldRes.rows[0].sold_qty);
     const totalBills = Number(soldRes.rows[0].total_bills);
+    const totalLines = Number(soldRes.rows[0].total_lines);
 
     // 3. Movement deltas
     const movRes = await client.query(
@@ -188,11 +198,13 @@ export async function verifyIntegrity(options: VerifyOptions = {}) {
     const distinctReceipts = Number(receiptsRes.rows[0].distinct_receipts);
 
     const snapshot: IntegritySnapshot = {
+      tenantId,
       productId,
       initialStock,
       currentStock,
       soldQty,
       totalBills,
+      totalLines,
       movementDelta,
       totalSales,
       distinctReceipts,
