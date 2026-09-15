@@ -10,8 +10,6 @@ import 'dart:async';
 import '../../data/services/doc_counter_seeder.dart';
 import 'auth_cubit.dart';
 
-/// Subscribe BEFORE `auth.init()`, or the app-open emission is missed.
-///
 /// The seed is fired and not awaited: it must never hold up the login form or
 /// the first screen, and [DocCounterSeeder.seed] never throws.
 StreamSubscription<AuthState> seedDocCountersOnSignIn(

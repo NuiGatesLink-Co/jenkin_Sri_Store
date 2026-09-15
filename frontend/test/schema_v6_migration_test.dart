@@ -88,6 +88,7 @@ void main() {
         .into(db.docCounters)
         .insert(
           DocCountersCompanion.insert(
+            deviceId: 'dv_1',
             deviceNo: 1,
             docType: 'receipt',
             period: '2569-09',
@@ -98,7 +99,7 @@ void main() {
         .into(db.docCounterSeeds)
         .insert(
           DocCounterSeedsCompanion.insert(
-            deviceNo: 1,
+            deviceId: 'dv_1',
             period: '2569-09',
             seededAt: DateTime(2026, 9, 15, 9),
           ),

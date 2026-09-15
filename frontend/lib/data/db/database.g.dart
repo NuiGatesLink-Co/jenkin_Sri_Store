@@ -11360,6 +11360,17 @@ class $DocCountersTable extends DocCounters
   final GeneratedDatabase attachedDatabase;
   final String? _alias;
   $DocCountersTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
+  );
+  @override
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
   static const VerificationMeta _deviceNoMeta = const VerificationMeta(
     'deviceNo',
   );
@@ -11401,7 +11412,13 @@ class $DocCountersTable extends DocCounters
     requiredDuringInsert: true,
   );
   @override
-  List<GeneratedColumn> get $columns => [deviceNo, docType, period, lastNo];
+  List<GeneratedColumn> get $columns => [
+    deviceId,
+    deviceNo,
+    docType,
+    period,
+    lastNo,
+  ];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -11414,6 +11431,14 @@ class $DocCountersTable extends DocCounters
   }) {
     final context = VerificationContext();
     final data = instance.toColumns(true);
+    if (data.containsKey('device_id')) {
+      context.handle(
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_deviceIdMeta);
+    }
     if (data.containsKey('device_no')) {
       context.handle(
         _deviceNoMeta,
@@ -11450,11 +11475,15 @@ class $DocCountersTable extends DocCounters
   }
 
   @override
-  Set<GeneratedColumn> get $primaryKey => {deviceNo, docType, period};
+  Set<GeneratedColumn> get $primaryKey => {deviceId, docType, period};
   @override
   DocCounterRow map(Map<String, dynamic> data, {String? tablePrefix}) {
     final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
     return DocCounterRow(
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
+      )!,
       deviceNo: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}device_no'],
@@ -11481,6 +11510,9 @@ class $DocCountersTable extends DocCounters
 }
 
 class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
+  final String deviceId;
+
+  /// The series printed on the paper (`RC01-…`).
   final int deviceNo;
 
   /// The server's `doc_counters.doc_type`: `receipt` / `cn` / `po` / `quote` / `cp`.
@@ -11490,6 +11522,7 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
   final String period;
   final int lastNo;
   const DocCounterRow({
+    required this.deviceId,
     required this.deviceNo,
     required this.docType,
     required this.period,
@@ -11498,6 +11531,7 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    map['device_id'] = Variable<String>(deviceId);
     map['device_no'] = Variable<int>(deviceNo);
     map['doc_type'] = Variable<String>(docType);
     map['period'] = Variable<String>(period);
@@ -11507,6 +11541,7 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
 
   DocCountersCompanion toCompanion(bool nullToAbsent) {
     return DocCountersCompanion(
+      deviceId: Value(deviceId),
       deviceNo: Value(deviceNo),
       docType: Value(docType),
       period: Value(period),
@@ -11520,6 +11555,7 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
   }) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return DocCounterRow(
+      deviceId: serializer.fromJson<String>(json['deviceId']),
       deviceNo: serializer.fromJson<int>(json['deviceNo']),
       docType: serializer.fromJson<String>(json['docType']),
       period: serializer.fromJson<String>(json['period']),
@@ -11530,6 +11566,7 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
   Map<String, dynamic> toJson({ValueSerializer? serializer}) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
+      'deviceId': serializer.toJson<String>(deviceId),
       'deviceNo': serializer.toJson<int>(deviceNo),
       'docType': serializer.toJson<String>(docType),
       'period': serializer.toJson<String>(period),
@@ -11538,11 +11575,13 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
   }
 
   DocCounterRow copyWith({
+    String? deviceId,
     int? deviceNo,
     String? docType,
     String? period,
     int? lastNo,
   }) => DocCounterRow(
+    deviceId: deviceId ?? this.deviceId,
     deviceNo: deviceNo ?? this.deviceNo,
     docType: docType ?? this.docType,
     period: period ?? this.period,
@@ -11550,6 +11589,7 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
   );
   DocCounterRow copyWithCompanion(DocCountersCompanion data) {
     return DocCounterRow(
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
       deviceNo: data.deviceNo.present ? data.deviceNo.value : this.deviceNo,
       docType: data.docType.present ? data.docType.value : this.docType,
       period: data.period.present ? data.period.value : this.period,
@@ -11560,6 +11600,7 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
   @override
   String toString() {
     return (StringBuffer('DocCounterRow(')
+          ..write('deviceId: $deviceId, ')
           ..write('deviceNo: $deviceNo, ')
           ..write('docType: $docType, ')
           ..write('period: $period, ')
@@ -11569,11 +11610,12 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
   }
 
   @override
-  int get hashCode => Object.hash(deviceNo, docType, period, lastNo);
+  int get hashCode => Object.hash(deviceId, deviceNo, docType, period, lastNo);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is DocCounterRow &&
+          other.deviceId == this.deviceId &&
           other.deviceNo == this.deviceNo &&
           other.docType == this.docType &&
           other.period == this.period &&
@@ -11581,12 +11623,14 @@ class DocCounterRow extends DataClass implements Insertable<DocCounterRow> {
 }
 
 class DocCountersCompanion extends UpdateCompanion<DocCounterRow> {
+  final Value<String> deviceId;
   final Value<int> deviceNo;
   final Value<String> docType;
   final Value<String> period;
   final Value<int> lastNo;
   final Value<int> rowid;
   const DocCountersCompanion({
+    this.deviceId = const Value.absent(),
     this.deviceNo = const Value.absent(),
     this.docType = const Value.absent(),
     this.period = const Value.absent(),
@@ -11594,16 +11638,19 @@ class DocCountersCompanion extends UpdateCompanion<DocCounterRow> {
     this.rowid = const Value.absent(),
   });
   DocCountersCompanion.insert({
+    required String deviceId,
     required int deviceNo,
     required String docType,
     required String period,
     required int lastNo,
     this.rowid = const Value.absent(),
-  }) : deviceNo = Value(deviceNo),
+  }) : deviceId = Value(deviceId),
+       deviceNo = Value(deviceNo),
        docType = Value(docType),
        period = Value(period),
        lastNo = Value(lastNo);
   static Insertable<DocCounterRow> custom({
+    Expression<String>? deviceId,
     Expression<int>? deviceNo,
     Expression<String>? docType,
     Expression<String>? period,
@@ -11611,6 +11658,7 @@ class DocCountersCompanion extends UpdateCompanion<DocCounterRow> {
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
+      if (deviceId != null) 'device_id': deviceId,
       if (deviceNo != null) 'device_no': deviceNo,
       if (docType != null) 'doc_type': docType,
       if (period != null) 'period': period,
@@ -11620,6 +11668,7 @@ class DocCountersCompanion extends UpdateCompanion<DocCounterRow> {
   }
 
   DocCountersCompanion copyWith({
+    Value<String>? deviceId,
     Value<int>? deviceNo,
     Value<String>? docType,
     Value<String>? period,
@@ -11627,6 +11676,7 @@ class DocCountersCompanion extends UpdateCompanion<DocCounterRow> {
     Value<int>? rowid,
   }) {
     return DocCountersCompanion(
+      deviceId: deviceId ?? this.deviceId,
       deviceNo: deviceNo ?? this.deviceNo,
       docType: docType ?? this.docType,
       period: period ?? this.period,
@@ -11638,6 +11688,9 @@ class DocCountersCompanion extends UpdateCompanion<DocCounterRow> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
+    }
     if (deviceNo.present) {
       map['device_no'] = Variable<int>(deviceNo.value);
     }
@@ -11659,6 +11712,7 @@ class DocCountersCompanion extends UpdateCompanion<DocCounterRow> {
   @override
   String toString() {
     return (StringBuffer('DocCountersCompanion(')
+          ..write('deviceId: $deviceId, ')
           ..write('deviceNo: $deviceNo, ')
           ..write('docType: $docType, ')
           ..write('period: $period, ')
@@ -11675,15 +11729,15 @@ class $DocCounterSeedsTable extends DocCounterSeeds
   final GeneratedDatabase attachedDatabase;
   final String? _alias;
   $DocCounterSeedsTable(this.attachedDatabase, [this._alias]);
-  static const VerificationMeta _deviceNoMeta = const VerificationMeta(
-    'deviceNo',
+  static const VerificationMeta _deviceIdMeta = const VerificationMeta(
+    'deviceId',
   );
   @override
-  late final GeneratedColumn<int> deviceNo = GeneratedColumn<int>(
-    'device_no',
+  late final GeneratedColumn<String> deviceId = GeneratedColumn<String>(
+    'device_id',
     aliasedName,
     false,
-    type: DriftSqlType.int,
+    type: DriftSqlType.string,
     requiredDuringInsert: true,
   );
   static const VerificationMeta _periodMeta = const VerificationMeta('period');
@@ -11707,7 +11761,7 @@ class $DocCounterSeedsTable extends DocCounterSeeds
     requiredDuringInsert: true,
   );
   @override
-  List<GeneratedColumn> get $columns => [deviceNo, period, seededAt];
+  List<GeneratedColumn> get $columns => [deviceId, period, seededAt];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -11720,13 +11774,13 @@ class $DocCounterSeedsTable extends DocCounterSeeds
   }) {
     final context = VerificationContext();
     final data = instance.toColumns(true);
-    if (data.containsKey('device_no')) {
+    if (data.containsKey('device_id')) {
       context.handle(
-        _deviceNoMeta,
-        deviceNo.isAcceptableOrUnknown(data['device_no']!, _deviceNoMeta),
+        _deviceIdMeta,
+        deviceId.isAcceptableOrUnknown(data['device_id']!, _deviceIdMeta),
       );
     } else if (isInserting) {
-      context.missing(_deviceNoMeta);
+      context.missing(_deviceIdMeta);
     }
     if (data.containsKey('period')) {
       context.handle(
@@ -11748,14 +11802,14 @@ class $DocCounterSeedsTable extends DocCounterSeeds
   }
 
   @override
-  Set<GeneratedColumn> get $primaryKey => {deviceNo, period};
+  Set<GeneratedColumn> get $primaryKey => {deviceId, period};
   @override
   DocCounterSeedRow map(Map<String, dynamic> data, {String? tablePrefix}) {
     final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
     return DocCounterSeedRow(
-      deviceNo: attachedDatabase.typeMapping.read(
-        DriftSqlType.int,
-        data['${effectivePrefix}device_no'],
+      deviceId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}device_id'],
       )!,
       period: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
@@ -11776,18 +11830,18 @@ class $DocCounterSeedsTable extends DocCounterSeeds
 
 class DocCounterSeedRow extends DataClass
     implements Insertable<DocCounterSeedRow> {
-  final int deviceNo;
+  final String deviceId;
   final String period;
   final DateTime seededAt;
   const DocCounterSeedRow({
-    required this.deviceNo,
+    required this.deviceId,
     required this.period,
     required this.seededAt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
-    map['device_no'] = Variable<int>(deviceNo);
+    map['device_id'] = Variable<String>(deviceId);
     map['period'] = Variable<String>(period);
     map['seeded_at'] = Variable<DateTime>(seededAt);
     return map;
@@ -11795,7 +11849,7 @@ class DocCounterSeedRow extends DataClass
 
   DocCounterSeedsCompanion toCompanion(bool nullToAbsent) {
     return DocCounterSeedsCompanion(
-      deviceNo: Value(deviceNo),
+      deviceId: Value(deviceId),
       period: Value(period),
       seededAt: Value(seededAt),
     );
@@ -11807,7 +11861,7 @@ class DocCounterSeedRow extends DataClass
   }) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return DocCounterSeedRow(
-      deviceNo: serializer.fromJson<int>(json['deviceNo']),
+      deviceId: serializer.fromJson<String>(json['deviceId']),
       period: serializer.fromJson<String>(json['period']),
       seededAt: serializer.fromJson<DateTime>(json['seededAt']),
     );
@@ -11816,24 +11870,24 @@ class DocCounterSeedRow extends DataClass
   Map<String, dynamic> toJson({ValueSerializer? serializer}) {
     serializer ??= driftRuntimeOptions.defaultSerializer;
     return <String, dynamic>{
-      'deviceNo': serializer.toJson<int>(deviceNo),
+      'deviceId': serializer.toJson<String>(deviceId),
       'period': serializer.toJson<String>(period),
       'seededAt': serializer.toJson<DateTime>(seededAt),
     };
   }
 
   DocCounterSeedRow copyWith({
-    int? deviceNo,
+    String? deviceId,
     String? period,
     DateTime? seededAt,
   }) => DocCounterSeedRow(
-    deviceNo: deviceNo ?? this.deviceNo,
+    deviceId: deviceId ?? this.deviceId,
     period: period ?? this.period,
     seededAt: seededAt ?? this.seededAt,
   );
   DocCounterSeedRow copyWithCompanion(DocCounterSeedsCompanion data) {
     return DocCounterSeedRow(
-      deviceNo: data.deviceNo.present ? data.deviceNo.value : this.deviceNo,
+      deviceId: data.deviceId.present ? data.deviceId.value : this.deviceId,
       period: data.period.present ? data.period.value : this.period,
       seededAt: data.seededAt.present ? data.seededAt.value : this.seededAt,
     );
@@ -11842,7 +11896,7 @@ class DocCounterSeedRow extends DataClass
   @override
   String toString() {
     return (StringBuffer('DocCounterSeedRow(')
-          ..write('deviceNo: $deviceNo, ')
+          ..write('deviceId: $deviceId, ')
           ..write('period: $period, ')
           ..write('seededAt: $seededAt')
           ..write(')'))
@@ -11850,43 +11904,43 @@ class DocCounterSeedRow extends DataClass
   }
 
   @override
-  int get hashCode => Object.hash(deviceNo, period, seededAt);
+  int get hashCode => Object.hash(deviceId, period, seededAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is DocCounterSeedRow &&
-          other.deviceNo == this.deviceNo &&
+          other.deviceId == this.deviceId &&
           other.period == this.period &&
           other.seededAt == this.seededAt);
 }
 
 class DocCounterSeedsCompanion extends UpdateCompanion<DocCounterSeedRow> {
-  final Value<int> deviceNo;
+  final Value<String> deviceId;
   final Value<String> period;
   final Value<DateTime> seededAt;
   final Value<int> rowid;
   const DocCounterSeedsCompanion({
-    this.deviceNo = const Value.absent(),
+    this.deviceId = const Value.absent(),
     this.period = const Value.absent(),
     this.seededAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   DocCounterSeedsCompanion.insert({
-    required int deviceNo,
+    required String deviceId,
     required String period,
     required DateTime seededAt,
     this.rowid = const Value.absent(),
-  }) : deviceNo = Value(deviceNo),
+  }) : deviceId = Value(deviceId),
        period = Value(period),
        seededAt = Value(seededAt);
   static Insertable<DocCounterSeedRow> custom({
-    Expression<int>? deviceNo,
+    Expression<String>? deviceId,
     Expression<String>? period,
     Expression<DateTime>? seededAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
-      if (deviceNo != null) 'device_no': deviceNo,
+      if (deviceId != null) 'device_id': deviceId,
       if (period != null) 'period': period,
       if (seededAt != null) 'seeded_at': seededAt,
       if (rowid != null) 'rowid': rowid,
@@ -11894,13 +11948,13 @@ class DocCounterSeedsCompanion extends UpdateCompanion<DocCounterSeedRow> {
   }
 
   DocCounterSeedsCompanion copyWith({
-    Value<int>? deviceNo,
+    Value<String>? deviceId,
     Value<String>? period,
     Value<DateTime>? seededAt,
     Value<int>? rowid,
   }) {
     return DocCounterSeedsCompanion(
-      deviceNo: deviceNo ?? this.deviceNo,
+      deviceId: deviceId ?? this.deviceId,
       period: period ?? this.period,
       seededAt: seededAt ?? this.seededAt,
       rowid: rowid ?? this.rowid,
@@ -11910,8 +11964,8 @@ class DocCounterSeedsCompanion extends UpdateCompanion<DocCounterSeedRow> {
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
-    if (deviceNo.present) {
-      map['device_no'] = Variable<int>(deviceNo.value);
+    if (deviceId.present) {
+      map['device_id'] = Variable<String>(deviceId.value);
     }
     if (period.present) {
       map['period'] = Variable<String>(period.value);
@@ -11928,7 +11982,7 @@ class DocCounterSeedsCompanion extends UpdateCompanion<DocCounterSeedRow> {
   @override
   String toString() {
     return (StringBuffer('DocCounterSeedsCompanion(')
-          ..write('deviceNo: $deviceNo, ')
+          ..write('deviceId: $deviceId, ')
           ..write('period: $period, ')
           ..write('seededAt: $seededAt, ')
           ..write('rowid: $rowid')
@@ -18952,6 +19006,7 @@ typedef $$SettingsRowTableProcessedTableManager =
     >;
 typedef $$DocCountersTableCreateCompanionBuilder =
     DocCountersCompanion Function({
+      required String deviceId,
       required int deviceNo,
       required String docType,
       required String period,
@@ -18960,6 +19015,7 @@ typedef $$DocCountersTableCreateCompanionBuilder =
     });
 typedef $$DocCountersTableUpdateCompanionBuilder =
     DocCountersCompanion Function({
+      Value<String> deviceId,
       Value<int> deviceNo,
       Value<String> docType,
       Value<String> period,
@@ -18976,6 +19032,11 @@ class $$DocCountersTableFilterComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnFilters<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<int> get deviceNo => $composableBuilder(
     column: $table.deviceNo,
     builder: (column) => ColumnFilters(column),
@@ -19006,6 +19067,11 @@ class $$DocCountersTableOrderingComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  ColumnOrderings<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<int> get deviceNo => $composableBuilder(
     column: $table.deviceNo,
     builder: (column) => ColumnOrderings(column),
@@ -19036,6 +19102,9 @@ class $$DocCountersTableAnnotationComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
+  GeneratedColumn<String> get deviceId =>
+      $composableBuilder(column: $table.deviceId, builder: (column) => column);
+
   GeneratedColumn<int> get deviceNo =>
       $composableBuilder(column: $table.deviceNo, builder: (column) => column);
 
@@ -19080,12 +19149,14 @@ class $$DocCountersTableTableManager
               $$DocCountersTableAnnotationComposer($db: db, $table: table),
           updateCompanionCallback:
               ({
+                Value<String> deviceId = const Value.absent(),
                 Value<int> deviceNo = const Value.absent(),
                 Value<String> docType = const Value.absent(),
                 Value<String> period = const Value.absent(),
                 Value<int> lastNo = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => DocCountersCompanion(
+                deviceId: deviceId,
                 deviceNo: deviceNo,
                 docType: docType,
                 period: period,
@@ -19094,12 +19165,14 @@ class $$DocCountersTableTableManager
               ),
           createCompanionCallback:
               ({
+                required String deviceId,
                 required int deviceNo,
                 required String docType,
                 required String period,
                 required int lastNo,
                 Value<int> rowid = const Value.absent(),
               }) => DocCountersCompanion.insert(
+                deviceId: deviceId,
                 deviceNo: deviceNo,
                 docType: docType,
                 period: period,
@@ -19133,14 +19206,14 @@ typedef $$DocCountersTableProcessedTableManager =
     >;
 typedef $$DocCounterSeedsTableCreateCompanionBuilder =
     DocCounterSeedsCompanion Function({
-      required int deviceNo,
+      required String deviceId,
       required String period,
       required DateTime seededAt,
       Value<int> rowid,
     });
 typedef $$DocCounterSeedsTableUpdateCompanionBuilder =
     DocCounterSeedsCompanion Function({
-      Value<int> deviceNo,
+      Value<String> deviceId,
       Value<String> period,
       Value<DateTime> seededAt,
       Value<int> rowid,
@@ -19155,8 +19228,8 @@ class $$DocCounterSeedsTableFilterComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
-  ColumnFilters<int> get deviceNo => $composableBuilder(
-    column: $table.deviceNo,
+  ColumnFilters<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -19180,8 +19253,8 @@ class $$DocCounterSeedsTableOrderingComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
-  ColumnOrderings<int> get deviceNo => $composableBuilder(
-    column: $table.deviceNo,
+  ColumnOrderings<String> get deviceId => $composableBuilder(
+    column: $table.deviceId,
     builder: (column) => ColumnOrderings(column),
   );
 
@@ -19205,8 +19278,8 @@ class $$DocCounterSeedsTableAnnotationComposer
     super.$addJoinBuilderToRootComposer,
     super.$removeJoinBuilderFromRootComposer,
   });
-  GeneratedColumn<int> get deviceNo =>
-      $composableBuilder(column: $table.deviceNo, builder: (column) => column);
+  GeneratedColumn<String> get deviceId =>
+      $composableBuilder(column: $table.deviceId, builder: (column) => column);
 
   GeneratedColumn<String> get period =>
       $composableBuilder(column: $table.period, builder: (column) => column);
@@ -19252,24 +19325,24 @@ class $$DocCounterSeedsTableTableManager
               $$DocCounterSeedsTableAnnotationComposer($db: db, $table: table),
           updateCompanionCallback:
               ({
-                Value<int> deviceNo = const Value.absent(),
+                Value<String> deviceId = const Value.absent(),
                 Value<String> period = const Value.absent(),
                 Value<DateTime> seededAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => DocCounterSeedsCompanion(
-                deviceNo: deviceNo,
+                deviceId: deviceId,
                 period: period,
                 seededAt: seededAt,
                 rowid: rowid,
               ),
           createCompanionCallback:
               ({
-                required int deviceNo,
+                required String deviceId,
                 required String period,
                 required DateTime seededAt,
                 Value<int> rowid = const Value.absent(),
               }) => DocCounterSeedsCompanion.insert(
-                deviceNo: deviceNo,
+                deviceId: deviceId,
                 period: period,
                 seededAt: seededAt,
                 rowid: rowid,

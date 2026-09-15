@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { DeviceRoleForbiddenException } from '../common/device-role-forbidden.exception.js';
 import { currentRequestContext } from '../common/request-context.js';
 import { TenantService } from '../common/database/tenant.service.js';
-import type { DocType } from './doc-number.service.js';
+import { TENANT_PERIOD_SQL, type DocType } from './doc-number.service.js';
 
 export interface DocCounter {
   docType: DocType;
@@ -14,9 +14,12 @@ export interface DocCounter {
  * `GET /doc-counters` — what the `pos` device seeds its Drift counter from (ADR-0007
  * *"ช่องพังที่ต้องปิดก่อนเฟส 2"* item 1, #188).
  *
- * - `deviceNo` — the series the device prints into; the client keys its counter on it.
- * - `period` — the tenant's current Buddhist year-month, computed exactly as
- *   `DocNumberService.issue` does, so the client records *this* as the seeded period
+ * - `deviceId` — `devices.id`, the token's `did`. The client keys its counter on it:
+ *   `device_no` is unique only within a tenant, so a browser re-enrolled into another
+ *   shop with the same `device_no` must not inherit the old device's rows.
+ * - `deviceNo` — the series the device prints into.
+ * - `period` — the tenant's current Buddhist year-month (`TENANT_PERIOD_SQL`, the
+ *   issuer's own expression), so the client records *this* as the seeded period
  *   instead of guessing the month from its own clock and timezone.
  * - `counters` — every period's high-water mark for this device, not only the current
  *   one: a month boundary between the server's `now()` and the client's must not drop
@@ -24,6 +27,7 @@ export interface DocCounter {
  *   month, so there is nothing to page.
  */
 export interface DocCounters {
+  deviceId: string;
   deviceNo: number;
   period: string;
   counters: DocCounter[];
@@ -41,14 +45,13 @@ export class DocCountersService {
   private async forDeviceIn(deviceId: string): Promise<DocCounters> {
     const { tenantId, manager } = currentRequestContext();
     // `doc_counters.device_id` holds `devices.id` (the token's `did`), which is what
-    // `DocNumberService.issue` writes; `device_no` lives only on `devices`.
+    // `DocNumberService.issue` writes; `device_no` lives only on `devices`. A retired
+    // device is refused, as the issuer and `ShiftsService.open` refuse it (#144).
     const heads = (await manager.query(
-      `SELECT d.device_no,
-              (EXTRACT(YEAR FROM now() AT TIME ZONE t.timezone)::int + 543)
-              || '-' || to_char(now() AT TIME ZONE t.timezone, 'MM') AS period
+      `SELECT d.device_no, ${TENANT_PERIOD_SQL} AS period
          FROM devices d
          JOIN tenants t ON t.id = d.tenant_id
-        WHERE d.tenant_id = $1::uuid AND d.id = $2`,
+        WHERE d.tenant_id = $1::uuid AND d.id = $2 AND d.retired_at IS NULL`,
       [tenantId, deviceId],
     )) as { device_no: number; period: string }[];
     if (heads.length === 0) throw new DeviceRoleForbiddenException();
@@ -62,6 +65,7 @@ export class DocCountersService {
     )) as { doc_type: DocType; period: string; last_no: number }[];
 
     return {
+      deviceId,
       deviceNo: heads[0].device_no,
       period: heads[0].period,
       counters: rows.map((r) => ({

@@ -1,6 +1,7 @@
 import type { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
+import { DocNumberService } from '../src/documents/doc-number.service.js';
 import {
   accessToken,
   createTestApp,
@@ -15,6 +16,7 @@ const OTHER = '18800880-1880-4188-8188-188008800880';
 
 describe('GET /doc-counters (e2e)', () => {
   let app: INestApplication;
+  let ds: DataSource;
   let admin: DataSource;
   let cache: import('ioredis').Redis;
   let fixture: TenantFixture;
@@ -53,18 +55,36 @@ describe('GET /doc-counters (e2e)', () => {
       [tenantId, deviceId, docType, period, lastNo],
     );
 
-  const currentPeriod = async (): Promise<string> => {
-    const rows = await admin.query(
-      `SELECT (EXTRACT(YEAR FROM now() AT TIME ZONE t.timezone)::int + 543) || '-' ||
-              to_char(now() AT TIME ZONE t.timezone, 'MM') AS period
-         FROM tenants t WHERE t.id = $1::uuid`,
-      [TENANT],
-    );
-    return rows[0].period as string;
+  /**
+   * Issues one real receipt number for this tenant's pos device, as a sale would, and
+   * returns the period printed on it. The period is read off an issued number — never
+   * re-derived here — so the suite goes red if `GET /doc-counters` and the issuer ever
+   * disagree about which month it is.
+   */
+  const issuedPeriod = async (): Promise<string> => {
+    const qr = ds.createQueryRunner();
+    await qr.connect();
+    await qr.startTransaction();
+    try {
+      await qr.query(`SELECT set_config('app.tenant_id', $1, true)`, [TENANT]);
+      const no = await new DocNumberService().issue(qr.manager, {
+        tenantId: TENANT,
+        deviceId: fixture.posDeviceId,
+        docType: 'receipt',
+      });
+      await qr.commitTransaction();
+      // RC03-2569-09-0001 → 2569-09
+      return no.split('-').slice(1, 3).join('-');
+    } catch (err) {
+      await qr.rollbackTransaction();
+      throw err;
+    } finally {
+      await qr.release();
+    }
   };
 
   beforeAll(async () => {
-    ({ app, admin, cache } = await createTestApp());
+    ({ app, ds, admin, cache } = await createTestApp());
   });
 
   beforeEach(async () => {
@@ -80,21 +100,22 @@ describe('GET /doc-counters (e2e)', () => {
     await app.close();
   });
 
-  it('returns the calling device’s high-water marks for every period, with its device_no', async () => {
-    const period = await currentPeriod();
-    await seedCounter(TENANT, fixture.posDeviceId, 'receipt', period, 42);
+  it('returns the calling device’s high-water marks for every period, with its id and device_no', async () => {
+    const period = await issuedPeriod(); // receipt 0001, written by the real issuer
     await seedCounter(TENANT, fixture.posDeviceId, 'cn', period, 3);
     await seedCounter(TENANT, fixture.posDeviceId, 'receipt', '2500-01', 9000);
 
     const res = await get(tokenFor(fixture));
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual({
+      deviceId: fixture.posDeviceId,
       deviceNo: 3,
+      // The period the issuer just numbered into — not a second derivation of it.
       period,
       counters: [
         { docType: 'receipt', period: '2500-01', lastNo: 9000 },
         { docType: 'cn', period, lastNo: 3 },
-        { docType: 'receipt', period, lastNo: 42 },
+        { docType: 'receipt', period, lastNo: 1 },
       ],
     });
   });
@@ -107,8 +128,11 @@ describe('GET /doc-counters (e2e)', () => {
   });
 
   it('never returns another device’s or another tenant’s counters', async () => {
-    const period = await currentPeriod();
-    await seedCounter(TENANT, fixture.posDeviceId, 'receipt', period, 5);
+    const period = await issuedPeriod();
+    await admin.query(
+      `UPDATE doc_counters SET last_no = 5 WHERE tenant_id = $1::uuid AND device_id = $2`,
+      [TENANT, fixture.posDeviceId],
+    );
     // Same tenant, the backoffice machine's series.
     await seedCounter(TENANT, fixture.backofficeDeviceId, 'po', period, 77);
     // Another shop whose pos device has the same device_no.
@@ -142,6 +166,17 @@ describe('GET /doc-counters (e2e)', () => {
       expect(res.status).toBe(403);
       expect(res.body.error.code).toBe('DEVICE_ROLE_FORBIDDEN');
     }
+  });
+
+  it('a retired pos device is refused, as the issuer refuses it', async () => {
+    await admin.query(
+      `UPDATE devices SET retired_at = now() WHERE tenant_id = $1::uuid AND id = $2`,
+      [TENANT, fixture.posDeviceId],
+    );
+    // Its access token still verifies for up to 15 minutes after retirement.
+    const res = await get(tokenFor(fixture));
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('DEVICE_ROLE_FORBIDDEN');
   });
 
   it('a pos token whose device is not in this tenant is refused', async () => {

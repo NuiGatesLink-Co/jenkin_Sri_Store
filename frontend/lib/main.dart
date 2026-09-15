@@ -35,8 +35,7 @@ void main() {
                 authRepository: ctx.read<AuthRepository>(),
               );
               // #188: seed the document-number counter on app open and login.
-              // Only the API build has a server to seed from; subscribed
-              // before init() so the app-open emission is not missed.
+              // Only the API build has a server to seed from.
               if (const bool.fromEnvironment('USE_API_WRITES')) {
                 seedDocCountersOnSignIn(cubit, ctx.read<DocCounterSeeder>());
               }

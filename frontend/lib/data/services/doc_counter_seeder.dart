@@ -6,6 +6,8 @@
 // login this pulls `GET /doc-counters` — the server's high-water mark for THIS
 // device (the server takes the device from the token) — and sets
 // `local = max(local, server)` per row, then records the period as seeded.
+// Rows are keyed by the server's device id, so a re-enrolled browser never
+// applies another device's counters or seed record to the new one.
 //
 // Phase 1 issues nothing from the counter; this only fills it.
 
@@ -34,11 +36,13 @@ class DocCounterSeeder {
       await db.transaction(() async {
         for (final c in seed.counters) {
           await db.customInsert(
-            'INSERT INTO doc_counters (device_no, doc_type, period, last_no) '
-            'VALUES (?, ?, ?, ?) '
-            'ON CONFLICT (device_no, doc_type, period) '
+            'INSERT INTO doc_counters '
+            '(device_id, device_no, doc_type, period, last_no) '
+            'VALUES (?, ?, ?, ?, ?) '
+            'ON CONFLICT (device_id, doc_type, period) '
             'DO UPDATE SET last_no = MAX(last_no, excluded.last_no)',
             variables: [
+              Variable.withString(seed.deviceId),
               Variable.withInt(seed.deviceNo),
               Variable.withString(c.docType),
               Variable.withString(c.period),
@@ -51,7 +55,7 @@ class DocCounterSeeder {
             .into(db.docCounterSeeds)
             .insertOnConflictUpdate(
               DocCounterSeedsCompanion.insert(
-                deviceNo: seed.deviceNo,
+                deviceId: seed.deviceId,
                 period: seed.period,
                 seededAt: DateTime.now(),
               ),
@@ -65,13 +69,18 @@ class DocCounterSeeder {
 
   static _Seed _parse(Object? res) {
     if (res is! Map) throw const FormatException('doc-counters: not an object');
+    final deviceId = res['deviceId'];
     final deviceNo = res['deviceNo'];
     final period = res['period'];
     final counters = res['counters'];
-    if (deviceNo is! int || period is! String || counters is! List) {
+    if (deviceId is! String ||
+        deviceId.isEmpty ||
+        deviceNo is! int ||
+        period is! String ||
+        counters is! List) {
       throw const FormatException('doc-counters: missing fields');
     }
-    return _Seed(deviceNo, period, [
+    return _Seed(deviceId, deviceNo, period, [
       for (final c in counters)
         if (c is Map &&
             c['docType'] is String &&
@@ -89,8 +98,9 @@ class DocCounterSeeder {
 }
 
 class _Seed {
-  _Seed(this.deviceNo, this.period, this.counters);
+  _Seed(this.deviceId, this.deviceNo, this.period, this.counters);
 
+  final String deviceId;
   final int deviceNo;
   final String period;
   final List<({String docType, String period, int lastNo})> counters;
