@@ -3,7 +3,7 @@ import {
   RequestMethod,
   type INestApplication,
 } from '@nestjs/common';
-import type { Request, Response } from 'express';
+import { json, type NextFunction, type Request, type Response } from 'express';
 import type { Logger } from 'pino';
 import helmet from 'helmet';
 import { EnvelopeInterceptor } from './common/envelope.interceptor.js';
@@ -13,6 +13,10 @@ import {
 } from './common/http-exception.filter.js';
 import { requestLogger } from './common/logger.js';
 import { APP_CONFIG, type AppConfig } from './config/config.js';
+
+/** `POST /platform/tenants/:id/import` (ADR-0005), as Express sees it under the global prefix. */
+export const IMPORT_ROUTE = '/api/v1/platform/tenants/:id/import';
+export const IMPORT_BODY_LIMIT = '10mb';
 
 /** Everything main.ts and the e2e tests must configure identically. */
 export async function configureApp(
@@ -74,6 +78,15 @@ export async function configureApp(
   });
 
   app.use(requestLogger(logger));
+  // #185: the tenant import's body is a whole shop's backup (`sa_*` + `__meta`) — about 2 MiB
+  // for four months of a mid-size shop — and Nest's own JSON parser stops at 100 KiB, so every
+  // real file died as a 500. Only this route gets the larger limit, which matches nginx's
+  // `client_max_body_size 10m`; it is registered before `app.init()` mounts Nest's parser,
+  // and that parser skips a request whose body has already been read. 🔴 Wrapped, never passed
+  // bare: Nest skips its own parser when it finds a middleware *named* `jsonParser` anywhere in
+  // the stack, so `app.use(path, json())` silently left every other route with no body at all.
+  const importJson = json({ limit: IMPORT_BODY_LIMIT });
+  app.use(IMPORT_ROUTE, (req: Request, res: Response, next: NextFunction) => importJson(req, res, next));
   app.setGlobalPrefix('api/v1', {
     exclude: [
       { path: 'health/live', method: RequestMethod.GET },

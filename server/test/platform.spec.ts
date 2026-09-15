@@ -430,6 +430,50 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
       expect(params).not.toContain(new Date('2020-01-01T00:00:00.000Z'));
     });
 
+    // #185: the file's real store keys. The first version read `sa_purchase_orders`,
+    // `sa_shifts`, `sa_parked_sales` and `{ name }` categories, so a real backup lost every
+    // PO, shift, drawer entry and parked bill and renamed its categories `Cat-<n>`.
+    it('reads the store keys exportSnapshot() writes (#185)', async () => {
+      mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
+
+      const importService = new TenantImportService(mockAdminDs, auditService, tenantCache as any);
+      await importService.importSnapshot(
+        't1',
+        {
+          __meta: { version: 2 },
+          sa_categories: ['เบรก', 'ช่วงล่าง'],
+          sa_products: [
+            { id: 'p1', partNo: 'BP-1', stock: 1, zone: 'Electrical' },
+            { id: 'p2', partNo: 'BP-2', stock: 1, category: 'ยาง' },
+          ],
+          sa_sales: [{ id: 's1', receiptNo: 'RC1', total: 85, items: [{ productId: 'p1', qty: 1, price: 85, cost: 45 }] }],
+          sa_pos: [{ id: 'po1', poNo: 'PO1', supplier: 'x', status: 'received', items: [{ partNo: 'BP-1', name: 'n', qty: 2, cost: 40 }] }],
+          sa_cash_drawer: { date: '2026-08-28', startingCash: 1000, openedAt: '2026-08-28T01:00:00.000Z', closedAt: null, entries: [{ id: 'de1', type: 'out', amount: 50, createdAt: '2026-08-28T02:00:00.000Z' }] },
+          sa_shift_history: [
+            { date: '2026-08-27', startingCash: 1000, openedAt: '2026-08-27T01:00:00.000Z', closedAt: '2026-08-27T11:00:00.000Z', physicalCash: 5000, entries: [] },
+            { date: '2026-08-27', startingCash: 500, openedAt: '2026-08-27T00:00:00.000Z', autoArchived: true, entries: [] },
+          ],
+          sa_parked: [{ id: 'pk1', parkedAt: '2026-08-28T03:00:00.000Z', items: [], discount: 0 }],
+        },
+        'adm1',
+      );
+
+      const inserts = (table: string) =>
+        mockAdminDs.query.mock.calls.filter((c: any) => c[0].includes(`INSERT INTO ${table} `)).map((c: any) => c[1]);
+      expect(inserts('categories').map((p: any) => p[1])).toEqual(['เบรก', 'ช่วงล่าง', 'ไฟฟ้า', 'ยาง']);
+      expect(inserts('products').map((p: any) => p[5])).toEqual(['ไฟฟ้า', 'ยาง']);
+      expect(inserts('sale_items')[0][9]).toBe(45);
+      expect(inserts('purchase_orders')).toHaveLength(1);
+      expect(inserts('po_items')).toHaveLength(1);
+      expect(inserts('shifts').map((p: any) => [p[1], p[7]])).toEqual([
+        ['sh_2026-08-28_1', true],
+        ['sh_2026-08-27_1', false],
+        ['sh_2026-08-27_2', false],
+      ]);
+      expect(inserts('drawer_entries').map((p: any) => p[2])).toEqual(['sh_2026-08-28_1']);
+      expect(inserts('parked_sales').map((p: any) => p[1])).toEqual(['pk1']);
+    });
+
     it('rolls back and does not invalidate cache if audit log fails during import', async () => {
       mockAdminDs.query.mockResolvedValue([{ n: 0 }]);
       vi.spyOn(auditService, 'log').mockRejectedValueOnce(new Error('Audit write failed'));

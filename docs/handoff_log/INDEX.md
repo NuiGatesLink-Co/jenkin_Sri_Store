@@ -2,6 +2,17 @@
 
 1 บรรทัดต่อ handoff · เรียงใหม่ → เก่า · รูปแบบตาม [`handoff-prompt-template.md`](handoff-prompt-template.md)
 
+- 2026-09-15 — [#185 `close.4`: ลอง checklist §9 ด้วย snapshot สังเคราะห์](close4-synthetic-snapshot-2026-09-15.md) — เจ้าของโปรเจกต์สั่งให้ใช้ข้อมูลสังเคราะห์ก่อน เพราะยังไม่ได้ไฟล์จริงจากร้าน
+  - สร้าง generator แบบ deterministic ที่จำลองการขายของร้านทีละวันตามกฎของ Drift repository (สินค้า 320 · บิล 2,043 · 4 เดือน · 2 MiB) · commit เฉพาะ sample เล็ก 142 KiB
+  - Flutter: `importLegacyBackup()` ผ่าน 4/4
+  - Server: รอบแรกบน `main` พัง
+    - 🔴 body เกิน 100 KiB ได้ 500
+    - 🔴 import อ่าน key ที่แต่งขึ้นเอง (`sa_purchase_orders`/`sa_shifts`/`sa_parked_sales`) → PO, กะ, ลิ้นชัก, บิลพัก หายหมด แต่ยังตอบ 201 · หมวดกลายเป็น `Cat-n` · `zone` ไม่ถูกแปลง
+  - แก้แล้ว: 6 ข้อใน §9 ผ่านครบ · rollback ผ่าน · closing report ถูกต้อง · บิลแรกหลัง import ได้เลข `RC01-2569-09-0001`
+  - 🔴 กับดัก: ถ้าส่ง `json()` ให้ `app.use` ตรง ๆ Nest จะข้าม parser ของตัวเอง ทุก route อื่นเลยไม่มี body
+  - 🔴 ไฟล์แบบ realistic (มีสินค้า/ลูกค้า/ช่างที่ถูกลบจริงแต่ประวัติยังอ้างถึง) → FK ได้ 500 → #238 · ช่องโหว่ pre-flight ที่เหลือ → #239
+  - #185 ยังเปิดไว้ รอไฟล์จริง
+
 - 2026-09-15 — [Lane A: ปิดงานค้าง phase 1 + เคาะ ADR phase 2](lane-a-closeout-round-2026-09-15.md) — orchestrator + agent (implement → `/code-review` + `/scrutinize` แยก agent → แก้ → merge) · merge #197 (#183 timeout) #198 (#182 scheduler) #204 (#188 doc-counters, schema v6) #205 (#201 builtin jitter) #215 (#213 commit guard 25 วินาที) · รีวิวย้อนหลัง #208/#209 (ไม่ต้อง revert) · #187/#191 เคาะแล้ว (#214 แทน #206/#210) · 🔴 role timeout 5 วินาทีทำให้ report พัง → เปลี่ยนเป็น commit guard · 🔴 test ต้องรันแบบไม่มี env ค้าง · 🔴 checkout หลักใช้ร่วมกับอีก session · ค้าง #184–#186 #217 #219–#221 และติ๊ก DoD — กำลังทำ
 
 - 2026-09-14 — [#25 Ticket 25 `p6.1` GET /bootstrap + GET/PATCH /settings](ticket-25-p61-bootstrap-settings.md) — เอนด์พอยต์ GET /bootstrap คำนวณ Strong ETag SHA256 ตอบ 304 Not Modified เมื่อข้อมูลไม่เปลี่ยน + GET/PATCH /settings ตรวจสิทธิ์ manager — ปิดแล้ว
