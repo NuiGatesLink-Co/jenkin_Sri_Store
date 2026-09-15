@@ -2,6 +2,9 @@ import type { INestApplication } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 import request from 'supertest';
 import type { DataSource } from 'typeorm';
+import { APP_ROLE_TIMEOUTS } from '../src/common/database/commit-ceiling.js';
+import { TenantService } from '../src/common/database/tenant.service.js';
+import { runInTenantScope, setRequestTenant } from '../src/common/request-context.js';
 import { DocNumberService } from '../src/documents/doc-number.service.js';
 import { AUDIT_DATA_SOURCE } from '../src/infra/db.module.js';
 import {
@@ -12,16 +15,11 @@ import {
   seedProduct,
 } from './support/fixture.js';
 
-// #213: ADR-0010's phase-2 pull rewinds `?updatedSince=` by 30 s, which is safe only while
-// a write transaction commits within 30 s of stamping `updated_at = now()`. Migration
-// `1788652802130` caps every `pos_app` connection at `statement_timeout = 5s` and
-// `idle_in_transaction_session_timeout = 5s` (Postgres 16 has no `transaction_timeout`).
-//
-// Each case proves the cap fires on a real request and leaves nothing behind: the request
-// answers an error instead of hanging, nothing is written, and a pool of TWO — both of
-// whose connections the stall case kills — serves the next burst. A pool that handed a
-// dead client back out would 500 the burst; one that leaked a checked-out client would
-// wait out `connectionTimeoutMillis` (the #162 signature), hence the short connect timeout.
+// #213: the transaction ceiling behind ADR-0010's 30 s cursor rewind — README
+// *The transaction ceiling (#213)* has the design. Each case runs a real request (or a real
+// `runTx`) at `DB_POOL_SIZE=2` and checks what it leaves behind: an error instead of a hang,
+// nothing committed, and a pool the next burst can still use. The short connect timeout
+// makes a leaked connection a fast red (the #162 signature) rather than a ten-second one.
 describe('pos_app transactions cannot outlive the 30 s cursor rewind (e2e, #213)', () => {
   const TENANT = '21321321-3333-4333-8333-213213213213';
 
@@ -29,6 +27,7 @@ describe('pos_app transactions cannot outlive the 30 s cursor rewind (e2e, #213)
   let ds: DataSource;
   let admin: DataSource;
   let cache: Redis;
+  let tenants: TenantService;
   let token: string;
   let seq = 0;
 
@@ -47,6 +46,7 @@ describe('pos_app transactions cannot outlive the 30 s cursor rewind (e2e, #213)
       if (before.timeout === undefined) delete process.env.DB_CONNECTION_TIMEOUT_MS;
       else process.env.DB_CONNECTION_TIMEOUT_MS = before.timeout;
     }
+    tenants = app.get(TenantService);
     const t = await resetTenant(admin, TENANT, { posDeviceNo: 13, cache });
     token = accessToken({
       tenantId: TENANT,
@@ -55,28 +55,22 @@ describe('pos_app transactions cannot outlive the 30 s cursor rewind (e2e, #213)
       deviceId: t.posDeviceId,
       deviceRole: 'pos',
     });
-    await seedProduct(admin, TENANT, {
-      id: 'p1',
-      partNo: 'OF-1',
-      name: 'Oil Filter',
-      price: 85,
-      cost: 50,
-      stock: 100,
-    });
-    // A second part, so the two stalled bills below do not queue on each other's row lock.
-    await seedProduct(admin, TENANT, {
-      id: 'p2',
-      partNo: 'OF-2',
-      name: 'Oil Filter 2',
-      price: 85,
-      cost: 50,
-      stock: 100,
-    });
+    for (const id of ['p1', 'p2']) {
+      await seedProduct(admin, TENANT, {
+        id,
+        partNo: `OF-${id}`,
+        name: `Oil Filter ${id}`,
+        price: 85,
+        cost: 50,
+        stock: 100,
+      });
+    }
     await seedOpenShift(admin, TENANT, t.posDeviceId, { userId: t.userId });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    tenants.commitCeilingMs = 25_000;
   });
 
   afterAll(async () => {
@@ -86,6 +80,7 @@ describe('pos_app transactions cannot outlive the 30 s cursor rewind (e2e, #213)
   });
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  const fresh = (what: string) => `${what}-213-${++seq}-${Date.now()}`;
 
   const sell = (key: string, id: string, productId = 'p1') =>
     request(app.getHttpServer())
@@ -102,81 +97,121 @@ describe('pos_app transactions cannot outlive the 30 s cursor rewind (e2e, #213)
           {
             lineNo: 1,
             productId,
-            partNo: productId === 'p1' ? 'OF-1' : 'OF-2',
-            name: 'Oil Filter',
-            nameTH: 'Oil Filter',
+            partNo: `OF-${productId}`,
+            name: `Oil Filter ${productId}`,
+            nameTH: `Oil Filter ${productId}`,
             qty: 1,
             price: '85.00',
           },
         ],
-      });
+      })
+      // Bounded, so a missing ceiling fails as a timeout instead of hanging the suite.
+      .timeout(30_000);
 
   const current = () =>
     request(app.getHttpServer())
       .get('/api/v1/shifts/current')
       .set('Authorization', `Bearer ${token}`);
 
-  const saleCount = async (id: string) =>
-    (
-      (await admin.query(
-        `SELECT count(*)::int AS n FROM sales WHERE tenant_id = $1::uuid AND id = $2`,
-        [TENANT, id],
-      )) as { n: number }[]
-    )[0].n;
+  const count = async (sql: string, params: unknown[]) =>
+    ((await admin.query(sql, params)) as { n: number }[])[0].n;
+  const saleCount = (id: string) =>
+    count(`SELECT count(*)::int AS n FROM sales WHERE tenant_id = $1::uuid AND id = $2`, [
+      TENANT,
+      id,
+    ]);
+  const keyCount = (key: string) =>
+    count(
+      `SELECT count(*)::int AS n FROM idempotency_keys WHERE tenant_id = $1::uuid AND key = $2`,
+      [TENANT, key],
+    );
 
-  it('every pos_app pool carries the ceiling; the owner connection does not', async () => {
+  /** Whether the next burst is served at once, after whatever the case did to the pool. */
+  const expectPoolServes = async () => {
+    const started = Date.now();
+    const [bills, reads] = await Promise.all([
+      Promise.all([0, 1, 2].map(() => sell(fresh('k-after'), fresh('s-after')))),
+      Promise.all([0, 1, 2].map(current)),
+    ]);
+    const elapsed = Date.now() - started;
+    console.log(
+      `PROBE burst at pool 2: ${bills.map((r) => r.status).join(',')} | ` +
+        `${reads.map((r) => r.status).join(',')}  ${elapsed} ms`,
+    );
+    expect(bills.map((r) => r.status)).toEqual([201, 201, 201]);
+    expect(reads.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(elapsed).toBeLessThan(3000);
+  };
+
+  it('every pos_app pool carries the role timeouts; the owner connection does not', async () => {
     const show = async (on: DataSource) => {
       const [s] = await on.query(`SHOW statement_timeout`);
       const [i] = await on.query(`SHOW idle_in_transaction_session_timeout`);
       return [s.statement_timeout, i.idle_in_transaction_session_timeout];
     };
-    expect(await show(ds)).toEqual(['5s', '5s']);
-    expect(await show(app.get<DataSource>(AUDIT_DATA_SOURCE))).toEqual(['5s', '5s']);
+    const expected = [
+      APP_ROLE_TIMEOUTS.statement_timeout,
+      APP_ROLE_TIMEOUTS.idle_in_transaction_session_timeout,
+    ];
+    expect(expected).toEqual(['25s', '5s']);
+    expect(await show(ds)).toEqual(expected);
+    expect(await show(app.get<DataSource>(AUDIT_DATA_SOURCE))).toEqual(expected);
     // Migrations and platform provisioning/import run as the owner, uncapped.
     expect(await show(admin)).toEqual(['0', '0']);
   });
 
-  it('a bill blocked on a row lock past the ceiling answers an error, writes nothing, and a retry goes through', async () => {
-    const key = `k-213-lock-${++seq}-${Date.now()}`;
-    const id = `s-213-lock-${seq}-${Date.now()}`;
-    // The owner connection is uncapped, so it can hold the product row for as long as the
-    // test needs — longer than any pos_app statement may wait for it.
-    const holder = admin.createQueryRunner();
-    await holder.connect();
-    let res: request.Response;
-    let elapsed: number;
-    try {
-      await holder.startTransaction();
-      await holder.query(
-        `SELECT id FROM products WHERE tenant_id = $1::uuid AND id = 'p1' FOR UPDATE`,
-        [TENANT],
-      );
-      const started = Date.now();
-      // Bounded, so a missing ceiling fails as a timeout here and the holder is released,
-      // instead of hanging the suite on a lock nothing will ever let go of.
-      res = await sell(key, id).timeout(15_000);
-      elapsed = Date.now() - started;
-    } finally {
-      if (holder.isTransactionActive) await holder.commitTransaction();
-      await holder.release();
-    }
-    console.log(`PROBE lock-wait bill: ${res.status} after ${elapsed} ms`);
+  it('a read statement longer than the idle timeout still answers (reports over years of data)', async () => {
+    const started = Date.now();
+    const rows = await runInTenantScope(async () => {
+      setRequestTenant(TENANT);
+      return tenants.runTx((m) => m.query(`SELECT pg_sleep(6), 1 AS ok`));
+    });
+    const elapsed = Date.now() - started;
+    console.log(`PROBE 6 s read in runTx: ok after ${elapsed} ms`);
+    expect(rows).toEqual([{ pg_sleep: '', ok: 1 }]);
+    expect(elapsed).toBeGreaterThanOrEqual(6000);
+  });
+
+  it('a write transaction past the commit ceiling is rolled back — nothing commits, the claim included — and its resend goes through', async () => {
+    // Lowered so the suite does not sleep 25 s; the check is the production one.
+    tenants.commitCeilingMs = 300;
+    const docs = app.get(DocNumberService);
+    const issue = docs.issue.bind(docs);
+    vi.spyOn(docs, 'issue').mockImplementation(async (...args) => {
+      await sleep(600);
+      return issue(...args);
+    });
+    const key = fresh('k-guard');
+    const id = fresh('s-guard');
+
+    const started = Date.now();
+    const res = await sell(key, id);
+    const elapsed = Date.now() - started;
+    console.log(`PROBE bill past the commit ceiling: ${res.status} after ${elapsed} ms`);
 
     // A 5xx, not a 4xx: the client reads it as "fate unknown" and resends the same key.
     expect(res.status).toBe(500);
-    expect(elapsed).toBeGreaterThanOrEqual(4900);
-    expect(elapsed).toBeLessThan(8000);
+    expect(elapsed).toBeLessThan(3000);
     expect(await saleCount(id)).toBe(0);
+    expect(await keyCount(key)).toBe(0);
+    const stock = await count(
+      `SELECT stock AS n FROM products WHERE tenant_id = $1::uuid AND id = 'p1'`,
+      [TENANT],
+    );
 
-    // The idempotency claim rolled back with the transaction, so the resend is a first try.
+    vi.restoreAllMocks();
+    tenants.commitCeilingMs = 25_000;
     const retry = await sell(key, id);
     expect(retry.status).toBe(201);
     expect(await saleCount(id)).toBe(1);
+    expect(
+      await count(`SELECT stock AS n FROM products WHERE tenant_id = $1::uuid AND id = 'p1'`, [
+        TENANT,
+      ]),
+    ).toBe(stock - 1);
   });
 
-  it('a transaction the app stalls past the ceiling is ended by Postgres, and the pool recovers', async () => {
-    // Stall the sale path between two statements of its open transaction — the shape an
-    // event-loop stall, a slow Redis call or a debugger breakpoint inside `runTx` takes.
+  it('a transaction the app stalls past the idle timeout is ended by Postgres, and the pool recovers', async () => {
     const docs = app.get(DocNumberService);
     const issue = docs.issue.bind(docs);
     vi.spyOn(docs, 'issue').mockImplementation(async (...args) => {
@@ -184,48 +219,72 @@ describe('pos_app transactions cannot outlive the 30 s cursor rewind (e2e, #213)
       return issue(...args);
     });
 
-    // pg-pool emits `remove` when it drops a client instead of reusing it. A statement
-    // timeout keeps its connection; only a session Postgres ended is dropped.
+    // Count only clients pg-pool drops after the connection itself failed — a plain idle
+    // expiry during the stall must not count.
+    type PgClient = import('events').EventEmitter;
     const pool = (ds.driver as unknown as { master: import('events').EventEmitter }).master;
-    let removed = 0;
-    const onRemove = () => removed++;
+    const failed = new WeakSet<PgClient>();
+    const onAcquire = (client: PgClient) => {
+      client.once('error', () => failed.add(client));
+    };
+    let removedAfterError = 0;
+    const onRemove = (client: PgClient) => {
+      if (failed.has(client)) removedAfterError++;
+    };
+    pool.on('acquire', onAcquire);
     pool.on('remove', onRemove);
 
-    // Two at once, so BOTH pooled connections are the ones Postgres terminates.
-    const stamp = Date.now();
-    const ids = [0, 1].map((i) => `s-213-idle-${++seq}-${i}-${stamp}`);
+    // Two at once, on different parts so neither queues on the other's row lock: both
+    // pooled connections are the ones Postgres ends.
+    const ids = [fresh('s-idle'), fresh('s-idle')];
     const started = Date.now();
-    const stalled = await Promise.all(
-      ids.map((id, i) => sell(`k-213-idle-${seq}-${i}-${stamp}`, id, `p${i + 1}`)),
-    );
+    let stalled: request.Response[];
+    try {
+      stalled = await Promise.all(ids.map((id, i) => sell(fresh('k-idle'), id, `p${i + 1}`)));
+    } finally {
+      pool.off('acquire', onAcquire);
+      pool.off('remove', onRemove);
+    }
     const elapsed = Date.now() - started;
     console.log(
-      `PROBE stalled bills: ${stalled.map((r) => r.status).join(',')} after ${elapsed} ms`,
+      `PROBE stalled bills: ${stalled.map((r) => r.status).join(',')} after ${elapsed} ms, ` +
+        `${removedAfterError} clients dropped after an error`,
     );
     expect(stalled.map((r) => r.status)).toEqual([500, 500]);
     expect(elapsed).toBeLessThan(8000);
     for (const id of ids) expect(await saleCount(id)).toBe(0);
-    pool.off('remove', onRemove);
-    expect(removed).toBe(2);
+    expect(removedAfterError).toBe(2);
 
     vi.restoreAllMocks();
+    await expectPoolServes();
+  });
 
-    const burstStarted = Date.now();
-    const [bills, reads] = await Promise.all([
-      Promise.all(
-        [0, 1, 2].map((i) =>
-          sell(`k-213-after-${++seq}-${i}-${stamp}`, `s-213-after-${seq}-${i}-${stamp}`),
-        ),
-      ),
-      Promise.all([0, 1, 2].map(current)),
-    ]);
-    const burst = Date.now() - burstStarted;
-    console.log(
-      `PROBE burst after termination at pool 2: ${bills.map((r) => r.status).join(',')} | ` +
-        `${reads.map((r) => r.status).join(',')}  ${burst} ms`,
-    );
-    expect(bills.map((r) => r.status)).toEqual([201, 201, 201]);
-    expect(reads.map((r) => r.status)).toEqual([200, 200, 200]);
-    expect(burst).toBeLessThan(3000);
+  it('a resend while the original still holds its claim answers 503 IDEMPOTENCY_KEY_IN_FLIGHT (lock_timeout fires before statement_timeout)', async () => {
+    const key = fresh('k-inflight');
+    // The original, stood in by the owner connection: an uncommitted claim row.
+    const original = admin.createQueryRunner();
+    await original.connect();
+    let res: request.Response;
+    let elapsed: number;
+    try {
+      await original.startTransaction();
+      await original.query(
+        `INSERT INTO idempotency_keys (tenant_id, key, endpoint, request_hash, status)
+              VALUES ($1::uuid, $2, 'POST /api/v1/sales', 'x', 'in_progress')`,
+        [TENANT, key],
+      );
+      const started = Date.now();
+      res = await sell(key, fresh('s-inflight'));
+      elapsed = Date.now() - started;
+    } finally {
+      if (original.isTransactionActive) await original.rollbackTransaction();
+      await original.release();
+    }
+    console.log(`PROBE resend during the original: ${res.status} ${res.body?.error?.code} after ${elapsed} ms`);
+    expect(res.status).toBe(503);
+    expect(res.body.error.code).toBe('IDEMPOTENCY_KEY_IN_FLIGHT');
+    expect(elapsed).toBeGreaterThanOrEqual(4900);
+    expect(elapsed).toBeLessThan(10_000);
+    await expectPoolServes();
   });
 });
