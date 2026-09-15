@@ -141,11 +141,10 @@ export class TenantImportService {
         const stock = Math.max(0, Math.floor(Number(p.stock ?? 0)));
         const minStock = Math.max(0, Math.floor(Number(p.minStock ?? p.min_stock ?? 0)));
         const compat = p.compat ? String(p.compat) : null;
-        const updatedAt = parseDate(p.updatedAt || p.updated_at);
 
         await manager.query(
           `INSERT INTO products (tenant_id, id, part_no, name, name_th, category, brand, price, cost, stock, min_stock, compat, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, clock_timestamp())
            ON CONFLICT (tenant_id, id) DO NOTHING`,
           [
             tenantId,
@@ -160,7 +159,6 @@ export class TenantImportService {
             stock,
             minStock,
             compat,
-            updatedAt,
           ],
         );
       }
