@@ -2,6 +2,8 @@
 
 1 บรรทัดต่อ handoff · เรียงใหม่ → เก่า · รูปแบบตาม [`handoff-prompt-template.md`](handoff-prompt-template.md)
 
+- 2026-09-15 — [#184 `close.3` deploy จริงครั้งแรกบน demo VM + rollback + k6 บน VM](close3-demo-deploy-2026-09-15.md) — `provision.yml` เพิ่ม `JWT_PLATFORM_SECRET` · `deploy.yml` `8e873cd` ผ่าน (`/health/ready` 200, `.current_sha` ตรง) · rollback `4f3a244` → กลับ `8e873cd` (102 / 95 วินาที, health ไม่หลุด) · 200 `POST /sales` บนสต็อก 50 → 50 บิล 0 5xx สต็อก 0 (`k6:verify` ผ่าน) · 🔴 latency §9 ยังวัดไม่สะอาด: nginx `perip` 30r/s ทำให้ k6 จากเครื่องเดียววัด nginx · 🔴 etcd auth ไม่เปิดบน VM (`etcd-init.sh` กลายเป็นโฟลเดอร์ — แก้ใน #237) · 🔴 rollback ถอยแค่ image ไม่ถอย config · `/health/ready` ตอบ postgres down ตอน pool เต็ม · `verify-integrity.ts` ผ่านแม้ขาย 0 บิล — #184 เปิดไว้ให้เจ้าของปิด
+
 - 2026-09-15 — [Lane A: ปิดงานค้าง phase 1 + เคาะ ADR phase 2](lane-a-closeout-round-2026-09-15.md) — orchestrator + agent (implement → `/code-review` + `/scrutinize` แยก agent → แก้ → merge) · merge #197 (#183 timeout) #198 (#182 scheduler) #204 (#188 doc-counters, schema v6) #205 (#201 builtin jitter) #215 (#213 commit guard 25 วินาที) · รีวิวย้อนหลัง #208/#209 (ไม่ต้อง revert) · #187/#191 เคาะแล้ว (#214 แทน #206/#210) · 🔴 role timeout 5 วินาทีทำให้ report พัง → เปลี่ยนเป็น commit guard · 🔴 test ต้องรันแบบไม่มี env ค้าง · 🔴 checkout หลักใช้ร่วมกับอีก session · ค้าง #184–#186 #217 #219–#221 และติ๊ก DoD — กำลังทำ
 
 - 2026-09-14 — [#25 Ticket 25 `p6.1` GET /bootstrap + GET/PATCH /settings](ticket-25-p61-bootstrap-settings.md) — เอนด์พอยต์ GET /bootstrap คำนวณ Strong ETag SHA256 ตอบ 304 Not Modified เมื่อข้อมูลไม่เปลี่ยน + GET/PATCH /settings ตรวจสิทธิ์ manager — ปิดแล้ว
