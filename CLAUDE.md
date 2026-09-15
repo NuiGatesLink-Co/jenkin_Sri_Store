@@ -390,9 +390,9 @@ GitHub would then skip — and a skipped required check reads as passing — whe
 cancelled) is the false green `07_CICD_DEPLOY.md` §2 rule 4 warns about. These two status jobs are
 the only required check for their side. Both workflows' `concurrency.group` on `main` is keyed by
 commit SHA (not just `github.ref`) so two quick merges don't have the second evict the first's
-in-progress release-image build. Branch protection on GitHub itself is **not yet set** — that is a
-repo-settings change intentionally left to the project owner; the required-check table and the
-exact `gh api` command are in `docs/Backend_design/07_CICD_DEPLOY.md` §4.
+in-progress release-image build. Branch protection on `main` is **set since 2026-09-15** (#186, on the owner's instruction): PR
+required (0 approvals), the two status jobs required, no force push/delete, admins not enforced;
+the exact `gh api` command is in `docs/Backend_design/07_CICD_DEPLOY.md` §4.
 
 **Where the work lives — GitHub issues (since 2026-09-05).** `docs/Backend_design/` says *what* to
 build; the issue tracker says *who builds what, in what order.*
@@ -761,8 +761,7 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   A dev DB that ran the short-lived id `1788652802130` must delete that `migrations` row and re-migrate.
   `TenantJobRunner` also stopped losing the DLQ after a failed rollback or a failed `BEGIN`.
   Follow-up #217: tenant import stamps historic `updated_at`, so already-synced devices never pull imported rows.
-- **Still open:** #67 (needs the owner's go-ahead); branch protection on `main`
-  (owner runs 07 §4, #186); #217; #219–#221. Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196;
+- **Still open:** #67 (needs the owner's go-ahead); #217; #219–#221. Lane A's phase-1 close-out and the phase-2 ADR risks are ticketed under #196;
   the owner decided 2026-09-15 to clear all of it before starting phase 2 — read
   `docs/handoff_log/lane-a-closeout-round-2026-09-15.md` for the ordered next steps. The repo's only long-lived
   branches are `main` and `POC_sample_offline_first`.
