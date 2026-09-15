@@ -8,27 +8,27 @@ import { signJwt } from '../src/common/jwt.js';
 import { hashPassword } from '../src/common/password.js';
 import { APP_CONFIG, type AppConfig } from '../src/config/config.js';
 import { generateSyntheticSnapshot } from './fixtures/synthetic-snapshot.js';
-import { accessToken, createTestApp } from './support/fixture.js';
+import { accessToken, clearTenantCache, createTestApp, TENANT_TABLES_DEPTH_FIRST } from './support/fixture.js';
 import { checkSnapshotInvariants, reconcileImport, snapshotShifts } from './support/snapshot-checks.js';
 
 /**
  * #185 — a shop snapshot through the tenant import path and `01_DATABASE.md §9`, end to end:
  * provision the tenant with `POST /platform/tenants` (step 1), pre-flight the file (step 2),
  * `POST /platform/tenants/:id/import` it over HTTP (steps 3–4), then the six checks (step 5),
- * and finally prove the tenant is usable: the closing report reads the imported drawer and a
- * first new bill takes number 0001 against the imported stock.
+ * and finally prove the tenant is usable: the imported drawer is archived and visible, the
+ * closing report reads it, and a first new bill takes number 0001 against the imported stock.
  *
  * By default the snapshot is the synthetic one (`test/fixtures/synthetic-snapshot.ts`). For the
  * shop's real file — never committed — run only this file:
  *
- *   SNAPSHOT_FILE=/path/backup.json KEEP_TENANT=1 corepack pnpm test:e2e test/import-snapshot.e2e-spec.ts
+ *   SNAPSHOT_FILE=/path/backup.json KEEP_TENANT=1 RECONCILE_OUT=/tmp/evidence.json \
+ *     corepack pnpm test:e2e test/import-snapshot.e2e-spec.ts
  *
- * `KEEP_TENANT=1` leaves the imported tenant in place as the demo tenant, and `RECONCILE_OUT=file.json`
- * writes the evidence (pre-flight report, import status and time, every §9 row, the closing report).
+ * `KEEP_TENANT=1` leaves the imported tenant in place as the demo tenant. `RECONCILE_OUT` writes
+ * the evidence with counts and totals only — no customer/mechanic codes, no document numbers.
  */
 const REAL_FILE = process.env.SNAPSHOT_FILE;
 const KEEP = process.env.KEEP_TENANT === '1';
-/** Where to write the checklist evidence (row counts and money totals only — no customer data). */
 const REPORT = process.env.RECONCILE_OUT;
 
 type Json = Record<string, any>;
@@ -59,12 +59,8 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
   afterAll(async () => {
     if (!KEEP) {
       for (const tid of tenants) {
-        for (const table of [
-          'drawer_entries', 'shifts', 'return_items', 'returns', 'sale_items', 'sales', 'credit_payments',
-          'movements', 'parked_sales', 'quote_items', 'quotes', 'po_items', 'purchase_orders', 'suppliers',
-          'products', 'categories', 'customers', 'mechanics', 'doc_counters', 'idempotency_keys', 'audit_log',
-          'tenant_meta', 'devices', 'users', 'settings',
-        ]) {
+        await clearTenantCache(cache, tid);
+        for (const table of TENANT_TABLES_DEPTH_FIRST) {
           await admin.query(`DELETE FROM ${table} WHERE tenant_id = $1::uuid`, [tid]);
         }
         await admin.query(`DELETE FROM tenants WHERE id = $1::uuid`, [tid]);
@@ -98,48 +94,58 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
     Number((await admin.query(`SELECT count(*)::int AS n FROM ${table} WHERE tenant_id = $1`, [tenantId]))[0].n);
 
   it('imports the snapshot and passes all six post-import checks', async () => {
+    const label = REAL_FILE ? 'SNAPSHOT_FILE' : 'synthetic full/clean';
     const snapshot: Json = REAL_FILE
       ? JSON.parse(readFileSync(REAL_FILE, 'utf8'))
       : generateSyntheticSnapshot({ scale: 'full', profile: 'clean' });
     const bytes = Buffer.byteLength(JSON.stringify(snapshot));
+    const evidence: Json = { snapshot: label, bytes };
+    const report = (extra: Json) => REPORT && writeFileSync(REPORT, JSON.stringify(Object.assign(evidence, extra), null, 2));
 
-    // §9 step 2: pre-flight on the JSON alone.
+    // §9 step 2: pre-flight on the JSON alone. A violation stops the run — §9 says stop and
+    // decide, never import and hope. (The console output may name documents; the report does not.)
     const preflight = checkSnapshotInvariants(snapshot);
-    console.info(`snapshot ${REAL_FILE ?? 'synthetic full/clean'}: ${(bytes / 1024).toFixed(0)} KiB`, preflight);
-    if (!REAL_FILE) expect(preflight.violations).toEqual([]);
+    console.info(`snapshot ${label}: ${(bytes / 1024).toFixed(0)} KiB`, preflight);
+    report({ preflight: { violations: preflight.violations.length, orphans: preflight.orphans } });
+    expect(preflight.violations).toEqual([]);
 
     const tenantId = await provision();
     const started = Date.now();
     const res = await importFile(tenantId, snapshot);
     const importMs = Date.now() - started;
     console.info(`import answered ${res.status} in ${importMs} ms`, res.status >= 400 ? res.body : '');
+    report({ importStatus: res.status, importMs, tenantId: KEEP ? tenantId : undefined });
     expect(res.status).toBe(201);
 
     // §9 step 5.
     const rows = await reconcileImport(admin, tenantId, snapshot);
     console.table(rows);
     if (KEEP) console.info(`demo tenant kept: ${tenantId}`);
-    const evidence: Json = { snapshot: REAL_FILE ? 'SNAPSHOT_FILE' : 'synthetic full/clean', bytes, preflight, importStatus: res.status, importMs, tenantId: KEEP ? tenantId : undefined, rows };
-    const report = (extra: Json) => REPORT && writeFileSync(REPORT, JSON.stringify(Object.assign(evidence, extra), null, 2));
-    report({});
+    report({ rows });
     expect(rows.filter((r) => !r.ok)).toEqual([]);
 
-    // The imported drawer, as the closing report reads it. Imported bills carry no
-    // `shift_id` (the file does not link them), so only starting cash and entries count.
-    const latest = snapshotShifts(snapshot)[0];
-    const [shift] = await admin.query(
-      `SELECT id FROM shifts WHERE tenant_id = $1 ORDER BY is_active DESC, opened_at DESC LIMIT 1`,
-      [tenantId],
-    );
+    // The file's drawer is archived, never left active with no device (review of #244):
+    // nothing is "current", and the newest shift with its entries is in history.
+    const latest = [...snapshotShifts(snapshot)].sort((a, b) => Date.parse(b.openedAt) - Date.parse(a.openedAt))[0];
     const owner = accessToken({ tenantId, role: 'owner' });
-    const closing = await request(app.getHttpServer())
-      .get(`/api/v1/reports/closing?shiftId=${encodeURIComponent(shift.id)}`)
-      .set('Authorization', `Bearer ${owner}`);
+    const get = (path: string, token = owner) => request(app.getHttpServer()).get(`/api/v1${path}`).set('Authorization', `Bearer ${token}`);
+    expect(await count(tenantId, 'shifts')).toBeGreaterThan(0);
+    expect((await admin.query(`SELECT count(*)::int AS n FROM shifts WHERE tenant_id = $1 AND is_active`, [tenantId]))[0].n).toBe(0);
+    expect((await get('/shifts/current')).body.data ?? null).toBeNull();
+    const history = await get('/shifts/history?page=1&limit=1');
+    expect(history.status).toBe(200);
+    const newest = history.body.data[0];
+    expect(newest.dateStr ?? newest.date_str).toBe(latest.date);
+    expect(newest.entries).toHaveLength((latest.entries ?? []).length);
+
+    // The same drawer, as the closing report reads it. Imported bills carry no `shift_id`
+    // (the file does not link them), so only starting cash and entries count.
+    const closing = await get(`/reports/closing?shiftId=${encodeURIComponent(newest.id)}`);
     expect(closing.status).toBe(200);
     report({ closing: closing.body.data });
     const entries = (latest.entries ?? []) as Json[];
     const flow = (type: string) => entries.filter((e) => e.type === type).reduce((t, e) => t + Math.round(Number(e.amount) * 100), 0);
-    expect(closing.body.data.startingCash).toBe((Number(latest.startingCash)).toFixed(2));
+    expect(closing.body.data.startingCash).toBe(Number(latest.startingCash).toFixed(2));
     expect(Math.round(Number(closing.body.data.drawerIn) * 100)).toBe(flow('in'));
     expect(Math.round(Number(closing.body.data.drawerOut) * 100)).toBe(flow('out'));
 
@@ -164,6 +170,10 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
       .set('Idempotency-Key', `k-open-${randomUUID()}`)
       .send({ startingCash: '1000.00' });
     expect(opened.status).toBe(200);
+    // The imported drawer stays in history once a device has opened its own.
+    expect((await get('/shifts/current')).body.data.id).toBe(opened.body.data.id);
+    expect((await get('/shifts/history?page=1&limit=1')).body.data[0].id).toBe(newest.id);
+
     const [product] = await admin.query(
       `SELECT id, part_no, name, price, stock FROM products WHERE tenant_id = $1 AND stock > 0 ORDER BY id LIMIT 1`,
       [tenantId],
@@ -180,7 +190,7 @@ describe('tenant import of a shop snapshot through the 01 §9 checklist (#185)',
     expect(sale.body.data.receiptNo).toMatch(/^RC01-\d{4}-\d{2}-0001$/);
     const [after] = await admin.query(`SELECT stock FROM products WHERE tenant_id = $1 AND id = $2`, [tenantId, product.id]);
     expect(after.stock).toBe(product.stock - 1);
-    report({ firstBillAfterImport: { receiptNo: sale.body.data.receiptNo, stockBefore: product.stock, stockAfter: after.stock } });
+    report({ firstBillAfterImport: { numberedFrom0001: true, stockBefore: product.stock, stockAfter: after.stock } });
   });
 
   it.skipIf(Boolean(REAL_FILE))('rolls the whole shop back when one row is refused (§9 step 4)', async () => {

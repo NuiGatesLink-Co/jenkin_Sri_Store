@@ -158,6 +158,50 @@ void main() {
     expect(items.where((i) => i.costAtSale != null).length, withCost);
   });
 
+  test('an export of the imported data has the same stores and field names', () async {
+    final out = await SnapshotRepository(db).exportSnapshot();
+
+    // Field names per store (union over rows, keys whose value is non-null — the
+    // importer reads null as absent and the exporter omits it), plus nested `items[]`
+    // and `entries[]` field names. Order is irrelevant.
+    Set<String> fields(dynamic store) {
+      final rows = store is Map ? [store] : (store is List ? store : const []);
+      final names = <String>{};
+      for (final r in rows.whereType<Map>()) {
+        r.forEach((k, v) {
+          if (v == null) return;
+          names.add('$k');
+          for (final nested in const ['items', 'entries']) {
+            if (k == nested && v is List) {
+              for (final it in v.whereType<Map>()) {
+                it.forEach((nk, nv) {
+                  if (nv != null) names.add('$k.$nk');
+                });
+              }
+            }
+          }
+        });
+      }
+      return names;
+    }
+
+    // Documented, intended losses on this path — anything else is a regression:
+    //  • `zone` — importLegacyBackup() migrates it into `category` and never stores it;
+    //  • `__meta.synthetic` — the generator's own provenance note.
+    const dropped = {
+      'sa_products': {'zone'},
+      '__meta': {'synthetic'},
+    };
+    final inKeys = snap.keys.where((k) => snap[k] != null).toSet();
+    final outKeys = out.keys.where((k) => out[k] != null).toSet();
+    expect(outKeys, inKeys);
+    for (final key in inKeys) {
+      if (snap[key] is String) continue; // sa_schema_version
+      final expected = fields(snap[key])..removeAll(dropped[key] ?? const {});
+      expect(fields(out[key]), expected, reason: 'field names of $key');
+    }
+  });
+
   test('an export of the imported data carries the same record counts', () async {
     final out = await SnapshotRepository(db).exportSnapshot();
     final before = (snap['__meta'] as Map)['recordCounts'] as Map;

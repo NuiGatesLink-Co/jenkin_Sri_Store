@@ -130,7 +130,7 @@ export async function createTestApp(
 }
 
 /** Every tenant-scoped table, in an order that respects the foreign keys. */
-const TENANT_TABLES_DEPTH_FIRST = [
+export const TENANT_TABLES_DEPTH_FIRST = [
   'drawer_entries',
   'shifts',
   'return_items',

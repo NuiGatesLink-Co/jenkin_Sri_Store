@@ -12,18 +12,12 @@
  * difference is not.
  */
 import type { DataSource } from 'typeorm';
+import { snapshotProductCategory as productCategory } from '../../src/platform/snapshot-category.js';
 
 type Json = Record<string, any>;
 
 export const sat = (v: unknown): number => Math.round(Number(v ?? 0) * 100);
 const list = (v: unknown): Json[] => (Array.isArray(v) ? (v as Json[]).filter((x) => x && typeof x === 'object') : []);
-
-/** db.js getProducts() zone → category (the migration §9 requires at import time). */
-const ZONE_MAP: Record<string, string> = {
-  Engine: 'เครื่องยนต์', Electrical: 'ไฟฟ้า', Oils: 'น้ำมัน', Brakes: 'เบรก', Body: 'ตัวถัง',
-};
-export const productCategory = (p: Json): string =>
-  p.category != null ? String(p.category) : p.zone != null ? (ZONE_MAP[String(p.zone)] ?? String(p.zone)) : 'เครื่องยนต์';
 
 /** `sa_categories` is an array of names; tolerate `{ name }` objects too. */
 export const snapshotCategoryNames = (s: Json): string[] =>
@@ -231,15 +225,32 @@ export async function reconcileImport(db: DataSource, tenantId: string, s: Json)
     parked_sales: list(s.sa_parked).length,
     settings: s.sa_settings ? 1 : 0,
   };
+  const dbCounts: Record<string, number> = {};
   for (const [table, n] of Object.entries(expectedCounts)) {
-    row(`COUNT(${table})`, n, Number((await one(`SELECT count(*)::int AS v FROM ${table} WHERE tenant_id = $1`)).v));
+    dbCounts[table] = Number((await one(`SELECT count(*)::int AS v FROM ${table} WHERE tenant_id = $1`)).v);
+    row(`COUNT(${table})`, n, dbCounts[table]);
+  }
+  // …and against the file's own `__meta.recordCounts`, which the app wrote when it exported:
+  // a store truncated between export and import shows up here even when the lists agree.
+  const recordCounts = (s.__meta?.recordCounts ?? {}) as Record<string, number>;
+  const metaTables: Record<string, string> = {
+    products: 'products', customers: 'customers', mechanics: 'mechanics', suppliers: 'suppliers',
+    sales: 'sales', returns: 'returns', creditPayments: 'credit_payments', purchaseOrders: 'purchase_orders',
+    quotes: 'quotes', movements: 'movements', parked: 'parked_sales',
+  };
+  for (const [key, table] of Object.entries(metaTables)) {
+    if (recordCounts[key] != null) row(`__meta.recordCounts.${key} vs COUNT(${table})`, recordCounts[key], dbCounts[table]);
+  }
+  if (recordCounts.shiftHistory != null) {
+    row('__meta.recordCounts.shiftHistory + cashDrawer vs COUNT(shifts)', recordCounts.shiftHistory + (recordCounts.cashDrawer ?? 0), dbCounts.shifts);
   }
   // Categories: provisioning seeds five, and a product may name a category the list lost,
-  // which §9 says to create. Every name the file uses must exist; extras are reported.
+  // which §9 says to create. Every name the file uses must exist. A seed the file never names
+  // is informational only — a shop that deleted a seed category must not fail the check.
   const wanted = new Set<string>([...snapshotCategoryNames(s), ...list(s.sa_products).map(productCategory)]);
   const have = new Set<string>((await db.query(`SELECT name FROM categories WHERE tenant_id = $1`, [tenantId])).map((r: Json) => String(r.name)));
   row('categories named by the file, missing in DB', 0, [...wanted].filter((c) => !have.has(c)).length);
-  row('categories in DB the file never named (provisioning seed)', 0, [...have].filter((c) => !wanted.has(c)).join(', ') || 0);
+  rows.push({ item: '(info) categories in DB the file never named — provisioning seed', expected: '-', actual: [...have].filter((c) => !wanted.has(c)).length, ok: true });
 
   // 4. Every customer's points and total spend.
   const dbCustomers = new Map<string, Json>((await db.query(`SELECT id, points, total_spend FROM customers WHERE tenant_id = $1`, [tenantId])).map((r: Json) => [String(r.id), r]));
@@ -257,17 +268,20 @@ export async function reconcileImport(db: DataSource, tenantId: string, s: Json)
     Number((await one(`SELECT COALESCE(SUM(amount * 100), 0)::bigint AS v FROM credit_payments WHERE tenant_id = $1`)).v));
 
   // 6. The latest shift's drawer: starting_cash + in − out.
-  const latest = shifts[0];
-  if (latest) {
-    const drawer = (sh: Json) => sat(sh.startingCash) + list(sh.entries).reduce((t, e) => t + (e.type === 'in' ? 1 : -1) * sat(e.amount), 0);
-    const d = await one(
-      `SELECT s.id, s.date_str, s.starting_cash * 100
-              + COALESCE((SELECT SUM(CASE WHEN e.type = 'in' THEN e.amount ELSE -e.amount END) * 100
-                            FROM drawer_entries e WHERE e.tenant_id = s.tenant_id AND e.shift_id = s.id), 0) AS v
-         FROM shifts s WHERE s.tenant_id = $1
-        ORDER BY s.is_active DESC, s.opened_at DESC LIMIT 1`,
-    );
-    row(`latest shift ${latest.date} drawer (starting_cash + in − out) satang`, drawer(latest), d ? Number(d.v) : 'no shift');
-  }
+  // Never silently skipped: a file with no shift expects no shift in the DB.
+  const latest = [...shifts].sort((a, b) => Date.parse(String(b.openedAt)) - Date.parse(String(a.openedAt)))[0];
+  const drawer = (sh: Json) => sat(sh.startingCash) + list(sh.entries).reduce((t, e) => t + (e.type === 'in' ? 1 : -1) * sat(e.amount), 0);
+  const d = await one(
+    `SELECT s.date_str, s.starting_cash * 100
+            + COALESCE((SELECT SUM(CASE WHEN e.type = 'in' THEN e.amount ELSE -e.amount END) * 100
+                          FROM drawer_entries e WHERE e.tenant_id = s.tenant_id AND e.shift_id = s.id), 0) AS v
+       FROM shifts s WHERE s.tenant_id = $1
+      ORDER BY s.opened_at DESC LIMIT 1`,
+  );
+  row(
+    'latest shift: date_str and drawer (starting_cash + in − out) satang',
+    latest ? `${latest.date} ${drawer(latest)}` : 'no shift',
+    d ? `${d.date_str} ${Number(d.v)}` : 'no shift',
+  );
   return rows;
 }

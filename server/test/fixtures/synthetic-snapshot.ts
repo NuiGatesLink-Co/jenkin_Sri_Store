@@ -26,6 +26,7 @@
  */
 import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { ZONE_TO_CATEGORY } from '../../src/platform/snapshot-category.js';
 
 export type Scale = 'small' | 'full';
 export type Profile = 'clean' | 'realistic';
@@ -43,14 +44,8 @@ const SCALES: Record<Scale, { products: number; customers: number; mechanics: nu
   full: { products: 320, customers: 90, mechanics: 14, days: 120, salesPerDay: [12, 24] },
 };
 
-/** db.js getProducts() zone → category map (the Dart importer carries the same one). */
-export const ZONE_MAP: Record<string, string> = {
-  Engine: 'เครื่องยนต์',
-  Electrical: 'ไฟฟ้า',
-  Oils: 'น้ำมัน',
-  Brakes: 'เบรก',
-  Body: 'ตัวถัง',
-};
+/** db.js getProducts() zone → category map — the import's own copy, never a second one. */
+const ZONE_MAP = ZONE_TO_CATEGORY;
 
 const CATEGORIES = ['เครื่องยนต์', 'ไฟฟ้า', 'น้ำมัน', 'เบรก', 'ตัวถัง', 'ช่วงล่าง', 'ยาง'];
 
@@ -418,7 +413,8 @@ export function generateSyntheticSnapshot(options: SyntheticOptions = {}): Json 
         shift.entries.push({
           id: newId('de'), type: out ? 'out' : 'in',
           amount: out ? pick([35, 60, 120, 150, 200]) : pick([500, 1000]),
-          note: out ? pick(['ค่าส่งของ', 'ค่าน้ำแข็ง/น้ำดื่ม', 'ซื้ออุปกรณ์ทำความสะอาด']) : 'เติมเงินทอน',
+          // exportSnapshot() writes `note ?? ''`, so a note nobody typed is an empty string.
+          note: out ? pick(['ค่าส่งของ', 'ค่าน้ำแข็ง/น้ำดื่ม', 'ซื้ออุปกรณ์ทำความสะอาด', '']) : 'เติมเงินทอน',
           createdAt: lastMs,
         });
       }
@@ -542,7 +538,11 @@ export function generateSyntheticSnapshot(options: SyntheticOptions = {}): Json 
   const byDateDesc = <T>(key: (x: T) => number) => (a: T, b: T) => key(b) - key(a);
   const exportedAt = lastMs + 60_000;
   const saProducts = live(products).map((p) => ({
-    id: p.id, partNo: p.partNo, name: p.name, nameTH: p.nameTH, ...(p.zone ? { zone: p.zone } : { category: p.category }),
+    // exportSnapshot() writes `category` always and `zone` when set; a file from the old JS
+    // app carries `zone` alone. Half of the zoned products take each shape.
+    id: p.id, partNo: p.partNo, name: p.name, nameTH: p.nameTH,
+    ...(p.zone && p.partNo.charCodeAt(p.partNo.length - 1) % 2 === 0 ? {} : { category: p.category }),
+    ...(p.zone ? { zone: p.zone } : {}),
     brand: p.brand, price: p.price, cost: p.cost, stock: p.stock, minStock: p.minStock,
     ...(p.compat !== undefined ? { compat: p.compat } : {}), updatedAt: iso(p.updatedAt),
   }));
@@ -565,6 +565,9 @@ export function generateSyntheticSnapshot(options: SyntheticOptions = {}): Json 
     sa_customers: live(customers).map(({ deleted: _d, updatedAt, ...c }) => ({ ...c, ...(updatedAt ? { updatedAt: iso(updatedAt) } : {}) })),
     sa_sales: [...sales].sort(byDateDesc((s) => s.date)).map((s) => ({
       ...s, date: iso(s.date), ...(s.voidedAt != null ? { voidedAt: iso(s.voidedAt) } : {}),
+      // Bills from the first five days predate Drift schema v2's `costAtSale`: the export
+      // omits `cost`, and the server must cost them later (ADR-0008 estimated/unknown rows).
+      ...(s.date < START_UTC + 5 * 86400_000 ? { items: s.items.map(({ cost: _c, ...i }) => i) } : {}),
       // JS bills often carry an explicit null rather than omitting the key.
       ...(s.customerId == null && s.mechanicId == null && s.receiptNo.endsWith('0') ? { customerId: null } : {}),
     })),
@@ -587,11 +590,11 @@ export function generateSyntheticSnapshot(options: SyntheticOptions = {}): Json 
     sa_cash_drawer: active ? shiftJson(active) : null,
     sa_shift_history: history,
     sa_parked: [...parked].reverse(),
-    sa_schema_version: '2',
+    sa_schema_version: '6', // the Drift schema version the shop's build is on
   };
   const len = (k: string) => (data[k] as unknown[]).length;
   data.__meta = {
-    version: 2, schemaVersion: 2, exportedAt: iso(exportedAt), shopName: settings.shopName,
+    version: 2, schemaVersion: 6, exportedAt: iso(exportedAt), shopName: settings.shopName,
     synthetic: { generator: 'server/test/fixtures/synthetic-snapshot.ts', seed, scale: options.scale ?? 'small', profile },
     recordCounts: {
       products: len('sa_products'), customers: len('sa_customers'), sales: len('sa_sales'), purchaseOrders: len('sa_pos'),

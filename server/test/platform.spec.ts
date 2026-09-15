@@ -465,11 +465,20 @@ describe('Platform Realm & Tenant Provisioning (#5, #123)', () => {
       expect(inserts('sale_items')[0][9]).toBe(45);
       expect(inserts('purchase_orders')).toHaveLength(1);
       expect(inserts('po_items')).toHaveLength(1);
-      expect(inserts('shifts').map((p: any) => [p[1], p[7]])).toEqual([
-        ['sh_2026-08-28_1', true],
-        ['sh_2026-08-27_1', false],
-        ['sh_2026-08-27_2', false],
+      // [id, auto_archived, archived-now]. No imported shift is active: an active drawer with
+      // no device could never be closed (review of #244). The file's open drawer is archived
+      // the way openShift archives yesterday's.
+      expect(inserts('shifts').map((p: any) => [p[1], p[7], p[8]])).toEqual([
+        ['sh_2026-08-28_1', true, true],
+        ['sh_2026-08-27_1', false, false],
+        ['sh_2026-08-27_2', true, false],
       ]);
+      const shiftSql = mockAdminDs.query.mock.calls.find((c: any) => c[0].includes('INSERT INTO shifts '))[0];
+      expect(shiftSql).toMatch(/\$7, FALSE,/);
+      // The pulled tables are re-stamped as the last statements before COMMIT.
+      const sqls = mockAdminDs.query.mock.calls.map((c: any) => c[0] as string);
+      const tail = sqls.slice(-3);
+      expect(tail.map((s: string) => s.match(/UPDATE (\w+) SET updated_at = clock_timestamp\(\)/)?.[1])).toEqual(['products', 'customers', 'mechanics']);
       expect(inserts('drawer_entries').map((p: any) => p[2])).toEqual(['sh_2026-08-28_1']);
       expect(inserts('parked_sales').map((p: any) => p[1])).toEqual(['pk1']);
     });

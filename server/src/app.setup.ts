@@ -85,8 +85,13 @@ export async function configureApp(
   // and that parser skips a request whose body has already been read. 🔴 Wrapped, never passed
   // bare: Nest skips its own parser when it finds a middleware *named* `jsonParser` anywhere in
   // the stack, so `app.use(path, json())` silently left every other route with no body at all.
+  // Only a request that carries a bearer token earns the large limit: an anonymous caller must
+  // not make the API buffer and parse 10 MiB before the guard has looked at it. Without one the
+  // body falls through to Nest's 100 KiB parser (413 if larger) and the guard answers 401.
   const importJson = json({ limit: IMPORT_BODY_LIMIT });
-  app.use(IMPORT_ROUTE, (req: Request, res: Response, next: NextFunction) => importJson(req, res, next));
+  app.use(IMPORT_ROUTE, (req: Request, res: Response, next: NextFunction) =>
+    /^Bearer\s+\S/i.test(req.headers.authorization ?? '') ? importJson(req, res, next) : next(),
+  );
   app.setGlobalPrefix('api/v1', {
     exclude: [
       { path: 'health/live', method: RequestMethod.GET },

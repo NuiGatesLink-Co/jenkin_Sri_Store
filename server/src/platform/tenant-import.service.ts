@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 import { ADMIN_DATA_SOURCE } from '../infra/db.module.js';
 import { TenantCache } from '../infra/tenant-cache.service.js';
 import { AuditService } from './audit.service.js';
+import { snapshotProductCategory } from './snapshot-category.js';
 
 /**
  * The shop's backup file: the store keys `SnapshotRepository.exportSnapshot()` (a port of
@@ -38,23 +39,6 @@ export class SnapshotPayload {
   __meta?: Record<string, unknown>;
   [key: string]: unknown;
 }
-
-/** db.js getProducts(): a legacy product's `zone` names its category (01 §9 — finish it at import). */
-const ZONE_TO_CATEGORY: Record<string, string> = {
-  Engine: 'เครื่องยนต์',
-  Electrical: 'ไฟฟ้า',
-  Oils: 'น้ำมัน',
-  Brakes: 'เบรก',
-  Body: 'ตัวถัง',
-};
-
-/** The category a snapshot product lands in — the rule `importLegacyBackup()` applies. */
-export function snapshotProductCategory(p: Record<string, unknown>): string {
-  if (p.category != null) return String(p.category);
-  if (p.zone != null) return ZONE_TO_CATEGORY[String(p.zone)] ?? String(p.zone);
-  return 'เครื่องยนต์';
-}
-
 
 function round2(v: unknown): number {
   const num = typeof v === 'number' ? v : parseFloat(String(v ?? '0'));
@@ -137,10 +121,19 @@ export class TenantImportService {
       }
     }
 
+    const categories = snapshot.sa_categories || [];
+    for (let i = 0; i < categories.length; i++) {
+      const cat = categories[i];
+      if (cat && typeof cat === 'object' && cat.position != null && !Number.isFinite(Number(cat.position))) {
+        throw new BadRequestException(
+          `Pre-flight failed: category '${String(cat.name)}' has a non-numeric position (${String(cat.position)})`,
+        );
+      }
+    }
+
     // 3. Single-transaction import
     await this.adminDs.transaction(async (manager) => {
       // 3.1 Categories
-      const categories = snapshot.sa_categories || [];
       const categoryNames = new Set<string>();
       for (let i = 0; i < categories.length; i++) {
         const cat = categories[i];
@@ -500,13 +493,21 @@ export class TenantImportService {
       // 3.12 Shifts & nested drawer entries: sa_cash_drawer (the active shift) + sa_shift_history.
       // A JS/Drift shift carries no id (01 §9), so one is issued as sh_{date}_{n}; a server
       // export (BackupProcessor) keeps its own.
+      //
+      // 🔴 Every imported shift is archived (`is_active = false`), the file's drawer included.
+      // An active drawer belongs to a device (`device_id`), and every close/entry/archive path
+      // filters by it, so an imported `is_active = true, device_id = NULL` row could never be
+      // closed: `GET /shifts/current` (tenant-wide) showed it until a device opened a drawer,
+      // then it and that day's entries fell out of both current and history for good. The
+      // file's drawer is archived the way `openShift` archives yesterday's: auto-archived when
+      // it was never closed, stamped now.
       const drawer = snapshot.sa_cash_drawer;
-      const shifts: Array<{ sh: Record<string, unknown>; isActive: boolean }> = [
-        ...(drawer && typeof drawer === 'object' ? [{ sh: drawer, isActive: true }] : []),
-        ...(snapshot.sa_shift_history || []).map((sh) => ({ sh, isActive: false })),
+      const shifts: Array<{ sh: Record<string, unknown>; fromDrawer: boolean }> = [
+        ...(drawer && typeof drawer === 'object' ? [{ sh: drawer, fromDrawer: true }] : []),
+        ...(snapshot.sa_shift_history || []).map((sh) => ({ sh, fromDrawer: false })),
       ];
       const shiftsPerDate = new Map<string, number>();
-      for (const { sh, isActive } of shifts) {
+      for (const { sh, fromDrawer } of shifts) {
         const openedAt = parseDate(sh.openedAt || sh.opened_at);
         const dateStr = String(sh.date || sh.dateStr || sh.date_str || openedAt.toISOString().slice(0, 10));
         const n = (shiftsPerDate.get(dateStr) ?? 0) + 1;
@@ -515,14 +516,14 @@ export class TenantImportService {
         const startingCash = round2(sh.startingCash || sh.starting_cash);
         const closedAt = sh.closedAt || sh.closed_at ? parseDate(sh.closedAt || sh.closed_at) : null;
         const physicalCash = sh.physicalCash != null || sh.physical_cash != null ? round2(sh.physicalCash ?? sh.physical_cash) : null;
-        const autoArchived = Boolean(sh.autoArchived ?? sh.auto_archived);
+        const autoArchived = fromDrawer ? closedAt == null : Boolean(sh.autoArchived ?? sh.auto_archived);
         const archivedAt = sh.archivedAt || sh.archived_at ? parseDate(sh.archivedAt || sh.archived_at) : null;
 
         await manager.query(
           `INSERT INTO shifts (tenant_id, id, date_str, starting_cash, opened_at, closed_at, physical_cash, is_active, auto_archived, archived_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8, CASE WHEN $9 THEN clock_timestamp() ELSE $10::timestamptz END)
            ON CONFLICT (tenant_id, id) DO NOTHING`,
-          [tenantId, shiftId, dateStr, startingCash, openedAt, closedAt, physicalCash, isActive, autoArchived, archivedAt],
+          [tenantId, shiftId, dateStr, startingCash, openedAt, closedAt, physicalCash, autoArchived, fromDrawer, archivedAt],
         );
 
         const entries = (sh.entries as Array<Record<string, unknown>>) || [];
@@ -531,7 +532,8 @@ export class TenantImportService {
           const entryId = String(entry.id || `de_${shiftId}_${j + 1}`);
           const type = String(entry.type || 'in');
           const amount = round2(entry.amount);
-          const note = entry.note ? String(entry.note) : null;
+          // exportSnapshot() writes `note ?? ''`: an empty note stays empty, only absent is null.
+          const note = entry.note != null ? String(entry.note) : null;
           const createdAt = parseDate(entry.createdAt || entry.created_at);
 
           await manager.query(
@@ -596,6 +598,17 @@ export class TenantImportService {
         action: 'platform.tenant.import',
         ip,
       });
+
+      // Last statement before COMMIT: re-stamp every row a device pulls by `updated_at`
+      // (ADR-0010 keyset cursor, 30 s rewind). A row stamped at the start of a long import —
+      // `now()` defaults on customers/mechanics, or an early product's clock_timestamp() —
+      // commits later than its stamp and could land behind an already-advanced cursor (#217).
+      for (const table of ['products', 'customers', 'mechanics'] as const) {
+        await manager.query(
+          `UPDATE ${table} SET updated_at = clock_timestamp() WHERE tenant_id = $1`,
+          [tenantId],
+        );
+      }
     });
 
     // #32: the transaction above has committed (it is the admin data source's own, not

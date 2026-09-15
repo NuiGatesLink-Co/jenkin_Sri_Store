@@ -509,6 +509,14 @@ between `now()` and `COMMIT`, since `now()` is wall-clock time and the mark is m
       not write the snapshot's historic `products.updated_at`. A device that pulled before
       the import (cursor T1) sees imported products because their `updated_at` is stamped
       at import time (> T1).
+    - **…and re-stamps them as its last statements before COMMIT** (#185, review of #244).
+      The import is one long transaction: 6.4 s for a 2.0 MiB file (4 months, 2,043 bills,
+      local dev, `test/import-snapshot.e2e-spec.ts`), and nginx allows 10 MiB. A product
+      stamped at the start, or a customer/mechanic defaulting to `now()` (transaction start),
+      could therefore commit more than ADR-0010's 30 s rewind behind its stamp. The final
+      `UPDATE products|customers|mechanics SET updated_at = clock_timestamp()` puts every
+      pulled row's stamp within milliseconds of the commit. `settings` is not re-stamped: it
+      is read whole (ETag), not by cursor.
   - `pos_app` writes that do not go through either door, where the role timeouts still apply:
     - `AuthService`'s login, refresh and enrolment audit writes, on the default pool with their own
       transactions. They write only `audit_log`, which no client pulls.
