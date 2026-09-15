@@ -802,7 +802,11 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
     project, and wiped another session's dev Postgres/Redis volumes. Throwaway stacks use a unique `-p`; run
     `docker ps` first.
 - **Still open:**
-  - #239: import hardening + background job (owner decision: 202 + poll).
+  - ~~#239~~: closed by PR #260. The tenant import is a background job: `POST …/import` → 202 + `jobId`, then
+    `GET …/import/:jobId`. `import_jobs` has no RLS and no `pos_app` grants, and the payload is cleared on terminal
+    states. It runs on its own `tenant-import` queue: two `@Processor` classes on one queue race for jobs. The
+    pre-flight refuses duplicate doc numbers, bad dates and non-finite or negative money. `status='succeeded'` is
+    written inside the import transaction. A job stale for 30 min is reclaimed.
   - #67: install the runner and prove the ACs with real runs.
   - #184 / #251: the three-laptop k6 run.
   - #185: re-run with the real shop file.
