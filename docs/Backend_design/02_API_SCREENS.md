@@ -599,13 +599,29 @@ Base path `/api/v1` (§1.1) — JWT ที่ใช้ต้องได้ `aud
 >   ออกเลขเอกสาร = `403 DEVICE_ROLE_FORBIDDEN`, `POST /shifts/open` = `403 DEVICE_ROLE_FORBIDDEN` (#144 —
 >   access token เดิมยังอยู่ได้ถึง 15 นาที เปิดกะใหม่บนเครื่องที่ retire แล้วจะได้กะค้างแบบเดิมอีก)
 
-**`GET /doc-counters`** (ADR-0007) — คืน high-water mark ของ `(device_id, doc_type, period)` — **เฟส 2 เท่านั้น**
+**`GET /doc-counters`** (ADR-0007) — คืน high-water mark ของ `(device_id, doc_type, period)` — **ผู้ใช้คือเฟส 2**
 
-* เฟส 1 server ออกเลขทุกชนิดเอง endpoint นี้ยังไม่ต้องมี (ADR-0007 แก้ 2026-09-04)
+* เฟส 1 server ยังออกเลขทุกชนิดเอง endpoint นี้ไม่อยู่ใน critical path ของเฟส 1 (ADR-0007 แก้ 2026-09-04)
+  แต่**ทำไว้ล่วงหน้าแล้วใน #188** พร้อม seed ฝั่ง client — ตัวที่ใช้ผลจริง (ห้ามออกเลขออฟไลน์ ฯลฯ) คือเฟส 2
 * เฟส 2 เครื่อง `pos` เรียกตอน **เปิดแอป/ล็อกอิน** เพื่อ seed counter ในเครื่อง: `local = max(local, server)`
   และ**ห้ามออกเลขออฟไลน์ถ้า period ปัจจุบันยังไม่เคยได้ seed** (`OFFLINE_NOT_ALLOWED`)
 * กันกรณี counter ใน Drift เพี้ยนโดยที่ device token ยังอยู่ (เช่น restore Drift จากไฟล์เก่า) —
   ส่วนกรณี IndexedDB ถูกล้างทั้งก้อน device token หายไปด้วย จึงเป็นการ enrol เครื่องใหม่ ไม่ใช่ seed
+
+> **ลงมือแล้ว #188 (2026-09-15)** — `server/src/documents/doc-counters.*` · client `DocCounterSeeder`
+> * `200 {deviceId, deviceNo, period, counters: [{docType, period, lastNo}]}` · เครื่องมาจาก `did` ใน token เท่านั้น
+>   (query ใด ๆ ไม่สนใจ) · `period` = เดือนปัจจุบันตาม timezone ร้าน (สูตรเดียวกับตัวออกเลข) ให้ client
+>   บันทึกเป็น period ที่ seed แล้วโดยไม่ต้องเดาจากนาฬิกาเครื่อง · `counters` คืน**ทุก period** ของเครื่องนี้
+>   (ไม่ใช่แค่เดือนปัจจุบัน — ข้ามเดือนระหว่างนาฬิกา server กับเครื่องต้องไม่ทำแถวที่ยังออกเลขอยู่หาย และมีไม่เกิน
+>   5 แถว/เดือน) · token ไม่ใช่ `pos` / ไม่มีเครื่อง / เครื่องไม่อยู่ในร้านนี้ / เครื่อง retire แล้ว =
+>   `403 DEVICE_ROLE_FORBIDDEN`
+> * client (เฉพาะ `USE_API_WRITES`, เครื่อง `pos`): Drift schema v6 `doc_counters` + `doc_counter_seeds` ·
+>   seed เมื่อ `AuthCubit` emit `Authenticated` (เปิดแอปที่ session ยังอยู่ และหลังล็อกอิน) · ไม่ await ·
+>   ดึงหรือพาร์สไม่ผ่าน = ไม่แตะแถวในเครื่องเลย · ทั้งสองตาราง key ด้วย `deviceId` (`devices.id`) ไม่ใช่ `deviceNo`
+>   เพราะ `device_no` ไม่ซ้ำแค่ในร้านเดียว — browser ที่ enrol ใหม่เข้าอีกร้านด้วยเลขเดิมต้องไม่ได้ counter/marker เก่า
+> * 🔴 แถวใน `doc_counter_seeds` พิสูจน์แค่ว่า **มีการ seed เกิดขึ้นเมื่อ `seededAt`** — **ไม่ได้**แปลว่า counter
+>   ในเครื่องเป็นปัจจุบัน: เฟส 1 server ยังออกเลขต่อหลัง seed ตอนเช้า และ client ไม่ขยับ counter จาก response
+>   ของการเขียน → #189 ต้อง seed ใหม่หรือเทียบกับ server ก่อนเชื่อ marker
 
 ---
 

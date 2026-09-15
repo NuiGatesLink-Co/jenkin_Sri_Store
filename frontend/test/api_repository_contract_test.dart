@@ -524,6 +524,16 @@ class ApiShiftsRepository implements ShiftsRepository {
       Directory(p.join('lib', 'data', 'services')),
     ];
 
+    // Exact trimmed lines that READ the key out of a server reply, with the
+    // reason. The scan is textual and cannot tell a read from a send, so each
+    // exemption is one line, never a whole file.
+    const readsFromReply = {
+      // #188: `GET /doc-counters` answers the token's own `devices.id`; the
+      // local counter is keyed by it. The request sends no body and no query.
+      'lib/data/services/doc_counter_seeder.dart':
+          "final deviceId = res['deviceId'];",
+    };
+
     final offenders = <String>[];
     for (final dir in dirs) {
       if (!dir.existsSync()) continue;
@@ -531,6 +541,8 @@ class ApiShiftsRepository implements ShiftsRepository {
           .listSync(recursive: true)
           .whereType<File>()
           .where((f) => f.path.endsWith('.dart'))) {
+        // Posix separators on every OS, so the allowlist keys match on Windows too.
+        final rel = p.posix.joinAll(p.split(p.relative(file.path)));
         final lines = file.readAsStringSync().split('\n');
         for (var i = 0; i < lines.length; i++) {
           final line = lines[i];
@@ -538,7 +550,8 @@ class ApiShiftsRepository implements ShiftsRepository {
           if (!line.contains("'deviceId'") && !line.contains("'tenantId'")) {
             continue;
           }
-          offenders.add('${p.relative(file.path)}:${i + 1}: ${line.trim()}');
+          if (readsFromReply[rel] == line.trim()) continue;
+          offenders.add('$rel:${i + 1}: ${line.trim()}');
         }
       }
     }

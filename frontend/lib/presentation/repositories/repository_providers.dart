@@ -32,6 +32,7 @@ import '../../data/repositories/api_products_repository.dart';
 import '../../data/repositories/api_purchase_orders_repository.dart';
 import '../../data/repositories/api_quotes_repository.dart';
 import '../../data/services/bootstrap_service.dart';
+import '../../data/services/doc_counter_seeder.dart';
 
 /// The repository providers, mirroring providers.dart + shift_providers.dart,
 /// plus AuthRepository, ApiClient, and ApiRepositories (Ticket #55 / ADR-0010).
@@ -122,5 +123,9 @@ List<RepositoryProvider> repositoryProviders(
     RepositoryProvider<AuthRepository>.value(value: authRepo),
     RepositoryProvider<ApiClient>.value(value: client),
     RepositoryProvider<BootstrapService>.value(value: bootstrapService),
+    // #188: seeded on app open / login by `seedDocCountersOnSignIn` (main.dart).
+    RepositoryProvider<DocCounterSeeder>.value(
+      value: DocCounterSeeder(db: db, apiClient: client),
+    ),
   ];
 }
