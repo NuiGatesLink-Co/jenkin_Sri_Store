@@ -2,6 +2,8 @@
 
 1 บรรทัดต่อ handoff · เรียงใหม่ → เก่า · รูปแบบตาม [`handoff-prompt-template.md`](handoff-prompt-template.md)
 
+- 2026-09-15 — [Lane A: ปิดงานค้าง phase 1 + เคาะ ADR phase 2](lane-a-closeout-round-2026-09-15.md) — orchestrator + agent (implement → `/code-review` + `/scrutinize` แยก agent → แก้ → merge) · merge #197 (#183 timeout) #198 (#182 scheduler) #204 (#188 doc-counters, schema v6) #205 (#201 builtin jitter) #215 (#213 commit guard 25 วินาที) · รีวิวย้อนหลัง #208/#209 (ไม่ต้อง revert) · #187/#191 เคาะแล้ว (#214 แทน #206/#210) · 🔴 role timeout 5 วินาทีทำให้ report พัง → เปลี่ยนเป็น commit guard · 🔴 test ต้องรันแบบไม่มี env ค้าง · 🔴 checkout หลักใช้ร่วมกับอีก session · ค้าง #184–#186 #217 #219–#221 และติ๊ก DoD — กำลังทำ
+
 - 2026-09-14 — [#25 Ticket 25 `p6.1` GET /bootstrap + GET/PATCH /settings](ticket-25-p61-bootstrap-settings.md) — เอนด์พอยต์ GET /bootstrap คำนวณ Strong ETag SHA256 ตอบ 304 Not Modified เมื่อข้อมูลไม่เปลี่ยน + GET/PATCH /settings ตรวจสิทธิ์ manager — ปิดแล้ว
 - 2026-09-14 — [#66 `ops.3` runtime config via etcd v3](ticket-66-ops3-etcd-runtime-config.md) — `RuntimeConfigService` ใน NestJS อ่านและ watch `/pos/config/log_level` ผ่าน etcd v3 gRPC-gateway HTTP API ด้วย native `fetch` (ไม่พึ่งพา `etcd3` npm) · mutate `logger.level` แบบ real-time โดยไม่ต้อง restart app · fail-open ปลอดภัย fallback ไปใช้ `LOG_LEVEL` จาก `.env` ทันทีเมื่อ etcd unreachable — เสร็จสมบูรณ์พร้อม merge
 
