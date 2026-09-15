@@ -13,6 +13,7 @@ import {
 } from './common/http-exception.filter.js';
 import { requestLogger } from './common/logger.js';
 import { APP_CONFIG, type AppConfig } from './config/config.js';
+import { platformTokenFromHeader } from './platform/platform-auth.guard.js';
 
 /** `POST /platform/tenants/:id/import` (ADR-0005), as Express sees it under the global prefix. */
 export const IMPORT_ROUTE = '/api/v1/platform/tenants/:id/import';
@@ -85,12 +86,21 @@ export async function configureApp(
   // and that parser skips a request whose body has already been read. 🔴 Wrapped, never passed
   // bare: Nest skips its own parser when it finds a middleware *named* `jsonParser` anywhere in
   // the stack, so `app.use(path, json())` silently left every other route with no body at all.
-  // Only a request that carries a bearer token earns the large limit: an anonymous caller must
-  // not make the API buffer and parse 10 MiB before the guard has looked at it. Without one the
-  // body falls through to Nest's 100 KiB parser (413 if larger) and the guard answers 401.
+  // Only a request whose platform token verifies (signature, expiry, audience — the guard's own
+  // check, `platformTokenFromHeader`) earns the large limit: nobody else may make the API buffer
+  // and parse 10 MiB before the guard has looked at it. Anything else falls through to Nest's
+  // 100 KiB parser (413 if larger) and the guard answers 401. With no config bound, nobody does.
+  let platformSecret: string | undefined;
+  try {
+    platformSecret = app.get<AppConfig>(APP_CONFIG, { strict: false })?.jwtPlatformSecret;
+  } catch {
+    // APP_CONFIG not bound: no request earns the large limit
+  }
   const importJson = json({ limit: IMPORT_BODY_LIMIT });
   app.use(IMPORT_ROUTE, (req: Request, res: Response, next: NextFunction) =>
-    /^Bearer\s+\S/i.test(req.headers.authorization ?? '') ? importJson(req, res, next) : next(),
+    platformSecret && platformTokenFromHeader(req.headers.authorization, platformSecret)
+      ? importJson(req, res, next)
+      : next(),
   );
   app.setGlobalPrefix('api/v1', {
     exclude: [
