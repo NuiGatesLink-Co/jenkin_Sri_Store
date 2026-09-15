@@ -27,7 +27,7 @@ workflow ใน git history (branch `feat/67-auto-deploy` ก็ไม่มี)
 (ปิดช่องว่าง AC4 ของ #40 ไปด้วย). `flutter-ci-status` / `server-ci-status` ท้ายไฟล์ของตัวเอง `needs`
 ทุก job รวม `changes`, ใช้ `if: always()` + loop เช็คผลตามกติกาข้อ 4 ข้างบน. concurrency group บน
 `main` คีย์ด้วย SHA ไม่ใช่ ref เดียว กัน merge ถี่แล้ว run กลางถูก evict. **Branch protection บน
-GitHub ยังไม่ได้ตั้ง** — คำสั่งจริงอยู่ท้าย §4 ข้างล่างนี้
+GitHub ตั้งแล้ว 2026-09-15** (#186) — ค่าอยู่ใน §4 ข้างล่างนี้
 
 ---
 
@@ -35,7 +35,7 @@ GitHub ยังไม่ได้ตั้ง** — คำสั่งจริ
 
 | บล็อก | เครื่องมือ | อยู่ที่ไหนใน repo | สถานะ |
 |---|---|---|---|
-| Code & SCM | Git / GitHub | repo นี้ · branch protection บน `main` (§4) | มี / protection ยังไม่ตั้ง |
+| Code & SCM | Git / GitHub | repo นี้ · branch protection บน `main` (§4) | มี / protection ตั้งแล้ว 2026-09-15 (#186) |
 | Build & Test (CI) | GitHub Actions · vitest (server) · `flutter test` (client) | `.github/workflows/server.yml`, `flutter.yml` | ✅ |
 | Security Scan | Trivy (fs + **image**) · `pnpm audit` · OSV-Scanner | job `audit`, `deps-audit`, และ scan ใน job build image | fs ✅ · image ฝั่ง server: PR #70 (#61) |
 | Package / Storage | Docker + **GHCR** (public) | job build image ทั้งสอง workflow → `ghcr.io/nuimanlp/srisurart-pos-server`, `…-web` | server: PR #70 (#61, tarball artefact ถูกยกเลิก) · web: PR #69 (#62) |
@@ -124,20 +124,21 @@ flowchart LR
 
 ถ้าเพิ่ม job ใหม่ใน workflow: ให้มันเป็น `needs:` ของ status job ไม่ใช่ required check เพิ่ม
 
-**คำสั่งตั้งค่าจริง** (เจ้าของ repo รันเอง — agent ไม่รันให้ ตาม hard limit ของ #39):
+**คำสั่งตั้งค่าจริง** (ตั้งแล้ว 2026-09-15 โดย agent ตามคำสั่งเจ้าของ repo, #186 — รันซ้ำได้ ค่าเดิม) ·
+ใช้ `--input` JSON เพราะ `required_pull_request_reviews=null` ของคำสั่งเดิม**ไม่บังคับ PR** ซึ่งขัดกับแถวแรกของตาราง:
 
 ```bash
 gh api repos/NuimanLP/srisurart-pos-flutter/branches/main/protection \
-  --method PUT \
-  -H "Accept: application/vnd.github+json" \
-  -f 'required_status_checks[strict]=false' \
-  -f 'required_status_checks[contexts][]=flutter-ci-status' \
-  -f 'required_status_checks[contexts][]=server-ci-status' \
-  -F 'enforce_admins=false' \
-  -F 'required_pull_request_reviews=null' \
-  -F 'restrictions=null' \
-  -F 'allow_force_pushes=false' \
-  -F 'allow_deletions=false'
+  --method PUT -H "Accept: application/vnd.github+json" --input - <<'JSON'
+{
+  "required_status_checks": { "strict": false, "contexts": ["flutter-ci-status", "server-ci-status"] },
+  "enforce_admins": false,
+  "required_pull_request_reviews": { "required_approving_review_count": 0 },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
 ```
 
 `strict=false` คือแถว "Require branches up to date" ข้างบน; `contexts` สองตัวคือแถว "Required status
