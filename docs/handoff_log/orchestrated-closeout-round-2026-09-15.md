@@ -17,9 +17,11 @@ Read this before touching #184, #185, #239, #251, #67, the deploy playbook, the 
 | #238 orphan references in a Drift export | **(a) tombstones**: soft-deleted rows built from the names history carries | 01 §9, ADR-0005 addendum (PR #252) |
 | #238 orphan `sa_suppliers` rows (product deleted before any stock or sale) | **drop them** and count `droppedSuppliers` in `audit_log` | 01 §9, ADR-0005 (PR #252) |
 | #251 how to measure §9 latency | **k6 from several machines at once**, each under nginx `perip`, remote-writing to the VM's Prometheus. No perip exemption | 03 §8.1, 02 §9, 07 §10.3 (PR #257) |
-| #239 import vs nginx's 30 s timeout | **background job** (202 + poll) | #239, in progress |
+| #239 import vs nginx's 30 s timeout | **background job** (202 + poll) | PR #260 |
 
-## 2. Merged in this round (12 PRs)
+## 2. Merged in this round (13 PRs + 2 docs PRs)
+
+Docs: #258 (this handoff), #259 (CLAUDE.md). #260 landed after the first version of this file.
 
 | PR | What |
 |---|---|
@@ -34,6 +36,7 @@ Read this before touching #184, #185, #239, #251, #67, the deploy playbook, the 
 | #255 | the etcd watch kept a stale token after a 200 `canceled … Unauthenticated`. Fixed with structured `EtcdHttpError` / `EtcdWatchAuthError` |
 | #256 | #249 nginx.conf single-file bind mount went stale. Now `nginx -t` in a `run --rm` container, then `--force-recreate nginx` on every deploy |
 | #252 | #238 tombstones + dropped orphan suppliers + one `fieldId()` accessor + pre-flight 400 for missing refs |
+| #260 | #239 closed. Pre-flight 400 for duplicate document numbers, unparseable dates, non-finite or negative money and bad line qty (no silent clamps left; `round2` throws on NaN). `deletedAt` honoured. **The import is a background job**: `POST …/import` → 202 + `jobId`, `GET …/import/:jobId`, `import_jobs` (no RLS, no `pos_app` grants, payload cleared on terminal states, partial unique index `uq_import_jobs_active`), queue `tenant-import` (its own queue, never `backup`). A job stale for 30 min is reclaimed. `status='succeeded'` is written inside the import transaction |
 | #257 | #251 `SHARD=i/N` k6 (24 r/s per IP), `location = /prometheus-remote-write/api/v1/write` (allowlist + basic auth, write only), `htpasswd-gen`, Grafana panels, `server/test/k6/README.md` |
 
 ## 3. 🔴 Findings worth remembering
@@ -51,13 +54,7 @@ Read this before touching #184, #185, #239, #251, #67, the deploy playbook, the 
 
 ## 4. Still open, in order
 
-1. **#239** (import hardening + background job). A Sonnet subagent was working on branch `feat/239-import-hardening` when this was written; no PR yet. Scope:
-   - pre-flight 400 for duplicate document numbers, unparseable dates and negative / clamped values;
-   - honour `deletedAt`;
-   - `POST …/import` → 202 + job id, `GET …/import/:jobId`;
-   - a stale-line correction in `close4-synthetic-snapshot-2026-09-15.md`.
-
-   Review it with `/code-review` + `/scrutinize` before merging.
+1. ~~#239~~: **done**, PR #260 (see §2). Two review rounds: the first found a stall leaving `running` forever, success reported as failure after a crash between COMMIT and the status write, and `round2` NaN→0 on ~28 money fields. All three are fixed and tested. Imported bills still carry no `shift_id` (documented).
 2. **#67:** closed on GitHub (2026-09-15 13:20Z, no comment), but its ACs need **real runner runs**, which have not happened. Owner steps, in 07 §6.2:
    1. Require approval for fork PR workflows.
    2. Create the `demo` Environment (branch `main`, no secrets).
