@@ -13,6 +13,7 @@
  */
 import type { DataSource } from 'typeorm';
 import { snapshotProductCategory as productCategory } from '../../src/platform/snapshot-category.js';
+import { countTombstones, planTombstones, TOMBSTONE_MARK } from '../../src/platform/snapshot-tombstones.js';
 
 type Json = Record<string, any>;
 
@@ -35,6 +36,16 @@ export interface InvariantReport {
   violations: string[];
   /** References the Drift build allows (no foreign keys, hard deletes) but Postgres does not. */
   orphans: Record<string, number>;
+  /** What the import does about the orphans (#238/#252): tombstones per table, drops, refusals. */
+  tombstones: {
+    products: number;
+    customers: number;
+    mechanics: number;
+    unnamed: number;
+    returnsWithoutSale: number;
+    droppedSuppliers: number;
+    missingRefs: number;
+  };
 }
 
 export function checkSnapshotInvariants(s: Json): InvariantReport {
@@ -174,7 +185,15 @@ export function checkSnapshotInvariants(s: Json): InvariantReport {
     'credit payments → missing mechanic': payments.filter((p) => !mechanicIds.has(String(p.mechanicId))).length,
     'products → category not in sa_categories': products.filter((p) => !categoryNames.has(productCategory(p))).length,
   };
-  return { violations: v, orphans };
+  const plan = planTombstones(s);
+  const tombstones = {
+    ...countTombstones(plan),
+    unnamed: plan.unnamed.length,
+    returnsWithoutSale: plan.returnsWithoutSale.length,
+    droppedSuppliers: plan.droppedSuppliers.length,
+    missingRefs: plan.missingRefs.length,
+  };
+  return { violations: v, orphans, tombstones };
 }
 
 export interface ReconcileRow {
@@ -205,11 +224,16 @@ export async function reconcileImport(db: DataSource, tenantId: string, s: Json)
   // 3. COUNT(*) of every table the snapshot feeds.
   const shifts = snapshotShifts(s);
   const itemCount = (store: unknown) => list(store).reduce((t, x) => t + list(x.items).length, 0);
+  // #238: hard-deleted rows history still references come back as soft-deleted tombstones.
+  const plan = planTombstones(s);
+  const tombstoned: Record<string, number> = countTombstones(plan);
+  // #252: a supplier row for a product neither live nor tombstoned is dropped, not imported.
+  const dropped: Record<string, number> = { suppliers: plan.droppedSuppliers.length };
   const expectedCounts: Record<string, number> = {
-    products: list(s.sa_products).length,
-    suppliers: list(s.sa_suppliers).length,
-    customers: list(s.sa_customers).length,
-    mechanics: list(s.sa_mechanics).length,
+    products: list(s.sa_products).length + tombstoned.products,
+    suppliers: list(s.sa_suppliers).length - dropped.suppliers,
+    customers: list(s.sa_customers).length + tombstoned.customers,
+    mechanics: list(s.sa_mechanics).length + tombstoned.mechanics,
     sales: list(s.sa_sales).length,
     sale_items: itemCount(s.sa_sales),
     returns: list(s.sa_returns).length,
@@ -239,7 +263,20 @@ export async function reconcileImport(db: DataSource, tenantId: string, s: Json)
     quotes: 'quotes', movements: 'movements', parked: 'parked_sales',
   };
   for (const [key, table] of Object.entries(metaTables)) {
-    if (recordCounts[key] != null) row(`__meta.recordCounts.${key} vs COUNT(${table})`, recordCounts[key], dbCounts[table]);
+    if (recordCounts[key] != null) {
+      row(
+        `__meta.recordCounts.${key} (+ tombstones − dropped) vs COUNT(${table})`,
+        recordCounts[key] + (tombstoned[table] ?? 0) - (dropped[table] ?? 0),
+        dbCounts[table],
+      );
+    }
+  }
+  // #252: the dropped supplier rows are truly gone, not merely uncounted.
+  if (plan.droppedSuppliers.length > 0) {
+    const remaining = (
+      await db.query(`SELECT count(*)::int AS v FROM suppliers WHERE tenant_id = $1 AND id = ANY($2)`, [tenantId, plan.droppedSuppliers])
+    )[0] as Json;
+    row('dropped supplier rows absent from the DB', 0, Number(remaining.v));
   }
   if (recordCounts.shiftHistory != null) {
     row('__meta.recordCounts.shiftHistory + cashDrawer vs COUNT(shifts)', recordCounts.shiftHistory + (recordCounts.cashDrawer ?? 0), dbCounts.shifts);
@@ -251,6 +288,20 @@ export async function reconcileImport(db: DataSource, tenantId: string, s: Json)
   const have = new Set<string>((await db.query(`SELECT name FROM categories WHERE tenant_id = $1`, [tenantId])).map((r: Json) => String(r.name)));
   row('categories named by the file, missing in DB', 0, [...wanted].filter((c) => !have.has(c)).length);
   rows.push({ item: '(info) categories in DB the file never named — provisioning seed', expected: '-', actual: [...have].filter((c) => !wanted.has(c)).length, ok: true });
+
+  // The tombstones themselves: soft-deleted, marked, exactly the planned number, and no
+  // resurrection — the live rows are exactly the file's.
+  const marked: Record<string, string> = {
+    products: `deleted_at IS NOT NULL AND brand = '${TOMBSTONE_MARK}'`,
+    customers: `deleted_at IS NOT NULL AND code LIKE '${TOMBSTONE_MARK}:%'`,
+    mechanics: `deleted_at IS NOT NULL AND code LIKE '${TOMBSTONE_MARK}:%'`,
+  };
+  for (const [table, where] of Object.entries(marked)) {
+    const n = Number((await one(`SELECT count(*)::int AS v FROM ${table} WHERE tenant_id = $1 AND ${where}`)).v);
+    row(`tombstones in ${table} (soft-deleted, marked)`, tombstoned[table], n);
+    const live = Number((await one(`SELECT count(*)::int AS v FROM ${table} WHERE tenant_id = $1 AND deleted_at IS NULL`)).v);
+    row(`live ${table} (deleted_at IS NULL) = the file's`, list(s[`sa_${table}`]).filter((x) => x.deletedAt == null).length, live);
+  }
 
   // 4. Every customer's points and total spend.
   const dbCustomers = new Map<string, Json>((await db.query(`SELECT id, points, total_spend FROM customers WHERE tenant_id = $1`, [tenantId])).map((r: Json) => [String(r.id), r]));
