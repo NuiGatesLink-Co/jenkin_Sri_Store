@@ -541,6 +541,8 @@ class ApiShiftsRepository implements ShiftsRepository {
           .listSync(recursive: true)
           .whereType<File>()
           .where((f) => f.path.endsWith('.dart'))) {
+        // Posix separators on every OS, so the allowlist keys match on Windows too.
+        final rel = p.posix.joinAll(p.split(p.relative(file.path)));
         final lines = file.readAsStringSync().split('\n');
         for (var i = 0; i < lines.length; i++) {
           final line = lines[i];
@@ -548,8 +550,8 @@ class ApiShiftsRepository implements ShiftsRepository {
           if (!line.contains("'deviceId'") && !line.contains("'tenantId'")) {
             continue;
           }
-          if (readsFromReply[p.relative(file.path)] == line.trim()) continue;
-          offenders.add('${p.relative(file.path)}:${i + 1}: ${line.trim()}');
+          if (readsFromReply[rel] == line.trim()) continue;
+          offenders.add('$rel:${i + 1}: ${line.trim()}');
         }
       }
     }
