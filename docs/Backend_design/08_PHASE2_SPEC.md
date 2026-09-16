@@ -447,6 +447,9 @@ stateDiagram-v2
 
 "NEW:" = ยังไม่มี ticket · ticket เดิมแก้ AC ตามไฟล์นี้ก่อนลงมือ
 
+> **ใครทำใบไหน:** [`09_PHASE2_LANES.md`](09_PHASE2_LANES.md) — เจ้าของเคาะ 2026-09-16 (ทาง C: ผ่าฮับ
+> ตามฝั่ง client/server) · slice 4, 8, 11, 14, 20 ถูกผ่าเป็น `-client` / `-server` คนละ lane ที่นั่น
+
 | # | slice | ticket | บล็อกโดย |
 |---|---|---|---|
 | 0a | skew asset web | #245 | – |
