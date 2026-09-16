@@ -815,6 +815,21 @@ Read `docs/handoff_log/ops-auth-cache-monitoring-etcd.md` before touching auth r
   - 🔴 **Never `docker compose down -v` on a shared Docker daemon.** A subagent did, on the default `srisurart-pos`
     project, and wiped another session's dev Postgres/Redis volumes. Throwaway stacks use a unique `-p`; run
     `docker ps` first.
+- **Merged 2026-09-16:** the phase-1 DoD audit → PR #265 — ran the full e2e suite for real (490/492 passed) and
+  ticked 5 of the 13 open `03_ARCHITECTURE.md §8` boxes with PR/issue + file:line citations; the other 8 stayed
+  open as documented gaps, not fabricated ticks (`docs/handoff_log/dod-mapping-2026-09-16.md`). **#245** (web DB
+  asset skew) → PR #267 — the skew was real, not cosmetic (`sqlite3.wasm` 747,018→748,424 bytes, `drift_worker.js`
+  byte-different): the committed assets matched `3.3.3`/`2.34.0` exactly while `pubspec.lock` had moved to
+  `3.4.0`/`2.34.1`; re-synced to the locked versions (sha256-checked against the real GitHub releases) and added a
+  `pubspec.lock`-vs-asset CI check to `flutter.yml`. 🔴 **Filed as #266, not fixed by #267:** even with matching
+  assets, the web build still fails to boot in a browser without `dedicatedWorkersInSharedWorkers` —
+  `LinkError: … "xFileControl": function import requires a callable` in drift's non-OPFS fallback path, reproduced
+  with both the old and new asset pairs, so it's an sqlite3 3.4.0 / drift 2.34.1 compatibility gap, not an
+  asset-sync bug. **#266 blocks #241** (PWA precache manifest). Tickets reassigned off `NuimanLP`: **#184** →
+  PattaraponKitcharoen, **#67** → PattaraponKitcharoen (reopened — PR #237 merged the workflow file, but the runner
+  install + real-run proof in `07 §6.2` never happened), **#266** → LomerAlloys; **#185** stays with `NuimanLP` (the
+  owner wants to handle the real shop snapshot personally). Session record:
+  `docs/handoff_log/session-2026-09-16-orchestration-245-dod.md`.
 - **Still open:**
   - ~~#239~~: closed by PR #260. The tenant import is a background job: `POST …/import` → 202 + `jobId`, then
     `GET …/import/:jobId`. `import_jobs` has no RLS and no `pos_app` grants, and the payload is cleared on terminal
