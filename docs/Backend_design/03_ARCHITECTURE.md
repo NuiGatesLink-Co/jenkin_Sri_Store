@@ -508,12 +508,12 @@ gantt
 - [x] `/health/live` ไม่แตะ DB, `/health/ready` แตะ DB+Redis (แยกกันจริง) — **#14 `p1` 2026-09-06** (ดับ Postgres/Redis แล้ว ready = 503, live = 200, ไม่มี container restart)
 - [ ] import snapshot ของร้านจริงเข้ามาแล้ว **ผ่าน checklist 6 ข้อ** ใน `01_DATABASE.md §9` ทุกข้อ
 - [x] `redis-cache` กับ `redis-queue` แยกกันจริง และ Bull-Board มี auth — **#14 `p1` 2026-09-06**
-- [ ] ยิง `POST /sales` ที่บิลมีสินค้าไม่พอ 3 บรรทัด → ได้ข้อความไทย **ครบทั้ง 3 บรรทัดในครั้งเดียว**
-- [ ] ลบลูกค้าที่มีบิลแล้ว → ได้ `200` (soft delete) ไม่ใช่ `500`
+- [x] ยิง `POST /sales` ที่บิลมีสินค้าไม่พอ 3 บรรทัด → ได้ข้อความไทย **ครบทั้ง 3 บรรทัดในครั้งเดียว** — **#20 2026-09-11** (PR #75 `feat/laneA-sales`; `server/test/sales.e2e-spec.ts:476` "three short lines come back as three Thai lines in ONE response"; re-run 2026-09-16 — full e2e suite 490/492 passed)
+- [x] ลบลูกค้าที่มีบิลแล้ว → ได้ `200` (soft delete) ไม่ใช่ `500` — **#17 2026-09-12** (PR #85 `lane2`; `server/test/people.e2e-spec.ts:177` "soft-deletes a customer with bills, keeps the bill, and hides the tombstone"; re-run 2026-09-16)
 - [ ] สร้าง tenant ใหม่ด้วย `POST /platform/tenants` แล้วล็อกอิน+ขายได้จริงโดยไม่ต้องแตะ psql (ADR-0001)
-- [ ] เครื่อง `backoffice` ยิง `POST /sales` ต้องได้ `403` (`DEVICE_ROLE_FORBIDDEN`) (ADR-0004)
-- [ ] ระงับร้าน (`status='suspended'`) แล้ว **คำขอถัดไปต้องถูกปฏิเสธทันที** ไม่ต้องรอ token หมดอายุ (ADR-0003)
-- [ ] ระงับร้านแล้ว **job ที่ค้างในคิว BullMQ ของร้านนั้นต้องไม่ถูกรัน** (ADR-0003 — DoD เดิมทดสอบแค่ request path)
+- [x] เครื่อง `backoffice` ยิง `POST /sales` ต้องได้ `403` (`DEVICE_ROLE_FORBIDDEN`) (ADR-0004) — **#44 `sec.1` 2026-09-13** (PR #106; `server/test/security.e2e-spec.ts:306` "enforces device role guard (backoffice device cannot create sale)"; re-run 2026-09-16)
+- [x] ระงับร้าน (`status='suspended'`) แล้ว **คำขอถัดไปต้องถูกปฏิเสธทันที** ไม่ต้องรอ token หมดอายุ (ADR-0003) — **#20 2026-09-11** (PR #75; `server/test/request-context.e2e-spec.ts:154` "a suspended shop is refused before its tenant is ever named on a transaction" — same still-valid access token, no wait for expiry; re-run 2026-09-16)
+- [x] ระงับร้านแล้ว **job ที่ค้างในคิว BullMQ ของร้านนั้นต้องไม่ถูกรัน** (ADR-0003 — DoD เดิมทดสอบแค่ request path) — **#34 `p9.1` 2026-09-12** (PR #88; `server/test/queue.e2e-spec.ts:135` "skips job execution without invoking business logic if tenant is suspended"; re-run 2026-09-16)
 - [ ] ดับ `redis-cache` แล้วร้านที่ `suspended` **ยังถูกปฏิเสธ** และร้านปกติ**ยังใช้งานได้** (ADR-0003 ข้อ 5: status ตกไปอ่าน Postgres ไม่ fail-open/closed)
 - [ ] เครื่อง `pos` ยิง `POST /sales` พร้อมกับเครื่อง `backoffice` ยิง `/purchase-orders/:id/receive` และ `/adjust-stock` **บนสินค้าตัวเดียวกัน** 200 รอบ → `stock` สุดท้ายตรงกับผลบวก/ลบทั้งหมด ไม่มี lost update (ADR-0004 — นี่คือการแข่งกันของหลายเครื่องที่มีอยู่จริง ไม่ใช่ `POST /sales` ×200)
 - [ ] `owner` กด `POST /devices/{id}/retire` เครื่อง `pos` ที่มีกะเปิดอยู่ → กะถูกปิดใน transaction เดียวกัน, token เดิมของเครื่องนั้น refresh ไม่ผ่านภายใน 15 นาที, enrol เครื่องใหม่ได้ `device_no` ใหม่ และขายได้ (ADR-0004/0009)
