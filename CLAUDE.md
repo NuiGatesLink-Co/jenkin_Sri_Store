@@ -515,7 +515,9 @@ repositories (`data/repositories/api_*.dart`) `extend` their Drift counterpart a
 `super.<write>()` inside a bare `catch (_)`, so a server that *did* answer — a 409, or a 5xx where
 the write may well have committed and only the reply was lost — silently re-ran the Drift
 transactional service: a second weighted-average cost and a second `movements` row out of
-`receivePO`, a second `credit_payments` row, a second quote. All 16 write fallbacks now sit behind
+`receivePO`, a second `credit_payments` row, a second quote. All **22** write fallbacks (counted
+2026-09-16 — this line said 16 until then, and #229's ticket would have left six of them alive)
+now sit behind
 `on ApiException catch (e) { rethrowServerRefusal(e); }`, which converts the refusal to the
 `PosException` the screens render; only a transport failure still falls back, which is what keeps
 the app working with no server in phase 1. `api_repository_contract_test.dart` enforces it at the
@@ -851,10 +853,24 @@ client id before any check and stops at the first non-verdict (a head op stuck 3
 shifts per day, online void = reason only (no PIN), the offline-PIN 3-day window is enforced on the till only, production =
 the department VM `mob04` deployed by the hardened self-hosted runner from PR #237 (F4′ reversed the pull-based timer; a real-shop cutover is a later phase).
 §2 records the design decisions; the only open item is the Thai-strings ticket (F10). ADR-0004/0007/0009/0010/0013 carry dated addenda.
-Merged as PR #254 (`1072f17`). 🔴 **The §16 slices are not ticketed yet**, and #189/#190/#192–#195/#211/#212/#228–#230 still carry
-pre-spec content (7 days, 5 s rewind, `offlineOk`, cashier) — do not implement from them. The owner wants **lane-independent tickets**
-(no lane waits on another); slice 8 (#228) is a hub, so the lane split (option A: one lane owns the offline path; option B: contract
-first) is still the owner's call, and `/to-tickets` is user-invoked only. Read `docs/handoff_log/phase2-wayfinder-spec-2026-09-15.md`.
+Merged as PR #254 (`1072f17`).
+
+**Phase 2 is ticketed — `docs/Backend_design/09_PHASE2_LANES.md` (2026-09-16, owner-approved; 35 issues, all sub-issues of #243).**
+`08` says *what*, `09` says **who builds which slice, in what order, and where the lanes meet**. The owner chose the client/server
+split of the #228 hub, with lane B (`team/2`, LomerAlloys) owning the whole on-device **engine** — PWA/SW, `outbox_ops`,
+`SyncService`, RC/CN numbering, offline PIN, pull, **and every Drift schema bump** — and lane C (`team/3`, PattaraponKitcharoen)
+owning the **server + the new screens + ops**. Lane A (`team/1`, NuimanLP) is deliberately 3 tickets, but they are the ones that
+unblock everyone: #268 (Thai copy), #269 (the `SyncFacade` seam + the shared `/sync/push` fixtures), #270 (platform allowlist).
+Numbers per slice are in `09 §12`. 🔴 Four issues are **halves**: #228 ↔ #283, #212 ↔ #277, #194 ↔ #285, #193 ↔ #287 — read both
+before touching either. 🔴 Every ticket body ends with `09 §10`, the working agreement for the agent that picks it up
+(`/scrutinize` the approach → code per `karpathy-guidelines` → test only against your own side's fake → close with `/code-review`).
+Rules the plan establishes: **blocked-by never crosses a lane** (a cross-lane need is a contract — the fixtures and `SyncFacade` —
+never a queue); `09 §6` assigns every shared file an owner, and the Drift schema, the server migration-id blocks and
+`customers.service.ts` have explicit rules because two lanes cannot both hold them; **AC may never claim "works against the real
+thing"** while the other half is unmerged. A `/scrutinize` round before filing caught, among others, that
+`requireManager` is **20 call sites + 4 definitions, not 21**, and that `quotes.controller.ts:114` hand-rolls
+`role !== 'manager'` so a grep-driven ticket walks straight past it. Read
+`docs/handoff_log/phase2-lane-split-and-tickets-2026-09-16.md`, then `phase2-wayfinder-spec-2026-09-15.md` for how the spec got here.
 
 **Pending follow-ups (not yet built).** Deployment/hosting is owned by `docs/Backend_design/07_CICD_DEPLOY.md` since 2026-09-10 (ADR-0013); before that it had no owning document — the old
 `docs/PLAN.md` and `docs/BACKEND_DEPLOYMENT.md` were deleted in `ec24f79` and are **not coming
