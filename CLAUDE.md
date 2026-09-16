@@ -147,12 +147,26 @@ idiomatic replacement for the JS snapshot/rollback):
 adversarial scrutiny + fix pass; **web-DB runtime wired** (`flutter run -d chrome` now boots —
 see below). App `dart analyze`-clean, tests green, `flutter build web` ok.
 
-**Web DB (done 2026-06-24):** `driftDatabase()` on the web requires a `web:` option pointing at
-two assets committed in `web/`: `sqlite3.wasm` (matches the `sqlite3` pub version, 3.3.3) and
-`drift_worker.js` (matches the `drift` pub version, 2.34.0). `AppDatabase.open()` passes
+**Web DB (done 2026-06-24, assets re-synced 2026-09-16, #245):** `driftDatabase()` on the web
+requires a `web:` option pointing at two assets committed in `web/`: `sqlite3.wasm` (matches the
+`sqlite3` pub version, 3.4.0) and `drift_worker.js` (matches the `drift` pub version, 2.34.1) —
+recorded in `frontend/web/WEB_DB_ASSET_VERSIONS.txt`. `AppDatabase.open()` passes
 `DriftWebOptions(sqlite3Wasm: Uri.parse('sqlite3.wasm'), driftWorker: Uri.parse('drift_worker.js'))`
 (ignored on native). **If you bump `drift` or `sqlite3`, re-download the matching assets** from
-`github.com/simolus3/{drift,sqlite3.dart}/releases` — a version skew breaks the web DB at boot.
+`github.com/simolus3/{drift,sqlite3.dart}/releases` (tags `sqlite3-<version>` / `drift-<version>`)
+and update `WEB_DB_ASSET_VERSIONS.txt` — a version skew breaks the web DB at boot, and it is not
+cosmetic: sqlite3 3.3.3→3.4.0 bumped the bundled SQLite core (3.53.3) and changed statement-reset
+behaviour, and drift 2.34.0→2.34.1 fixed a zone-scoped cancellation bug inside `drift_worker.js`
+itself (`docs/handoff_log/ticket-245-web-db-asset-skew.md`). `.github/workflows/flutter.yml`'s
+`analyze-and-test` job fails the build if `pubspec.lock`'s locked versions diverge from
+`WEB_DB_ASSET_VERSIONS.txt`.
+🔴 **Matching the versions does not mean the web DB boots clean (#266, open).** With the
+correctly matched 3.4.0/2.34.1 pair, a browser missing `dedicatedWorkersInSharedWorkers` (drift's
+`sharedIndexedDb`/`opfsLocks` fallback storage) hits `LinkError: ... "xFileControl": function
+import requires a callable` and never loads — reproduces identically with the old self-matched
+3.3.3/2.34.0 pair too, so it predates #245 and is a separate drift/sqlite3 incompatibility, not
+an asset-skew symptom. Unverified on a browser with full OPFS support. **#241 (PWA precache
+manifest) must wait on #266, not just #245.**
 
 **Riverpod → flutter_bloc migration (done 2026-07-14):** full replacement — DI (13
 repositories via `RepositoryProvider`), the 4 stateful controllers (now Cubits:
