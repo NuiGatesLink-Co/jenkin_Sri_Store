@@ -52,10 +52,11 @@ A เบาโดยตั้งใจ (เจ้าของสั่ง) แ�
 
 | slice | ticket | เนื้อใน | บล็อกโดย |
 |---|---|---|---|
-| 0a | #245 | asset skew: `sqlite3.wasm` 3.3.3 → 3.4.0, `drift_worker.js` 2.34.0 → 2.34.1 ให้ตรง `pubspec.lock` + assertion ใน `flutter.yml` | – |
+| 0a | #245 ✅ **เสร็จแล้ว** (PR #267, 2026-09-16) | asset skew: `sqlite3.wasm` 3.3.3 → 3.4.0, `drift_worker.js` 2.34.0 → 2.34.1 ให้ตรง `pubspec.lock` + assertion ใน `flutter.yml` | – |
+| 0a′ | #266 🔴 **ใหม่ — เจอตอนตรวจ 0a** | **web DB ไม่บูตเลย** ในเบราว์เซอร์ที่ไม่มี `dedicatedWorkersInSharedWorkers`: `LinkError … "xFileControl": function import requires a callable` กับคู่ asset ที่ตรงเวอร์ชันแล้ว (ไม่ใช่ปัญหา skew) · ต้องแก้ก่อน PWA เพราะ offline shell ต้องเปิด DB ได้ | 0a |
 | 0b | **NEW** `fe.fonts` | bundle Sarabun/Barlow เป็น asset · `GoogleFonts.config.allowRuntimeFetching = false` (flutter#163554) | – |
 | 18 | **NEW** `fe.drop-offlineok` | ลบ `Products.offlineOk` (`tables.dart:33`) → **Drift schema v7** + `onUpgrade` · แก้ `api_products_repository.dart:37,55`, `bootstrap_service.dart:188` · Postgres ไม่มีคอลัมน์นี้ (X1) · CI `build_runner` no-diff คือตัวตรวจ · **ทำก่อน PR อื่นที่แตะ schema** (§6 กติกา schema) | – |
-| 3 | **NEW** `pwa.1` | SW เขียนเอง (Workbox) · precache shell + `sqlite3.wasm` + `drift_worker.js` + CanvasKit ในเครื่อง · build `--no-web-resources-cdn` · cache = `github.sha` ลบของเก่าตอน activate · **ถามก่อนโหลดรุ่นใหม่ ห้าม `skipWaiting` อัตโนมัติ** · `storage.persist()` + บันทึก `persisted()` · Web Locks แท็บเดียว + หน้า "เปิดอยู่แล้ว" (`08 §4`) · header `no-cache` ของ `/sw.js` มากับ A/24 — ถ้ายังไม่ลง ให้ทดสอบด้วย nginx ในเครื่อง อย่าแก้ `nginx.conf` | 0a, 0b |
+| 3 | **NEW** `pwa.1` | ⚠️ ต้องแก้ #266 (0a′) ก่อน ไม่งั้น DB ไม่บูตอยู่ดี · SW เขียนเอง (Workbox) · precache shell + `sqlite3.wasm` + `drift_worker.js` + CanvasKit ในเครื่อง · build `--no-web-resources-cdn` · cache = `github.sha` ลบของเก่าตอน activate · **ถามก่อนโหลดรุ่นใหม่ ห้าม `skipWaiting` อัตโนมัติ** · `storage.persist()` + บันทึก `persisted()` · Web Locks แท็บเดียว + หน้า "เปิดอยู่แล้ว" (`08 §4`) · header `no-cache` ของ `/sw.js` มากับ A/24 — ถ้ายังไม่ลง ให้ทดสอบด้วย nginx ในเครื่อง อย่าแก้ `nginx.conf` | 0a′, 0b |
 | 4-c | **NEW** `num.1-client` | เครื่อง `pos` ออก RC/CN จาก `DocCounters` (key `deviceId`, #188) · period = **นาฬิกาเครื่องเท่านั้น** · ขึ้นเดือนใหม่ออฟไลน์ = `0001` · `9999` → `DOC_NUMBER_EXHAUSTED` ไม่วนกลับ · เลขถูกใช้เมื่อ 2xx หรือเข้าคิว (C8) · migration ล้าง `doc_counter_seeds` ตอนอัปเกรด (C16) | 18 |
 | 5 | #189 **แก้ AC** | ไม่มี seed marker (เพิ่ง enrol หรือเพิ่งอัปเกรด) → **ห้ามออกเลขออฟไลน์** ปฏิเสธก่อนเขียน/ก่อนพิมพ์ | 4-c |
 | 8-c | #228 **แก้ AC** (ครึ่ง client) | ตาราง `outbox_ops` (`08 §7`) · **แถวธุรกิจ + แถว outbox ใน local transaction เดียว** ห้ามเรียก transactional service ของ Drift · `SyncService` single-flight ส่งทีละคำขอ ≤50 op · state machine `08 §5` · นับ `attempts` เฉพาะผลที่ไม่ใช่คำตัดสิน → 3 = `stuck` · โซ่ `aggregates` (`08 §8.4`) · `outboxRemaining` ทุกคำขอ + push ว่างเมื่อค่าเปลี่ยน (C12) · **`implements SyncFacade` แล้วสลับ `NullSyncFacade` ออกใน `repository_providers.dart`** | 3, **4-c** (payload พก `receiptNo`/`cnNo`) |
@@ -320,10 +321,12 @@ C:  1 ──► 2 ──┐
 | lane | slice → issue |
 |---|---|
 | **A** NuimanLP | 0c **#268** · 0d **#269** · 24 **#270** |
-| **B** LomerAlloys | 0a #245 · 0b **#271** · 18 **#272** · 3 **#273** · 4-c **#274** · 5 #189 · 8-c #228 · 9 **#275** · 10 #211 · 11-c **#276** · 12 #229 · 13a **#277** · 13b #212 · 14-c #194 · 20-c #193 |
-| **C** PattaraponKitcharoen | 1 **#278** · 2 **#279** · 4-s **#280** · 6 **#281** · 7 **#282** · 8-s **#283** · 11-s **#284** · 14-s **#285** · 15 #190 · 17 **#286** · 16 #230 · 19 #195 · 21 #192 · 20-s **#287** · 22 #184 · 23 **#288** · 25 **#289** |
+| **B** LomerAlloys | 0a #245 ✅ (PR #267) · **0a′ #266** 🔴 · 0b **#271** · 18 **#272** · 3 **#273** · 4-c **#274** · 5 #189 · 8-c #228 · 9 **#275** · 10 #211 · 11-c **#276** · 12 #229 · 13a **#277** · 13b #212 · 14-c #194 · 20-c #193 |
+| **C** PattaraponKitcharoen | 1 **#278** · 2 **#279** · 4-s **#280** · 6 **#281** · 7 **#282** · 8-s **#283** · 11-s **#284** · 14-s **#285** · 15 #190 · 17 **#286** · 16 #230 · 19 #195 · 21 #192 · 20-s **#287** · 22 #184 · 23 **#288** · 25 **#67** |
 
 ใบที่เป็นตัวหนา = เปิดใหม่ · ที่เหลือ = ใบเดิมที่เขียน AC ใหม่ตาม `08`/`09` แล้ว
+🔴 **slice 25 ใช้ #67** (ถูกเปิดใหม่โดยอีก session วันเดียวกัน) — #289 ที่ผมเปิดไว้ถูกปิดและย้ายเนื้อไปต่อท้าย #67 แล้ว
+🔴 **0a ปิดแล้ว แต่ 0a′ #266 เพิ่งเปิด**: คู่ asset ที่ตรงเวอร์ชันแล้วยังทำให้ web DB ไม่บูตในเบราว์เซอร์ที่ไม่มี `dedicatedWorkersInSharedWorkers` — บล็อก #273 (PWA)
 **ใบที่ถูกผ่าครึ่ง:** #228 = 8-client (ครึ่ง server = #283) · #212 = 13b (keyset server = #277) · #194 = 14-client (ครึ่ง server = #285) · #193 = 20-client (ครึ่ง server = #287)
 
 ---
