@@ -77,6 +77,10 @@ pipeline {
             echo "❌ Failed at stage: ${env.STAGE_NAME}"
         }
         always {
+            dir('server') {
+                junit testResults: 'reports/junit.xml', allowEmptyResults: true
+                publishCoverage adapters: [coberturaAdapter('coverage/cobertura-coverage.xml')]
+            }
             archiveArtifacts artifacts: 'npm-debug.log*', allowEmptyArchive: true
         }
     }

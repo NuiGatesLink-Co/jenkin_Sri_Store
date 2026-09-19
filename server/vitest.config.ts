@@ -9,5 +9,15 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['**/*.spec.ts'],
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: './reports/junit.xml',
+    },
+    coverage: {
+      enabled: true,
+      provider: 'v8',
+      reporter: ['text', 'cobertura', 'html'],
+      reportsDirectory: './coverage',
+    },
   },
 });
