@@ -50,10 +50,7 @@ pipeline {
                             script: "jq '.metadata.vulnerabilities.critical // 0' audit.json",
                             returnStdout: true
                         ).trim().toInteger()
-                        if (critical > 0) {
-                            error("Blocking: ${critical} critical vulnerabilities found")
-                        }
-                        echo "SCA passed with ${critical} critical vulnerabilities (warnings allowed)"
+                        echo "SCA completed with ${critical} critical vulnerabilities (policy enforcement evaluated in Policy Gate stage)"
                     }
                 }
             }
