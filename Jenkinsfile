@@ -43,7 +43,24 @@ pipeline {
                 }
             }
         }
-                stage('Deploy — Staging') {
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh 'sonar-scanner -Dsonar.projectKey=taskflow-api'
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: 5, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Deploy — Staging') {
             when {
                 branch 'develop'
             }
