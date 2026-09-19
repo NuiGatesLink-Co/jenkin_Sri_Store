@@ -33,6 +33,7 @@
     "k6:all": "pnpm k6:setup && pnpm k6:read && pnpm k6:write && pnpm k6:verify && pnpm k6:idem && pnpm k6:verify && pnpm k6:mixed && pnpm k6:verify"
   },
   "dependencies": {
+    "json-schema": "0.2.3",
     "@bull-board/api": "^9.8.0",
     "@bull-board/express": "^9.8.0",
     "@nestjs/bullmq": "^12.0.0",
