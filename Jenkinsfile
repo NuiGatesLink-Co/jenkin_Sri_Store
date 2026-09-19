@@ -28,6 +28,42 @@ pipeline {
             }
         }
 
+        stage('SAST — Semgrep') {
+            steps {
+                echo '=== Running SAST Analysis (Semgrep) ==='
+                sh 'semgrep scan --config=p/owasp-top-ten --config=p/nodejs --sarif --output=semgrep.sarif || true'
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'semgrep.sarif', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('SCA — npm audit') {
+            steps {
+                dir('server') {
+                    echo '=== Running SCA (npm audit) ==='
+                    script {
+                        sh 'npm audit --audit-level=high --json > audit.json || true'
+                        def critical = sh(
+                            script: "jq '.metadata.vulnerabilities.critical // 0' audit.json",
+                            returnStdout: true
+                        ).trim().toInteger()
+                        if (critical > 0) {
+                            error("Blocking: ${critical} critical vulnerabilities found")
+                        }
+                        echo "SCA passed with ${critical} critical vulnerabilities (warnings allowed)"
+                    }
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'server/audit.json', allowEmptyArchive: true
+                }
+            }
+        }
+
         stage('Install') {
             steps {
                 dir('server') {
