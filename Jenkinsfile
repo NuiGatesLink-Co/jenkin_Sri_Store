@@ -43,6 +43,29 @@ pipeline {
                 }
             }
         }
+                stage('Deploy — Staging') {
+            when {
+                branch 'develop'
+            }
+            steps {
+                echo '=== Deploying to Staging Server ==='
+                sh 'echo deploying to staging...'
+            }
+        }
+
+        stage('Deploy — Production') {
+            when {
+                branch 'main'
+            }
+            input {
+                message 'Deploy to production?'
+            }
+            steps {
+                echo '=== Deploying to Production Server ==='
+                sh 'echo deploying to production...'
+            }
+        }
+
     }
 
     post {
