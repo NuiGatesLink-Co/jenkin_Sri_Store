@@ -16,6 +16,18 @@ pipeline {
     }
 
     stages {
+        stage('Secrets Detection') {
+            steps {
+                echo '=== Running Secrets Detection (Gitleaks) ==='
+                sh 'gitleaks detect --source=. --verbose --report-path=gitleaks-report.json --exit-code 1'
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                }
+            }
+        }
+
         stage('Install') {
             steps {
                 dir('server') {
