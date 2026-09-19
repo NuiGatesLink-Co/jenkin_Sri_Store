@@ -9,6 +9,7 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['**/*.spec.ts'],
+    exclude: ['**/node_modules/**', '**/dist/**', '**/e2e/**'],
     reporters: ['default', 'junit'],
     outputFile: {
       junit: './reports/junit.xml',
