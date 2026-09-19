@@ -60,6 +60,27 @@ pipeline {
             }
         }
 
+        stage('Playwright E2E Tests') {
+            steps {
+                dir('server') {
+                    echo "=== Running Playwright E2E Tests (list, create, mark done) ==="
+                    sh 'npx -y playwright test'
+                }
+            }
+            post {
+                always {
+                    publishHTML target: [
+                        allowMissing: false,
+                        alwaysLinkToLastBuild: true,
+                        keepAll: true,
+                        reportDir: 'server/playwright-report',
+                        reportFiles: 'index.html',
+                        reportName: 'Playwright E2E Report'
+                    ]
+                }
+            }
+        }
+
         stage('Deploy — Staging') {
             when {
                 branch 'develop'
@@ -95,10 +116,10 @@ pipeline {
         }
         always {
             dir('server') {
-                junit testResults: 'reports/junit.xml', allowEmptyResults: true
+                junit testResults: 'reports/*.xml', allowEmptyResults: true
                 publishCoverage adapters: [coberturaReportAdapter('coverage/cobertura-coverage.xml')]
             }
-            archiveArtifacts artifacts: 'npm-debug.log*', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'server/playwright-report/**, npm-debug.log*', allowEmptyArchive: true
         }
     }
 }
