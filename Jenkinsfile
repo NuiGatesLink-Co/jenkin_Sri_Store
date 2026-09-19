@@ -19,7 +19,7 @@ pipeline {
         stage('Secrets Detection') {
             steps {
                 echo '=== Running Secrets Detection (Gitleaks) ==='
-                sh 'gitleaks detect --source=. --verbose --report-path=gitleaks-report.json --exit-code 1'
+                sh 'gitleaks detect --source=. --log-opts="HEAD" --verbose --report-path=gitleaks-report.json --exit-code 1'
             }
             post {
                 always {

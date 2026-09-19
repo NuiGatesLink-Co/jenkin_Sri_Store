@@ -1,0 +1,2 @@
+# Gitleaks ignore file for known public examples
+17c1c5c65074b0aff9425eeeb218ea47478cfb73:server/.env.example:private-key:18
