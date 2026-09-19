@@ -64,6 +64,50 @@ pipeline {
             }
         }
 
+        stage('Generate & Sign SBOM') {
+            steps {
+                echo '=== Generating and Signing CycloneDX SBOM ==='
+                sh '''
+                    # Generate CycloneDX SBOM for taskflow-api using Syft
+                    syft scan dir:server -o cyclonedx-json=taskflow-api.cdx.json
+
+                    # Generate local keypair if not exists
+                    if [ ! -f cosign.key ]; then
+                        COSIGN_PASSWORD="" cosign generate-key-pair
+                    fi
+
+                    # Sign the SBOM using Cosign
+                    COSIGN_PASSWORD="" cosign sign-blob --key cosign.key --output-signature taskflow-api.cdx.json.sig --tlog-upload=false taskflow-api.cdx.json
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'taskflow-api.cdx.json, taskflow-api.cdx.json.sig', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Policy Gate — OPA') {
+            steps {
+                echo '=== Evaluating Security Policy with OPA ==='
+                sh '''
+                    opa eval --data policy/security.rego --input server/audit.json "data.security.allow" --format pretty > opa-decision.txt
+                    cat opa-decision.txt
+                    if grep -q "false" opa-decision.txt; then
+                        echo "❌ Build denied by OPA security policy!"
+                        opa eval --data policy/security.rego --input server/audit.json "data.security.deny" --format pretty
+                        exit 1
+                    fi
+                    echo "✅ OPA security policy passed: Build allowed"
+                '''
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'opa-decision.txt, policy/security.rego', allowEmptyArchive: true
+                }
+            }
+        }
+
         stage('Install') {
             steps {
                 dir('server') {
