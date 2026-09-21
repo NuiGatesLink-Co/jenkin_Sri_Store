@@ -217,11 +217,7 @@ pipeline {
 
         stage('Deploy — Production (Blue/Green)') {
             when {
-                beforeInput true
                 branch 'main'
-            }
-            input {
-                message 'Deploy to production (Blue/Green)?'
             }
             steps {
                 echo '=== Running Blue/Green Deployment on Kubernetes ==='
