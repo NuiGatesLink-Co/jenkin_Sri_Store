@@ -3,7 +3,7 @@ groups:
     rules:
       - alert: JenkinsQueueBacklog
         expr: jenkins_queue_size_value > 0 and avg_over_time(jenkins_queue_size_value[5m]) > 0
-        for: 1m
+        for: 30s
         labels:
           severity: warning
         annotations:
