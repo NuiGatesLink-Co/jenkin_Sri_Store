@@ -73,10 +73,10 @@ resource "aws_iam_instance_profile" "taskflow_profile" {
 
 # Compute Instance (Lab 08 Task 1 Requirement)
 resource "aws_instance" "taskflow_server" {
-  ami                  = var.ami_id
-  instance_type        = var.instance_type
+  ami                    = var.ami_id
+  instance_type          = var.instance_type
   vpc_security_group_ids = [aws_security_group.taskflow_sg.id]
-  iam_instance_profile = aws_iam_instance_profile.taskflow_profile.name
+  iam_instance_profile   = aws_iam_instance_profile.taskflow_profile.name
 
   # Enable detailed monitoring (fixes Checkov CKV_AWS_126)
   monitoring = true
