@@ -253,6 +253,8 @@ spec:
                 echo '=== Deploying to Staging Server ==='
                 sh 'echo deploying to staging...'
             }
+        }
+
         stage('Pipeline Health Gate') {
             when {
                 branch 'main'
