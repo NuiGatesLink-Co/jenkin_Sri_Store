@@ -67,3 +67,10 @@ app.*.map.json
 /server/playwright-report/
 /server/test-results/
 jenkins_home.tgz
+
+# Terraform (Lab 08: Never commit terraform.tfstate)
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfplan
+**/.terraform.lock.hcl

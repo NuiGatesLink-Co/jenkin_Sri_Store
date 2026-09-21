@@ -1,0 +1,174 @@
+
+       _               _
+   ___| |__   ___  ___| | _______   __
+  / __| '_ \ / _ \/ __| |/ / _ \ \ / /
+ | (__| | | |  __/ (__|   < (_) \ V /
+  \___|_| |_|\___|\___|_|\_\___/ \_/
+
+By Prisma Cloud | version: 3.3.19 
+
+terraform scan results:
+
+Passed checks: 11, Failed checks: 4, Skipped checks: 0
+
+Check: CKV_AWS_25: "Ensure no security groups allow ingress from 0.0.0.0:0 to port 3389"
+	PASSED for resource: aws_security_group.taskflow_sg
+	File: /main.tf:2-33
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-networking-policies/networking-2
+Check: CKV_AWS_24: "Ensure no security groups allow ingress from 0.0.0.0:0 to port 22"
+	PASSED for resource: aws_security_group.taskflow_sg
+	File: /main.tf:2-33
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-networking-policies/networking-1-port-security
+Check: CKV_AWS_277: "Ensure no security groups allow ingress from 0.0.0.0:0 to port -1"
+	PASSED for resource: aws_security_group.taskflow_sg
+	File: /main.tf:2-33
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-networking-policies/ensure-aws-security-group-does-not-allow-all-traffic-on-all-ports
+Check: CKV_AWS_23: "Ensure every security group and rule has a description"
+	PASSED for resource: aws_security_group.taskflow_sg
+	File: /main.tf:2-33
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-networking-policies/networking-31
+Check: CKV_AWS_260: "Ensure no security groups allow ingress from 0.0.0.0:0 to port 80"
+	PASSED for resource: aws_security_group.taskflow_sg
+	File: /main.tf:2-33
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-networking-policies/ensure-aws-security-groups-do-not-allow-ingress-from-00000-to-port-80
+Check: CKV_AWS_8: "Ensure all data stored in the Launch configuration or instance Elastic Blocks Store is securely encrypted"
+	PASSED for resource: aws_instance.taskflow_server
+	File: /main.tf:36-55
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-general-policies/general-13
+Check: CKV_AWS_88: "EC2 instance should not have public IP."
+	PASSED for resource: aws_instance.taskflow_server
+	File: /main.tf:36-55
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/public-policies/public-12
+Check: CKV_AWS_46: "Ensure no hard-coded secrets exist in EC2 user data"
+	PASSED for resource: aws_instance.taskflow_server
+	File: /main.tf:36-55
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/secrets-policies/bc-aws-secrets-1
+Check: CKV_AWS_79: "Ensure Instance Metadata Service Version 1 is not enabled"
+	PASSED for resource: aws_instance.taskflow_server
+	File: /main.tf:36-55
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-general-policies/bc-aws-general-31
+Check: CKV_AWS_41: "Ensure no hard coded AWS access key and secret key exists in provider"
+	PASSED for resource: aws.default
+	File: /versions.tf:20-33
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/secrets-policies/bc-aws-secrets-5
+Check: CKV2_AWS_5: "Ensure that Security Groups are attached to another resource"
+	PASSED for resource: aws_security_group.taskflow_sg
+	File: /main.tf:2-33
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-networking-policies/ensure-that-security-groups-are-attached-to-ec2-instances-or-elastic-network-interfaces-enis
+Check: CKV_AWS_382: "Ensure no security groups allow egress from 0.0.0.0:0 to port -1"
+	FAILED for resource: aws_security_group.taskflow_sg
+	File: /main.tf:2-33
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-networking-policies/bc-aws-382
+
+		2  | resource "aws_security_group" "taskflow_sg" {
+		3  |   name        = "taskflow-api-sg-${var.environment}"
+		4  |   description = "Security group allowing HTTP 8080 for taskflow-api and SSH 22"
+		5  | 
+		6  |   ingress {
+		7  |     description = "Allow inbound traffic on port 8080 for taskflow-api"
+		8  |     from_port   = 8080
+		9  |     to_port     = 8080
+		10 |     protocol    = "tcp"
+		11 |     cidr_blocks = ["0.0.0.0/0"]
+		12 |   }
+		13 | 
+		14 |   ingress {
+		15 |     description = "Allow SSH for Ansible provisioning"
+		16 |     from_port   = 22
+		17 |     to_port     = 22
+		18 |     protocol    = "tcp"
+		19 |     cidr_blocks = ["10.0.0.0/16"]
+		20 |   }
+		21 | 
+		22 |   egress {
+		23 |     description = "Allow all outbound traffic"
+		24 |     from_port   = 0
+		25 |     to_port     = 0
+		26 |     protocol    = "-1"
+		27 |     cidr_blocks = ["0.0.0.0/0"]
+		28 |   }
+		29 | 
+		30 |   tags = {
+		31 |     Name = "taskflow-api-sg"
+		32 |   }
+		33 | }
+
+Check: CKV_AWS_126: "Ensure that detailed monitoring is enabled for EC2 instances"
+	FAILED for resource: aws_instance.taskflow_server
+	File: /main.tf:36-55
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-logging-policies/ensure-that-detailed-monitoring-is-enabled-for-ec2-instances
+
+		36 | resource "aws_instance" "taskflow_server" {
+		37 |   ami                    = var.ami_id
+		38 |   instance_type          = var.instance_type
+		39 |   vpc_security_group_ids = [aws_security_group.taskflow_sg.id]
+		40 | 
+		41 |   root_block_device {
+		42 |     volume_size = 20
+		43 |     volume_type = "gp3"
+		44 |     encrypted   = true
+		45 |   }
+		46 | 
+		47 |   metadata_options {
+		48 |     http_endpoint = "enabled"
+		49 |     http_tokens   = "required" # IMDSv2
+		50 |   }
+		51 | 
+		52 |   tags = {
+		53 |     Name = "taskflow-api-server"
+		54 |   }
+		55 | }
+
+Check: CKV_AWS_135: "Ensure that EC2 is EBS optimized"
+	FAILED for resource: aws_instance.taskflow_server
+	File: /main.tf:36-55
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-general-policies/ensure-that-ec2-is-ebs-optimized
+
+		36 | resource "aws_instance" "taskflow_server" {
+		37 |   ami                    = var.ami_id
+		38 |   instance_type          = var.instance_type
+		39 |   vpc_security_group_ids = [aws_security_group.taskflow_sg.id]
+		40 | 
+		41 |   root_block_device {
+		42 |     volume_size = 20
+		43 |     volume_type = "gp3"
+		44 |     encrypted   = true
+		45 |   }
+		46 | 
+		47 |   metadata_options {
+		48 |     http_endpoint = "enabled"
+		49 |     http_tokens   = "required" # IMDSv2
+		50 |   }
+		51 | 
+		52 |   tags = {
+		53 |     Name = "taskflow-api-server"
+		54 |   }
+		55 | }
+
+Check: CKV2_AWS_41: "Ensure an IAM role is attached to EC2 instance"
+	FAILED for resource: aws_instance.taskflow_server
+	File: /main.tf:36-55
+	Guide: https://docs.prismacloud.io/en/enterprise-edition/policy-reference/aws-policies/aws-iam-policies/ensure-an-iam-role-is-attached-to-ec2-instance
+
+		36 | resource "aws_instance" "taskflow_server" {
+		37 |   ami                    = var.ami_id
+		38 |   instance_type          = var.instance_type
+		39 |   vpc_security_group_ids = [aws_security_group.taskflow_sg.id]
+		40 | 
+		41 |   root_block_device {
+		42 |     volume_size = 20
+		43 |     volume_type = "gp3"
+		44 |     encrypted   = true
+		45 |   }
+		46 | 
+		47 |   metadata_options {
+		48 |     http_endpoint = "enabled"
+		49 |     http_tokens   = "required" # IMDSv2
+		50 |   }
+		51 | 
+		52 |   tags = {
+		53 |     Name = "taskflow-api-server"
+		54 |   }
+		55 | }
+
+

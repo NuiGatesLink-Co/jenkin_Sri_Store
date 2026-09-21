@@ -1,0 +1,43 @@
+---
+- name: Configure taskflow host with Docker and Node.js
+  hosts: all
+  become: true
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install required system packages
+      ansible.builtin.apt:
+        name:
+          - curl
+          - git
+          - ca-certificates
+        state: present
+
+    - name: Install Docker
+      ansible.builtin.apt:
+        name:
+          - docker.io
+        state: present
+
+    - name: Ensure Docker service is running and enabled
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Install Node.js (v20)
+      ansible.builtin.apt:
+        name:
+          - nodejs
+          - npm
+        state: present
+
+    - name: Pull taskflow-api image
+      ansible.builtin.command:
+        cmd: docker pull localhost:5001/taskflow-api:latest
+      register: docker_pull_result
+      changed_when: "'Downloaded newer image' in docker_pull_result.stdout"
+      failed_when: false
