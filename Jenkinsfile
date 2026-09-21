@@ -12,7 +12,7 @@ pipeline {
 
     options {
         // A hung npm install or test run must not hold the executor forever
-        timeout(time: 10, unit: 'MINUTES')
+        timeout(time: 20, unit: 'MINUTES')
     }
 
     stages {
