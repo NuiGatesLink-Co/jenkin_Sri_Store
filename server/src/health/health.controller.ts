@@ -38,6 +38,11 @@ export class HealthController {
     @Inject(REDIS_QUEUE) private readonly queue: Redis,
   ) {}
 
+  @Get()
+  health() {
+    return { status: 'up' };
+  }
+
   /** Liveness: touches nothing. A DB outage must not restart every instance. */
   @Get('live')
   live() {

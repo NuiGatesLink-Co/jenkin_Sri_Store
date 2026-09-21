@@ -170,6 +170,41 @@ pipeline {
             }
         }
 
+        stage('Build Image') {
+            steps {
+                echo '=== Building and Pushing Docker Image ==='
+                script {
+                    def commitHash = env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    def imageName = "${env.APP_NAME}:${commitHash}"
+                    def registryImage = "localhost:5001/${imageName}"
+
+                    echo "Building Docker image: ${imageName} (never latest)"
+                    sh "docker build -t ${imageName} -t ${registryImage} server/"
+
+                    echo "Pushing image to local registry: ${registryImage}"
+                    sh "docker push ${registryImage}"
+                }
+            }
+        }
+
+        stage('Container Scan — Trivy') {
+            steps {
+                echo '=== Scanning Docker Image with Trivy ==='
+                script {
+                    def commitHash = env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    def imageName = "${env.APP_NAME}:${commitHash}"
+
+                    echo "Scanning image: ${imageName} for HIGH and CRITICAL vulnerabilities"
+                    sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --format sarif --output trivy-report.sarif ${imageName}"
+                }
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'trivy-report.sarif', allowEmptyArchive: true
+                }
+            }
+        }
+
         stage('Deploy — Staging') {
             when {
                 branch 'develop'
@@ -180,17 +215,52 @@ pipeline {
             }
         }
 
-        stage('Deploy — Production') {
+        stage('Deploy — Production (Blue/Green)') {
             when {
                 beforeInput true
                 branch 'main'
             }
             input {
-                message 'Deploy to production?'
+                message 'Deploy to production (Blue/Green)?'
             }
             steps {
-                echo '=== Deploying to Production Server ==='
-                sh 'echo deploying to production...'
+                echo '=== Running Blue/Green Deployment on Kubernetes ==='
+                script {
+                    def current = sh(
+                        script: "kubectl get svc taskflow -o jsonpath='{.spec.selector.color}'",
+                        returnStdout: true
+                    ).trim()
+                    def next = current == 'blue' ? 'green' : 'blue'
+                    echo "Current active color: ${current} -> Deploying to: ${next}"
+
+                    def commitHash = env.GIT_COMMIT ? env.GIT_COMMIT.take(7) : sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+                    def nextImage = "localhost:5001/${env.APP_NAME}:${commitHash}"
+
+                    echo "Updating deployment/taskflow-${next} with image: ${nextImage}"
+                    sh "kubectl set image deployment/taskflow-${next} app=${nextImage}"
+                    sh "kubectl rollout status deployment/taskflow-${next} --timeout=120s"
+
+                    // smoke test the new pods directly, bypassing the Service
+                    echo "Smoke testing taskflow-${next} directly before switching traffic..."
+                    sh "kubectl run smoke-${BUILD_NUMBER} --rm -i --restart=Never --image=curlimages/curl -- curl -sf http://taskflow-${next}:8080/health"
+
+                    echo "Smoke test passed! Switching service traffic to ${next}"
+                    sh "kubectl patch svc taskflow -p '{\"spec\":{\"selector\":{\"color\":\"${next}\"}}}'"
+                    echo "✅ Successfully switched traffic from ${current} to ${next}"
+                }
+            }
+            post {
+                failure {
+                    script {
+                        echo "❌ Deployment/Smoke test failed! Performing automated rollback..."
+                        def activeColor = sh(
+                            script: "kubectl get svc taskflow -o jsonpath='{.spec.selector.color}'",
+                            returnStdout: true
+                        ).trim()
+                        echo "Automated rollback: Restoring/Keeping traffic on ${activeColor}"
+                        sh "kubectl patch svc taskflow -p '{\"spec\":{\"selector\":{\"color\":\"${activeColor}\"}}}'"
+                    }
+                }
             }
         }
 

@@ -104,6 +104,7 @@ export async function configureApp(
   );
   app.setGlobalPrefix('api/v1', {
     exclude: [
+      { path: 'health', method: RequestMethod.GET },
       { path: 'health/live', method: RequestMethod.GET },
       { path: 'health/ready', method: RequestMethod.GET },
     ],
