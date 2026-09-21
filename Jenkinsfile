@@ -22,6 +22,10 @@ spec:
         }
     }
 
+    parameters {
+        booleanParam(name: 'DEMO_FAIL_HEALTH_GATE', defaultValue: false, description: 'Simulate Pipeline Health Gate failure (< 90% success rate) to demonstrate deployment block')
+    }
+
     environment {
         APP_NAME = 'taskflow-api'
         NODE_ENV = 'test'
@@ -265,6 +269,9 @@ spec:
             steps {
                 echo '=== Evaluating Pipeline Health Gate via Prometheus SLO Metrics ==='
                 script {
+                    if (params.DEMO_FAIL_HEALTH_GATE == true || env.FORCE_HEALTH_GATE_FAIL == 'true') {
+                        error("❌ Pipeline Health Gate FAILED: Rolling success rate is 72.5% (< 90%). Aborting deployment to protect production stability!")
+                    }
                     def promQuery = "(count(default_jenkins_builds_last_build_result == 0) / count(default_jenkins_builds_last_build_result)) * 100"
                     def promUrl = "http://prometheus:9090/api/v1/query?query=" + URLEncoder.encode(promQuery, "UTF-8")
                     def response = sh(
